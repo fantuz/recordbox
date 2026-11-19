@@ -1,0 +1,265 @@
+name: Build and package
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: never
+  CARGO_BUILD_JOBS: 3
+  RUST_BACKTRACE: 1
+
+jobs:
+  tests:
+    name: Tests and lint report
+    runs-on: ubuntu-22.04
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.12'
+      - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc
+        with:
+          toolchain: 1.100.0
+          components: rustfmt, clippy
+      - name: Native dependencies
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev libssl-dev pkg-config
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          workspaces: app -> target
+          shared-key: linux-tests-1.100.0
+      - name: Tooling tests
+        run: python -m unittest discover -s packaging -p 'test_*.py' -v
+      - name: No new application test failures
+        run: python packaging/run_tests.py --output reports
+      - name: Formatting report (existing formatting debt is advisory)
+        shell: bash
+        run: |
+          mkdir -p reports
+          set +e
+          cargo fmt --manifest-path app/Cargo.toml --all -- --check > reports/rustfmt.txt 2>&1
+          status=$?
+          set -e
+          if [ "$status" -gt 1 ]; then cat reports/rustfmt.txt; exit "$status"; fi
+          echo "### Formatting report" >> "$GITHUB_STEP_SUMMARY"
+          echo "rustfmt exit status: $status. See rustfmt.txt; formatting debt is not a passing formatting check." >> "$GITHUB_STEP_SUMMARY"
+      - name: Clippy (warnings reported; compile errors fail)
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo clippy --manifest-path app/Cargo.toml --locked --all-targets 2>&1 | tee reports/clippy.txt
+          echo '### Clippy' >> "$GITHUB_STEP_SUMMARY"
+          echo 'Completed without compilation errors. Existing warnings are retained in clippy.txt; warnings are not denied yet.' >> "$GITHUB_STEP_SUMMARY"
+      - name: Preserve reports
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: checks-${{ github.sha }}
+          path: reports/
+          if-no-files-found: error
+          retention-days: 14
+
+  audit:
+    name: No new dependency advisories
+    runs-on: ubuntu-22.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.12'
+      - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc
+        with:
+          toolchain: 1.100.0
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          workspaces: app -> target
+          shared-key: cargo-audit-0.23.0
+          cache-on-failure: true
+      - name: Install pinned cargo-audit
+        run: cargo install --locked cargo-audit --version 0.23.0
+      - name: Audit and compare the explicit baseline
+        shell: bash
+        run: |
+          mkdir -p reports
+          set +e
+          (cd app && cargo audit --json) > reports/cargo-audit.json 2> reports/cargo-audit.stderr
+          status=$?
+          set -e
+          echo "$status" > reports/cargo-audit.exit-code
+          python packaging/check_advisories.py --audit reports/cargo-audit.json --audit-exit-code "$status" --report reports/advisories.md
+      - name: Publish the full advisory report
+        if: always()
+        shell: bash
+        run: |
+          if [ -f reports/advisories.md ]; then cat reports/advisories.md >> "$GITHUB_STEP_SUMMARY"; fi
+      - name: Preserve raw audit evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: audit-${{ github.sha }}
+          path: reports/
+          if-no-files-found: error
+          retention-days: 14
+
+  packages:
+    name: Package (${{ matrix.platform }}-${{ matrix.arch }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {os: macos-15, platform: macos, arch: arm64, binary: recordbox}
+          - {os: macos-15-intel, platform: macos, arch: x86_64, binary: recordbox}
+          - {os: windows-2022, platform: windows, arch: x86_64, binary: recordbox.exe}
+          - {os: ubuntu-22.04, platform: linux, arch: x86_64, binary: recordbox}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    env:
+      VCPKG_COMMIT: 9eec002df1cd109f8f104cd966a763daf9751489
+      VCPKG_DISABLE_METRICS: '1'
+      VCPKG_BINARY_SOURCES: clear
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.12'
+      - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc
+        with:
+          toolchain: 1.100.0
+      - name: Linux build and graphical test dependencies
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev libssl-dev pkg-config xvfb libgl1-mesa-dri libegl1 libxkbcommon-x11-0
+      - name: Fetch pinned Windows OpenSSL build tooling
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $vcpkg = Join-Path $env:RUNNER_TEMP 'recordbox-vcpkg'
+          git init $vcpkg
+          git -C $vcpkg remote add origin https://github.com/microsoft/vcpkg.git
+          git -C $vcpkg fetch --depth 1 origin $env:VCPKG_COMMIT
+          if ($LASTEXITCODE -ne 0) { throw 'vcpkg fetch failed' }
+          git -C $vcpkg checkout --detach FETCH_HEAD
+          if ($LASTEXITCODE -ne 0) { throw 'vcpkg checkout failed' }
+          "RECORDBOX_VCPKG=$vcpkg" >> $env:GITHUB_ENV
+      - name: Cache the pinned Windows OpenSSL installation
+        if: runner.os == 'Windows'
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            ${{ runner.temp }}/recordbox-vcpkg/installed
+            ${{ runner.temp }}/recordbox-vcpkg/downloads
+          key: vcpkg-windows-2022-x64-windows-${{ env.VCPKG_COMMIT }}
+      - name: Build Windows OpenSSL and locate native tools
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          & "$env:RECORDBOX_VCPKG/bootstrap-vcpkg.bat" -disableMetrics
+          if ($LASTEXITCODE -ne 0) { throw 'vcpkg bootstrap failed' }
+          & "$env:RECORDBOX_VCPKG/vcpkg.exe" install openssl:x64-windows --disable-metrics
+          if ($LASTEXITCODE -ne 0) { throw 'OpenSSL build failed' }
+          "OPENSSL_LIB_DIR=$env:RECORDBOX_VCPKG/installed/x64-windows/lib" >> $env:GITHUB_ENV
+          "OPENSSL_INCLUDE_DIR=$env:RECORDBOX_VCPKG/installed/x64-windows/include" >> $env:GITHUB_ENV
+          $vswhere = "${env:ProgramFiles(x86)}/Microsoft Visual Studio/Installer/vswhere.exe"
+          $vs = & $vswhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          if (-not $vs) { throw 'Visual C++ tools are missing' }
+          $tools = (Get-Content "$vs/VC/Auxiliary/Build/Microsoft.VCToolsVersion.default.txt").Trim()
+          "$vs/VC/Tools/MSVC/$tools/bin/Hostx64/x64" >> $env:GITHUB_PATH
+          $redist = (Get-Content "$vs/VC/Auxiliary/Build/Microsoft.VCRedistVersion.default.txt").Trim()
+          $crt = "$vs/VC/Redist/MSVC/$redist/x64/Microsoft.VC143.CRT"
+          if (-not (Test-Path $crt)) { throw "Missing official VC runtime: $crt" }
+          "RECORDBOX_VC_CRT=$crt" >> $env:GITHUB_ENV
+          "$env:RECORDBOX_VCPKG/installed/x64-windows/bin" >> $env:GITHUB_PATH
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          workspaces: app -> target
+          shared-key: package-${{ matrix.os }}-${{ matrix.arch }}-1.100.0
+      - name: Compile the release executable
+        run: cargo build --manifest-path app/Cargo.toml --release --locked
+      - name: Backup security regression tests
+        run: cargo test --manifest-path app/Cargo.toml --release --locked backup::tests -- --test-threads=1
+      - name: Create macOS app bundle
+        if: runner.os == 'macOS'
+        run: python packaging/build_archive.py --binary app/target/release/recordbox --platform macos --arch ${{ matrix.arch }} --source-commit ${{ github.sha }} --output dist
+      - name: Create Linux archive
+        if: runner.os == 'Linux'
+        run: >-
+          python packaging/build_archive.py --binary app/target/release/recordbox
+          --platform linux --arch x86_64 --source-commit ${{ github.sha }} --output dist
+          --runtime-notice /usr/share/doc/libssl3/copyright
+          --runtime-notice /usr/share/doc/libasound2/copyright
+      - name: Create Windows portable ZIP
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: >-
+          python packaging/build_archive.py --binary app/target/release/recordbox.exe
+          --platform windows --arch x86_64 --source-commit ${{ github.sha }} --output dist
+          --runtime-dir "$env:RECORDBOX_VCPKG/installed/x64-windows/bin"
+          --runtime-dir "$env:RECORDBOX_VC_CRT"
+          --runtime-notice "$env:RECORDBOX_VCPKG/installed/x64-windows/share/openssl/copyright"
+      - name: Smoke-test the extracted macOS or Windows archive
+        if: runner.os != 'Linux'
+        shell: bash
+        run: |
+          archives=(dist/*.zip)
+          test "${#archives[@]}" -eq 1
+          python packaging/smoke_app.py --archive "${archives[0]}" --output smoke --timeout 240
+      - name: Smoke-test the extracted Linux archive
+        if: runner.os == 'Linux'
+        shell: bash
+        env:
+          LIBGL_ALWAYS_SOFTWARE: '1'
+        run: |
+          archives=(dist/*.tar.gz)
+          test "${#archives[@]}" -eq 1
+          xvfb-run -a -s '-screen 0 1280x960x24' python packaging/smoke_app.py --archive "${archives[0]}" --output smoke --timeout 240
+      - name: Upload archives and checksums
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: recordbox-${{ matrix.platform }}-${{ matrix.arch }}-${{ github.sha }}
+          path: |
+            dist/*.zip
+            dist/*.tar.gz
+            dist/*.sha256
+          if-no-files-found: error
+          retention-days: 14
+      - name: Preserve smoke evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: smoke-${{ matrix.platform }}-${{ matrix.arch }}-${{ github.sha }}
+          path: |
+            smoke/*.png
+            smoke/*.log
+            smoke/*.json
+          if-no-files-found: warn
+          retention-days: 14
+
+  required:
+    name: Build and security checks
+    if: always()
+    needs: [tests, audit, packages]
+    runs-on: ubuntu-22.04
+    timeout-minutes: 5
+    steps:
+      - name: Require every job
+        env:
+          TESTS: ${{ needs.tests.result }}
+          AUDIT: ${{ needs.audit.result }}
+          PACKAGES: ${{ needs.packages.result }}
+        run: test "$TESTS" = success && test "$AUDIT" = success && test "$PACKAGES" = success

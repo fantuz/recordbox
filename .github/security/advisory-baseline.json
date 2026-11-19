@@ -1,0 +1,26 @@
+{
+  "schema_version": 1,
+  "findings": [
+    {
+      "advisory_id": "RUSTSEC-2026-0459",
+      "package": "libsqlite3-sys",
+      "version": "0.38.2",
+      "source": "registry+https://github.com/rust-lang/crates.io-index",
+      "reason": "Existing before build automation: the bundled SQLCipher dependency needs a separate SQLite/WAL compatibility and remediation review. This finding remains unresolved."
+    },
+    {
+      "advisory_id": "RUSTSEC-2026-0194",
+      "package": "quick-xml",
+      "version": "0.30.0",
+      "source": "registry+https://github.com/rust-lang/crates.io-index",
+      "reason": "Existing transitive XML parser dependency before build automation; upgrading the parent dependency is separate work. This finding remains unresolved."
+    },
+    {
+      "advisory_id": "RUSTSEC-2026-0195",
+      "package": "quick-xml",
+      "version": "0.30.0",
+      "source": "registry+https://github.com/rust-lang/crates.io-index",
+      "reason": "Existing transitive XML parser dependency before build automation; upgrading the parent dependency is separate work. This finding remains unresolved."
+    }
+  ]
+}

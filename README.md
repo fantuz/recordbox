@@ -47,6 +47,14 @@ cargo run --release
 
 This is a work in progress: it may not build at every moment while the agent is mid-change.
 
+The **Build and package** GitHub Actions workflow also produces unsigned macOS
+app ZIPs (Apple Silicon and Intel), an experimental Windows x64 portable ZIP and
+an experimental Linux x64 archive. Download the artifact for your platform from
+a successful workflow run; each archive includes a source revision, runtime
+manifest and checksum. See [build checks and packaging](docs/BUILD-AND-PACKAGING.md)
+for installation, system requirements, current platform limitations and the
+checks maintainers can enable. These are development artifacts, not signed releases.
+
 ## The brief
 
 This is the request the agent is building from, word for word:

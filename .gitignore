@@ -1,3 +1,7 @@
 target/
 .DS_Store
 *.log
+__pycache__/
+dist/
+smoke/
+reports/
