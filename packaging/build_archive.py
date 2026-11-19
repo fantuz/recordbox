@@ -250,6 +250,7 @@ def build_archive(binary: Path, source_root: Path, output: Path, platform: str, 
             write_file(bundle / ("lib" if platform == "linux" else "") / name, path.read_bytes(), 0o644)
         write_file(resources / "LICENSE.txt", (source_root / "LICENSE").read_bytes())
         write_file(resources / "Inter-NOTICE.txt", (source_root / "app/assets/fonts/README.txt").read_bytes())
+        write_file(resources / "Inter-OFL.txt", (source_root / "packaging/Inter-OFL.txt").read_bytes())
         for index, notice in enumerate(runtime_notices or [], 1):
             if not notice.is_file() or not re.fullmatch(r"[A-Za-z0-9_.+-]+", notice.name):
                 raise PackageError(f"Invalid runtime notice: {notice}")

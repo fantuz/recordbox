@@ -144,7 +144,10 @@ jobs:
           toolchain: 1.100.0
       - name: Linux build and graphical test dependencies
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y libasound2-dev libssl-dev pkg-config xvfb libgl1-mesa-dri libegl1 libxkbcommon-x11-0
+        run: >-
+          sudo apt-get update && sudo apt-get install -y libasound2-dev libssl-dev
+          pkg-config xvfb xauth libgl1 libgl1-mesa-dri libegl1 libx11-6
+          libx11-xcb1 libxcursor1 libxi6 libxkbcommon-x11-0
       - name: Fetch pinned Windows OpenSSL build tooling
         if: runner.os == 'Windows'
         shell: pwsh
@@ -179,16 +182,22 @@ jobs:
           $vs = & $vswhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
           if (-not $vs) { throw 'Visual C++ tools are missing' }
           $tools = (Get-Content "$vs/VC/Auxiliary/Build/Microsoft.VCToolsVersion.default.txt").Trim()
-          "$vs/VC/Tools/MSVC/$tools/bin/Hostx64/x64" >> $env:GITHUB_PATH
+          $toolsBin = "$vs/VC/Tools/MSVC/$tools/bin/Hostx64/x64"
+          if (-not (Test-Path "$toolsBin/dumpbin.exe")) { throw 'dumpbin is missing' }
+          "$toolsBin" >> $env:GITHUB_PATH
           $redist = (Get-Content "$vs/VC/Auxiliary/Build/Microsoft.VCRedistVersion.default.txt").Trim()
           $crt = "$vs/VC/Redist/MSVC/$redist/x64/Microsoft.VC143.CRT"
           if (-not (Test-Path $crt)) { throw "Missing official VC runtime: $crt" }
+          if (-not (Test-Path "$env:RECORDBOX_VCPKG/installed/x64-windows/lib/libcrypto.lib")) { throw 'OpenSSL import library is missing' }
+          if (-not (Test-Path "$env:RECORDBOX_VCPKG/installed/x64-windows/include/openssl")) { throw 'OpenSSL headers are missing' }
           "RECORDBOX_VC_CRT=$crt" >> $env:GITHUB_ENV
           "$env:RECORDBOX_VCPKG/installed/x64-windows/bin" >> $env:GITHUB_PATH
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           workspaces: app -> target
           shared-key: package-${{ matrix.os }}-${{ matrix.arch }}-1.100.0
+          env-vars: 'VCPKG_COMMIT OPENSSL_'
+          cache-on-failure: true
       - name: Compile the release executable
         run: cargo build --manifest-path app/Cargo.toml --release --locked
       - name: Backup security regression tests

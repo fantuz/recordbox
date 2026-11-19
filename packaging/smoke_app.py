@@ -77,13 +77,23 @@ def png_dimensions(path: Path) -> tuple[int, int]:
     raise PackageError("Smoke PNG is incomplete")
 
 
+def windows_dll_preflight(bundle: Path, names: list[str], environment: dict, output: Path) -> None:
+    # DLLs loaded by ctypes remain process-loaded on Windows. Use a child so
+    # its exit releases file locks before the temporary bundle is removed.
+    check = "import ctypes,os,sys\nwith os.add_dll_directory(sys.argv[1]):\n for path in sys.argv[2:]: ctypes.WinDLL(path)\n"
+    with (output / "dll-preflight.log").open("wb") as log:
+        result = subprocess.run([sys.executable, "-c", check, str(bundle), *(str(bundle / name) for name in names)],
+                                env=environment, stdout=log, stderr=subprocess.STDOUT, timeout=30, check=False)
+    if result.returncode: raise PackageError("Bundled DLL loading failed; inspect dll-preflight.log")
+
+
 def smoke(archive: Path, output: Path, timeout: int) -> dict:
     output.mkdir(parents=True, exist_ok=True)
     report = {"archive": archive.name, "archive_sha256": sha256(archive), "status": "failed", "synthetic_data_only": True}
     started = time.monotonic()
     try:
         with tempfile.TemporaryDirectory(prefix="recordbox-smoke-") as temporary:
-            root = Path(temporary); bundle = extract_archive(archive, root / "unpacked")
+            root = Path(temporary); bundle = extract_archive(archive, root / "unpacked application")
             manifests = list(bundle.rglob("runtime-manifest.json"))
             if len(manifests) != 1: raise PackageError("Expected one runtime manifest")
             manifest = json.loads(manifests[0].read_text(encoding="utf-8"))
@@ -105,12 +115,9 @@ def smoke(archive: Path, output: Path, timeout: int) -> dict:
             for key in ("LD_LIBRARY_PATH", "DYLD_LIBRARY_PATH", "DYLD_FALLBACK_LIBRARY_PATH"):
                 environment.pop(key, None)
             if expected_platform == "windows":
-                system_root = Path(environment["SystemRoot"])
+                system_root = Path(os.environ["SystemRoot"])
                 environment["PATH"] = os.pathsep.join(map(str, (system_root / "System32", system_root)))
-                import ctypes
-                with os.add_dll_directory(str(bundle)):
-                    for name in manifest["runtime"]["bundled_libraries"]:
-                        ctypes.WinDLL(str(bundle / name))
+                windows_dll_preflight(bundle, manifest["runtime"]["bundled_libraries"], environment, output)
                 report["bundled_dll_load_preflight"] = "passed"
             environment["PREPDECK_DATA"] = str(root / "synthetic-data")
             with (output / "application.log").open("wb") as log:
