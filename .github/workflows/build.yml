@@ -24,10 +24,10 @@ jobs:
     runs-on: ubuntu-22.04
     timeout-minutes: 35
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: '3.12'
       - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc
@@ -64,7 +64,7 @@ jobs:
           echo 'Completed without compilation errors. Existing warnings are retained in clippy.txt; warnings are not denied yet.' >> "$GITHUB_STEP_SUMMARY"
       - name: Preserve reports
         if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: checks-${{ github.sha }}
           path: reports/
@@ -76,10 +76,10 @@ jobs:
     runs-on: ubuntu-22.04
     timeout-minutes: 25
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: '3.12'
       - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc
@@ -109,7 +109,7 @@ jobs:
           if [ -f reports/advisories.md ]; then cat reports/advisories.md >> "$GITHUB_STEP_SUMMARY"; fi
       - name: Preserve raw audit evidence
         if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: audit-${{ github.sha }}
           path: reports/
@@ -133,10 +133,10 @@ jobs:
       VCPKG_DISABLE_METRICS: '1'
       VCPKG_BINARY_SOURCES: clear
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: '3.12'
       - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc
@@ -163,7 +163,7 @@ jobs:
       - name: Cache the pinned Windows OpenSSL installation
         if: runner.os == 'Windows'
         id: windows-openssl-cache
-        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ${{ runner.temp }}/recordbox-vcpkg/installed
@@ -195,7 +195,7 @@ jobs:
           "$env:RECORDBOX_VCPKG/installed/x64-windows/bin" >> $env:GITHUB_PATH
       - name: Save OpenSSL independently of later Rust or GUI failures
         if: runner.os == 'Windows' && steps.windows-openssl-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ${{ runner.temp }}/recordbox-vcpkg/installed
@@ -247,7 +247,7 @@ jobs:
           test "${#archives[@]}" -eq 1
           xvfb-run -a -s '-screen 0 1280x960x24' python packaging/smoke_app.py --archive "${archives[0]}" --output smoke --timeout 240
       - name: Upload archives and checksums
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: recordbox-${{ matrix.platform }}-${{ matrix.arch }}-${{ github.sha }}
           path: |
@@ -258,7 +258,7 @@ jobs:
           retention-days: 14
       - name: Preserve smoke evidence
         if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: smoke-${{ matrix.platform }}-${{ matrix.arch }}-${{ github.sha }}
           path: |
