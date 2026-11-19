@@ -1,0 +1,59 @@
+name: Verify dependency patch on macOS (fork only)
+
+on:
+  push:
+    branches: [ci/validate-dependency-security]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: recordbox-native-security-validation
+  cancel-in-progress: true
+
+jobs:
+  macos:
+    name: Native macOS backup and Metal validation
+    runs-on: macos-15
+    timeout-minutes: 45
+    env:
+      CARGO_BUILD_JOBS: '3'
+      SECURITY_PATCH_COMMIT: eb0d519d09c135d3bf19d78d3c5a3b69bcb1fa9d
+    defaults:
+      run:
+        working-directory: app
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 2
+          persist-credentials: false
+      - name: Verify the application matches the four-file security commit
+        run: git diff --exit-code "$SECURITY_PATCH_COMMIT" HEAD -- .
+      - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca
+        with:
+          toolchain: 1.100.0
+      - uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5
+        with:
+          workspaces: app -> target
+      - name: Compile the native app and exercise backup validation
+        run: cargo test --locked backup::tests -- --nocapture --test-threads=1
+      - name: Record Metal device availability
+        run: |
+          swift -e 'import Metal; if let device = MTLCreateSystemDefaultDevice() { print("METAL_DEVICE_AVAILABLE=" + device.name) } else { print("METAL_DEVICE_UNAVAILABLE") }' > "$RUNNER_TEMP/recordbox-metal-device.txt"
+          cat "$RUNNER_TEMP/recordbox-metal-device.txt"
+      - name: Exercise existing Metal parity test when hardware is available
+        run: |
+          cargo test --locked metal_kernels_match_reference_graph -- --nocapture --test-threads=1 2>&1 | tee "$RUNNER_TEMP/recordbox-metal-parity.txt"
+          python3 - <<'PY'
+          import os
+          from pathlib import Path
+          root = Path(os.environ['RUNNER_TEMP'])
+          device = (root / 'recordbox-metal-device.txt').read_text()
+          parity = (root / 'recordbox-metal-parity.txt').read_text()
+          if 'METAL_DEVICE_AVAILABLE=' in device:
+              assert all(source + ': fused kernels vs reference' in parity for source in ('drums', 'bass', 'other', 'vocals')), 'Metal device exists but the reference comparison did not execute'
+              print('Metal reference comparison executed for all four sources.')
+          else:
+              print('Native Metal code compiled; no GPU parity claim because this runner has no Metal device.')
+          PY
