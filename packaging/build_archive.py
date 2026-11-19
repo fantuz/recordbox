@@ -106,9 +106,9 @@ WINDOWS_SYSTEM_DLLS = set("""
 advapi32 avrt bcrypt bcryptprimitives cfgmgr32 combase comctl32 comdlg32 crypt32
 cryptbase d2d1 d3d11 d3d12 d3dcompiler_47 dbghelp dcomp dnsapi dsound dwmapi dwrite
 dxcore dxgi gdi32 gdi32full hid imm32 iphlpapi kernel32 kernelbase mf mfplat mfreadwrite
-mfuuid mmdevapi msimg32 msvcrt ncrypt netapi32 ntdll ole32 oleaut32 opengl32 powrprof
+mfuuid mmdevapi msimg32 msvcrt ncrypt netapi32 ntdll ole32 oleacc oleaut32 opengl32 powrprof
 propsys psapi rpcrt4 sechost secur32 setupapi shell32 shcore shlwapi synchronization
-ucrtbase user32 userenv uxtheme version winhttp wininet winmm winspool wintrust
+ucrtbase uiautomationcore user32 userenv uxtheme version winhttp wininet winmm winspool wintrust
 wldap32 ws2_32 wtsapi32
 """.split())
 

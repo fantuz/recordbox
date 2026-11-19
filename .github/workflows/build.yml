@@ -162,7 +162,8 @@ jobs:
           "RECORDBOX_VCPKG=$vcpkg" >> $env:GITHUB_ENV
       - name: Cache the pinned Windows OpenSSL installation
         if: runner.os == 'Windows'
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        id: windows-openssl-cache
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: |
             ${{ runner.temp }}/recordbox-vcpkg/installed
@@ -192,11 +193,19 @@ jobs:
           if (-not (Test-Path "$env:RECORDBOX_VCPKG/installed/x64-windows/include/openssl")) { throw 'OpenSSL headers are missing' }
           "RECORDBOX_VC_CRT=$crt" >> $env:GITHUB_ENV
           "$env:RECORDBOX_VCPKG/installed/x64-windows/bin" >> $env:GITHUB_PATH
+      - name: Save OpenSSL independently of later Rust or GUI failures
+        if: runner.os == 'Windows' && steps.windows-openssl-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            ${{ runner.temp }}/recordbox-vcpkg/installed
+            ${{ runner.temp }}/recordbox-vcpkg/downloads
+          key: vcpkg-windows-2022-x64-windows-${{ env.VCPKG_COMMIT }}
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           workspaces: app -> target
           shared-key: package-${{ matrix.os }}-${{ matrix.arch }}-1.100.0
-          env-vars: 'VCPKG_COMMIT OPENSSL_'
+          env-vars: ${{ runner.os == 'Windows' && 'VCPKG_COMMIT OPENSSL_' || '' }}
           cache-on-failure: true
       - name: Compile the release executable
         run: cargo build --manifest-path app/Cargo.toml --release --locked

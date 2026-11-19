@@ -92,7 +92,7 @@ def smoke(archive: Path, output: Path, timeout: int) -> dict:
     report = {"archive": archive.name, "archive_sha256": sha256(archive), "status": "failed", "synthetic_data_only": True}
     started = time.monotonic()
     try:
-        with tempfile.TemporaryDirectory(prefix="recordbox-smoke-") as temporary:
+        with tempfile.TemporaryDirectory(prefix="recordbox smoke ") as temporary:
             root = Path(temporary); bundle = extract_archive(archive, root / "unpacked application")
             manifests = list(bundle.rglob("runtime-manifest.json"))
             if len(manifests) != 1: raise PackageError("Expected one runtime manifest")
