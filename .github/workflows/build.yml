@@ -324,6 +324,16 @@ jobs:
             export::usb_fix_test::a1_aligned_rows_paginate_at_row_group_boundaries_without_overlap; do
             cargo test --manifest-path app/Cargo.toml --release --locked "$test_filter" -- --test-threads=1
           done
+      - name: Check changing-tempo grids, controller mappings and effect preparation
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          for test_filter in opus_quad analysis::rb_hp::tempo::tests:: analysis::rb_hp::focus2::tests:: \
+            analysis::rb_hp::model_grid_tests:: fx_echo_plus::tests:: fx::tests::prepared_rack \
+            fx::tests::first_use_allocation; do
+            cargo test --manifest-path app/Cargo.toml --release --locked --bin recordbox "$test_filter" -- --test-threads=1 | tee "$RUNNER_TEMP/integration-tests.log"
+            grep -Eq '^test result: ok\. [1-9][0-9]* passed;' "$RUNNER_TEMP/integration-tests.log"
+          done
       - name: Check audio rendering and stem export on the native package target
         shell: bash
         run: |

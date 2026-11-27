@@ -15,7 +15,9 @@ Eight upstream snapshots followed the November 27 comparison at `26a4cca`. This 
 | `3eae535` | Export vocals and instrumentals to standalone files, add the results to the collection and optionally to the source playlist. Extend contrast coverage across the browser and dialogs. |
 | `ae3d557` | Extend the optional model to changing-tempo tracks. Run the downbeat network in sections, repair the joins and estimate local tempo. The fork limits the model’s working memory and falls back to the selected ordinary Dynamic estimator when a section cannot be resolved. |
 
-The MIDI window gains the new palette. Controller message coverage, physical MIDI validation, USB catalog formats and desktop-library write-back protocols are outside the changes in these eight snapshots.
+The MIDI window gains the new palette. The controller protocol change in this integration comes from a separate fork contribution. The experimental OPUS-QUAD profile maps the manufacturer's published messages through the same input, feedback and map-restoration paths as the XDJ-RX3 trial. A physical OPUS-QUAD is still needed to check jog calibration, lamps and audio routing. Its standalone player reads OneLibrary. [OPUS-QUAD setup and hardware checks](studies/OPUS-QUAD.md) · [USB compatibility](USB-COMPATIBILITY.md)
+
+On Linux/X11, the native detached library showed both sync directions and their source and destination paths in Light appearance. Choosing a vocal export in the child brought the main window forward for confirmation. The Light EXPORT and PERFORMANCE headers measured 18.43:1 text contrast on the rendered fixture. [Desktop sync and write-back](LIBRARY-SYNC.md)
 
 ### What the precision checks establish
 
@@ -23,11 +25,28 @@ With generated 44.1 kHz audio, the ported tempo classifier reported 124.00 BPM a
 
 The ordinary compatible estimator returned identical BPM and grid anchors on the fork baseline, upstream and the integration for the three synthetic tracks under **Preparing tracks** below. The median timing errors were 0.25–0.29 ms. Those fixtures test steady tempo.
 
+A separate test compared 88 generated beat sequences at 44.1 and 48 kHz with upstream’s window-join repair. Timestamps and beat numbers matched on all 88. A generated 118–126 BPM ramp returned the same 240 beat positions and 122.00014 BPM at the dynamic focus stage. These tests begin with beat candidates and measure the stages downstream of the neural network.
+
 The fork shares intermediate analysis data within the current track. Each track owns that data, which avoids reusing a prior song’s results when a worker receives a buffer at the same address. The grid keeps timestamp changes below one millisecond for formats that can store them. A synthetic 48 kHz test retains beat positions at 100000, 600020, 1100833 and 1600416 microseconds and checks their bar numbers. This measures how accurately the fork stores detected beats. Assessing musical accuracy across recordings requires reference grids and, for the full optional model, locally installed weights.
 
 ### Effect selection and playback cost
 
-At 48 kHz, one selection of a preallocated single-mode BPF Echo cleared 68,464,000 bytes of delay buffers in the upstream implementation. The fork marks the old samples unreadable and reuses the allocated buffers. On one Linux Xeon core, selecting the effect took a median 2.744 ms upstream and 0.345 µs with this change. Ten batches of twenty selections were timed for each implementation after warm-up. Forward and reverse output matched sample for sample after a reset, including silence between the old and new input. This measurement isolates selection. Audio-driver latency, the rest of the callback and a physical controller were outside the test.
+At 48 kHz, one selection of a preallocated single-mode BPF Echo cleared 68,464,000 bytes of delay buffers in the upstream implementation. The fork marks the old samples unreadable and reuses the allocated buffers. On one Linux Xeon core, selecting the effect took a median 2.744 ms upstream and 0.345 µs with this change. Ten batches of twenty selections were timed for each implementation after warm-up. Forward and reverse output matched sample for sample after a reset, including silence between the old and new input. The port keeps effect-specific kernels in their own modules. Control-thread preparation and the audio callback share an explicit set of prepared buffers. An optional external coefficient table requires an explicitly supplied compatible local file. Portable coefficients are the default.
+
+The processing cost while an effect is playing also changed. These are mean microseconds to process 512 stereo frames at 48 kHz on one pinned Linux Xeon core, averaged over two runs for each revision in alternating order. The comparison is with the fork immediately before this integration.
+
+| Active effect or combination | Previous fork (µs) | This integration (µs) |
+| --- | ---: | ---: |
+| MT DELAY | 82.7 | 25.1 |
+| BPF ECHO | 71.8 | 27.1 |
+| LPF ECHO | 74.6 | 28.0 |
+| SPIRAL | 36.6 | 26.0 |
+| REVERB | 20.1 | 47.4 |
+| FLANGER | 11.5 | 38.0 |
+| STRETCH | 50.8 | 108.1 |
+| REVERB + PHASER + UP ECHO | 70.5 | 122.3 |
+
+The three-effect combination used about 1.15% of a 10,667 µs block interval on that machine. Real audio deadlines also include other decks, mixing, drivers and scheduling. In a separate single-worker test, default analysis of four 30-second inputs took 1.498 s on the previous fork and 1.485 s on this revision. The small difference gives little reason to expect a change in everyday analysis throughput. Neither test ran on Vega.
 
 ### Exporting vocals and instrumentals
 
