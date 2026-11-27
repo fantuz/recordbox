@@ -14,6 +14,7 @@
 //! read from the installed rekordbox at run time (`factory_dir`).
 
 use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
 
 /// The `Type` column. Unknown or empty text is a Button, as in rekordbox.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
@@ -303,7 +304,7 @@ impl CsvFile {
             let mut row = None;
             if line.starts_with('#') {
                 // A comment (a commented-out row too).
-            } else if line.len() >= 5 && line[..5].eq_ignore_ascii_case("@file") {
+            } else if line.split(',').next().is_some_and(|field| field.eq_ignore_ascii_case("@file")) {
                 let f: Vec<&str> = line.split(',').collect();
                 if f.get(1).map(|v| v.trim()) != Some("1") {
                     return Err(CsvError::NotSupported);
@@ -424,7 +425,7 @@ pub fn save_delta(device: &str, inputs: &[Entry], outputs: &[Entry]) -> String {
         }
     }
     lines.sort_by(|a, b| a.0.cmp(&b.0));
-    let mut out = format!("@file,1,{device}\r\n");
+    let mut out = empty_user_file(device);
     for (_, i, o) in lines {
         let lead = i.as_ref().and_then(first).or_else(|| o.as_ref().and_then(first));
         let Some(lead) = lead else { continue };
@@ -444,50 +445,249 @@ pub fn save_delta(device: &str, inputs: &[Entry], outputs: &[Entry]) -> String {
     out
 }
 
-/// A user file as rekordbox makes it the first time a device is seen: the header only.
-pub fn empty_user_file(device: &str) -> String {
-    format!("@file,1,{device}\r\n")
+/// CSV headers have no quoting convention for commas or line breaks.
+fn header_name(device: &str) -> String {
+    device.trim().chars().map(|c| if c == ',' || c.is_control() { '_' } else { c }).collect()
 }
 
-/// rekordbox's export file name: the device name with `\ / : * ? " < > |` replaced by `_`,
-/// and `.csv`.
-fn device_filename(device: &str) -> String {
+pub fn empty_user_file(device: &str) -> String {
+    format!("@file,1,{}\r\n", header_name(device))
+}
+
+pub fn legacy_stem(device: &str) -> String {
     device.chars().map(|c| if c.is_control() || "\\/:*?\"<>|".contains(c) { '_' } else { c }).collect()
 }
 
+fn file_stem(device: &str) -> String {
+    let cleaned = legacy_stem(device);
+    let trimmed = cleaned.trim().trim_end_matches(['.', ' ']);
+    let base = trimmed.split('.').next().unwrap_or_default().to_ascii_uppercase();
+    let reserved = matches!(base.as_str(), "CON" | "PRN" | "AUX" | "NUL" | "CONIN$" | "CONOUT$") ||
+        base.strip_prefix("COM").or_else(|| base.strip_prefix("LPT")).is_some_and(|s| matches!(s, "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" | "¹" | "²" | "³"));
+    let mut stem = if trimmed.is_empty() { "_".into() } else if reserved { format!("_{trimmed}") } else { trimmed.to_owned() };
+    // Leave room for a collision suffix and the extension even on a 255-byte filesystem.
+    if stem.len() > 180 { stem.truncate(stem.floor_char_boundary(180)); }
+    stem
+}
+
 pub fn export_name(device: &str) -> String {
-    format!("{}.csv", device_filename(device))
+    format!("{}.csv", file_stem(device))
 }
 
 pub fn mapping_name(device: &str) -> String {
-    format!("{}.midi.csv", device_filename(device))
+    format!("{}.midi.csv", file_stem(device))
 }
 
-/// Where the installed rekordbox keeps its factory mappings (read only, never copied).
-pub fn factory_dir() -> std::path::PathBuf {
-    if let Ok(d) = std::env::var("PREPDECK_MIDI_FACTORY") {
-        return d.into();
+/// Keep normal names interoperable. Lossy names use a separate namespace so an
+/// ordinary device named, for example, "Studio_A" cannot overwrite "Studio/A".
+pub fn local_file(dir: &Path, port: &str) -> PathBuf {
+    let stem = file_stem(port);
+    if stem == port && !port.contains(',') {
+        return dir.join(mapping_name(port));
     }
-    "/Applications/rekordbox 7/rekordbox.app/Contents/Resources/MidiMappings".into()
+    use sha2::{Digest, Sha256};
+    let hash = format!("{:x}", Sha256::digest(port.as_bytes()));
+    dir.join("recordbox-overrides").join(format!("{stem}-{}.midi.csv", &hash[..24]))
 }
 
-/// The factory mapping of a port name: `<name>.midi.csv`, and for a second identical unit
-/// (a name ending in a space and digits) the file of the name without that ending.
-pub fn factory_file(dir: &std::path::Path, port: &str) -> Option<std::path::PathBuf> {
-    let p = dir.join(mapping_name(port));
-    if p.is_file() {
-        return Some(p);
+fn alsa_endpoint(name: &str) -> Option<(&str, &str, &str)> {
+    // midir ALSA: "client:port client_id:port_id". Remove an address only after
+    // recognizing the whole form; numbers inside device names are significant.
+    let (labels, address) = name.rsplit_once(' ')?;
+    let (client_id, port_id) = address.split_once(':')?;
+    let (client, port) = labels.split_once(':')?;
+    if client_id.parse::<u16>().is_err() || port_id.parse::<u16>().is_err() || client.is_empty() || port.is_empty() { return None; }
+    Some((client, port, client_id))
+}
+
+fn names_for_mapping(port: &str) -> Vec<&str> {
+    let mut names = vec![port];
+    if let Some((client, endpoint, _)) = alsa_endpoint(port) {
+        if endpoint.eq_ignore_ascii_case(client) || endpoint.strip_suffix(" MIDI 1").is_some_and(|p| p.eq_ignore_ascii_case(client)) ||
+            endpoint == "MIDI 1" {
+            names.push(client);
+        } else if endpoint.starts_with(client) {
+            names.push(endpoint);
+        }
     }
-    let t = port.trim_end_matches(|c: char| c.is_ascii_digit());
-    if t.len() < port.len() && t.ends_with(' ') {
-        let p = dir.join(mapping_name(t.trim_end()));
-        if p.is_file() {
-            return Some(p);
+    names
+}
+
+pub fn device_matches(port: &str, header: &str) -> bool {
+    names_for_mapping(port).iter().any(|name| header.eq_ignore_ascii_case(&header_name(name)))
+}
+
+fn duplicate_base(name: &str) -> Option<&str> {
+    let (base, number) = name.rsplit_once(' ')?;
+    number.parse::<u8>().is_ok_and(|n| (2..=16).contains(&n)).then_some(base)
+}
+
+pub fn factory_matches(port: &str, header: &str) -> bool {
+    device_matches(port, header) || names_for_mapping(port).into_iter().filter_map(duplicate_base).any(|n| n.eq_ignore_ascii_case(header))
+}
+
+fn named_file(dir: &Path, name: &str) -> Option<PathBuf> {
+    let filename = mapping_name(name);
+    let path = dir.join(&filename);
+    if path.is_file() { return Some(path); }
+    // A Windows or Mac mapping folder can be copied onto a case-sensitive filesystem.
+    let mut entries = std::fs::read_dir(dir).ok()?.flatten().filter(|e| {
+        e.file_name().to_str().is_some_and(|n| n.eq_ignore_ascii_case(&filename)) && e.path().is_file()
+    });
+    let first = entries.next()?;
+    entries.next().is_none().then(|| first.path())
+}
+
+pub fn factory_file(dir: &Path, port: &str) -> Option<PathBuf> {
+    let names = names_for_mapping(port);
+    for name in &names {
+        if let Some(p) = named_file(dir, name) { return Some(p); }
+    }
+    // rekordbox's duplicate-unit convention, e.g. "DDJ-FLX4 2".
+    for name in names {
+        if let Some(base) = duplicate_base(name) {
+            if let Some(p) = named_file(dir, base) { return Some(p); }
         }
     }
     None
 }
 
+pub fn native_user_dirs() -> Vec<PathBuf> {
+    if let Some(dir) = std::env::var_os("RECORDBOX_MIDI_USER_DIR").filter(|p| !p.is_empty()) { return vec![dir.into()]; }
+    let Some(root) = dirs::data_dir() else { return Vec::new() };
+    ["Pioneer/rekordbox6/MidiMappings", "Pioneer/rekordbox/MidiMappings", "AlphaTheta/rekordbox/MidiMappings"]
+        .iter().map(|sub| root.join(sub)).collect()
+}
+
+pub fn native_user_files(dirs: &[PathBuf], port: &str) -> Vec<PathBuf> {
+    names_for_mapping(port).into_iter().flat_map(|name| dirs.iter().filter_map(move |d| named_file(d, name))).collect()
+}
+
+#[cfg(any(windows, test))]
+fn windows_factory_dirs(program_files: &Path) -> Vec<PathBuf> {
+    let mut installations = Vec::new();
+    for vendor in ["rekordbox", "Pioneer", "AlphaTheta"] {
+        let base = program_files.join(vendor);
+        if let Ok(entries) = std::fs::read_dir(&base) {
+            for item in entries.flatten() {
+                let name = item.file_name().to_string_lossy().to_ascii_lowercase();
+                if let Some(version) = name.strip_prefix("rekordbox ") {
+                    if let Ok(parts) = version.split('.').map(str::parse::<u32>).collect::<Result<Vec<_>, _>>() {
+                        installations.push((parts, item.path()));
+                    }
+                }
+            }
+        }
+        installations.push((vec![], base));
+    }
+    installations.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
+    installations.into_iter().flat_map(|(_, dir)| ["MidiMappings", "Data/MidiMappings", "Resources/MidiMappings", "Data/Resources/MidiMappings"].map(|s| dir.join(s)))
+        .filter(|d| d.is_dir()).collect()
+}
+
+pub fn factory_dirs() -> Vec<PathBuf> {
+    if let Some(dir) = ["RECORDBOX_MIDI_FACTORY_DIR", "PREPDECK_MIDI_FACTORY"].into_iter().find_map(|k| std::env::var_os(k).filter(|p| !p.is_empty())) {
+        return vec![dir.into()];
+    }
+    #[cfg(windows)]
+    { return ["ProgramW6432", "ProgramFiles", "ProgramFiles(x86)"].into_iter().filter_map(std::env::var_os)
+        .flat_map(|root| windows_factory_dirs(Path::new(&root))).collect(); }
+    #[cfg(target_os = "macos")]
+    { return ["/Applications/rekordbox 7/rekordbox.app", "/Applications/rekordbox 6/rekordbox.app", "/Applications/rekordbox.app"]
+        .iter().map(|p| Path::new(p).join("Contents/Resources/MidiMappings")).collect(); }
+    #[cfg(not(any(windows, target_os = "macos")))]
+    { Vec::new() }
+}
+
+/// Permit vendor comments and empty separators, but reject broken or mixed-device
+/// imports rather than replacing a working map with the few rows that happened to parse.
+pub fn validate_import(port: &str, bytes: &[u8]) -> std::io::Result<CsvFile> {
+    use std::io::{Error, ErrorKind::InvalidData};
+    let file = CsvFile::parse(bytes).map_err(|_| Error::new(InvalidData, "Expected a version 1 MIDI mapping CSV."))?;
+    if !device_matches(port, &file.device) || file.device.is_empty() {
+        return Err(Error::new(InvalidData, "The mapping belongs to a different MIDI device."));
+    }
+    let mut headers = 0;
+    for line in &file.lines {
+        if line.raw.split(',').next().is_some_and(|k| k.eq_ignore_ascii_case("@file")) {
+            headers += 1;
+        } else if line.row.is_none() && !line.raw.trim_start().starts_with('#') && line.raw.chars().any(|c| c != ',' && !c.is_whitespace()) {
+            return Err(Error::new(InvalidData, "The file contains an invalid MIDI mapping row."));
+        }
+    }
+    if headers != 1 { return Err(Error::new(InvalidData, "Expected one MIDI mapping header.")); }
+    Ok(file)
+}
+
+/// Old recordbox versions wrote a bare header automatically at first connect.
+pub fn bare_header(file: &CsvFile) -> bool {
+    file.lines.iter().all(|line| line.raw.trim().is_empty() || line.raw.split(',').next().is_some_and(|f| f.eq_ignore_ascii_case("@file")))
+}
+
+pub fn read_file(path: &Path) -> std::io::Result<Vec<u8>> {
+    use std::io::{Error, ErrorKind::InvalidData, Read};
+    const LIMIT: u64 = 8 * 1024 * 1024;
+    if !std::fs::metadata(path)?.is_file() { return Err(Error::new(InvalidData, "Expected a regular MIDI mapping file.")); }
+    let file = std::fs::File::open(path)?;
+    let mut bytes = Vec::new();
+    file.take(LIMIT + 1).read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > LIMIT { return Err(Error::new(InvalidData, "MIDI mapping exceeds 8 MiB.")); }
+    Ok(bytes)
+}
+
+pub fn atomic_write<'a>(path: &Path, bytes: &[u8], create_parent: bool, protected_dirs: impl Iterator<Item = &'a PathBuf>) -> std::io::Result<()> {
+    use std::io::{Error, ErrorKind, Write};
+    let full = std::path::absolute(path)?;
+    let parent = full.parent().ok_or_else(|| Error::new(ErrorKind::InvalidInput, "Missing mapping file name."))?;
+    let existing = parent.ancestors().find(|p| p.exists()).ok_or_else(|| Error::new(ErrorKind::NotFound, "Missing mapping directory."))?;
+    let destination = existing.canonicalize()?.join(full.strip_prefix(existing).map_err(Error::other)?);
+    let target = path.canonicalize().ok();
+    if protected_dirs.filter_map(|dir| dir.canonicalize().ok())
+        .any(|dir| destination.starts_with(&dir) || target.as_ref().is_some_and(|p| p.starts_with(&dir))) {
+        return Err(Error::new(ErrorKind::PermissionDenied, "The original Rekordbox mapping folder is read-only in recordbox."));
+    }
+    if create_parent { std::fs::create_dir_all(parent)?; }
+    let mut file = tempfile::NamedTempFile::new_in(parent)?;
+    file.write_all(bytes)?;
+    file.as_file().sync_all()?;
+    file.persist(path)?;
+    Ok(())
+}
+
+/// Return an output only for a unique exact name or a unique directional sibling.
+/// Preserve WinMM's port number and ALSA's client identifier to distinguish devices.
+pub fn paired_output(input: &str, outputs: &[String]) -> Option<usize> {
+    fn unique(mut hits: impl Iterator<Item = usize>) -> Option<usize> {
+        let first = hits.next()?;
+        hits.next().is_none().then_some(first)
+    }
+    fn counterpart(input: &str) -> Option<String> {
+        let input = input.to_ascii_lowercase();
+        if let Some(rest) = input.strip_prefix("midiin") {
+            if let Some((number, device)) = rest.split_once(" (") {
+                if number.chars().all(|c| c.is_ascii_digit()) && device.ends_with(')') && device.len() > 1 {
+                    return Some(format!("midiout{number} ({device}"));
+                }
+            }
+        }
+        for (from, to) in [(" input", " output"), (" in", " out"), (" (in)", " (out)")] {
+            if let Some(base) = input.strip_suffix(from).filter(|s| !s.trim().is_empty()) { return Some(format!("{base}{to}")); }
+        }
+        None
+    }
+    let exact: Vec<_> = outputs.iter().enumerate().filter_map(|(i, n)| (n == input).then_some(i)).collect();
+    if !exact.is_empty() { return unique(exact.into_iter()); }
+    let alsa = alsa_endpoint(input);
+    let other = counterpart(alsa.map(|(_, leaf, _)| leaf).unwrap_or(input))?;
+    unique(outputs.iter().enumerate().filter_map(|(i, n)| {
+        let matched = match (alsa, alsa_endpoint(n)) {
+            (Some((client, _, id)), Some((out_client, leaf, out_id))) => id == out_id && client == out_client && leaf.eq_ignore_ascii_case(&other),
+            (None, None) => n.eq_ignore_ascii_case(&other),
+            _ => false,
+        };
+        matched.then_some(i)
+    }))
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -594,11 +794,20 @@ mod tests {
     /// is not installed.
     #[test]
     fn factory_files_round_trip() {
-        let dir = factory_dir();
-        let Ok(rd) = std::fs::read_dir(&dir) else {
-            eprintln!("factory_files_round_trip: skipped, {} not found", dir.display());
-            return;
-        };
+        if let Some(dir) = factory_dirs().into_iter().find(|p| p.is_dir()) {
+            check_factory_files(&dir, false);
+        }
+    }
+
+    #[test]
+    #[ignore = "requires RECORDBOX_TEST_MIDI_7219_DIR pointing to the native 7.2.19 mapping collection"]
+    fn native_7219_factory_corpus() {
+        let dir = std::env::var_os("RECORDBOX_TEST_MIDI_7219_DIR").expect("Set the 7.2.19 MIDI fixture directory");
+        check_factory_files(Path::new(&dir), true);
+    }
+
+    fn check_factory_files(dir: &Path, compare_7219_counts: bool) {
+        let rd = std::fs::read_dir(dir).unwrap();
         let (mut files, mut rows, mut canonical, mut entries_n, mut bare_lf) = (0usize, 0usize, 0, 0, 0);
         // Mapping files rekordbox added after 7.2.19 (the version the counts were taken from).
         const NEWER_FILES: [&str; 1] = ["DJM-A7"];
@@ -662,9 +871,55 @@ mod tests {
         // rekordbox 7.2.19 shipped 69 files with 13,505 rows; 7.2.20 (installed on this machine
         // on 2026-11-27) adds DJM-A7.midi.csv (12 rows). Every file found was checked above;
         // the 7.2.19 set must still be there unchanged in size.
+        if !compare_7219_counts { return; }
         assert!(files >= 69, "{files} mapping files: fewer than rekordbox 7.2.19 shipped");
         assert_eq!(files - newer.len(), 69, "files added after 7.2.19 other than {NEWER_FILES:?}");
         assert_eq!(rows - newer.iter().map(|x| x.1).sum::<usize>(), 13505, "rows of the 7.2.19 files");
+    }
+
+    #[test]
+    fn midi_names_resolve_without_crossing_device_or_port_boundaries() {
+        let names = |s: &[&str]| s.iter().map(|n| n.to_string()).collect::<Vec<_>>();
+        assert_eq!(paired_output("DDJ-FLX4", &names(&["Other", "DDJ-FLX4"])), Some(1));
+        assert_eq!(paired_output("Controller MIDI In", &names(&["Controller MIDI Out", "Other MIDI Out"])), Some(0));
+        assert_eq!(paired_output("MIDIIN2 (Controller)", &names(&["MIDIOUT (Controller)", "MIDIOUT2 (Controller)"])), Some(1));
+        assert_eq!(paired_output("Deck:Deck In 24:0", &names(&["Deck:Deck Out 25:0", "Deck:Deck Out 24:1"])), Some(1));
+        assert_eq!(paired_output("Deck In", &names(&["Deck Out", "DECK OUT"])), None);
+        assert_eq!(paired_output("Deck", &names(&["Deck", "Deck"])), None);
+        assert_eq!(paired_output("Deck", &names(&["Other"])), None);
+        assert!(device_matches("DDJ-FLX4:DDJ-FLX4 MIDI 1 24:0", "DDJ-FLX4"));
+        assert!(!device_matches("DDJ-FLX4:DDJ-FLX4 DAW 24:1", "DDJ-FLX4"));
+        assert!(!device_matches("MIDIIN2 (Controller)", "Controller"));
+        assert!(factory_matches("DDJ-FLX4 2", "DDJ-FLX4"));
+        assert!(!device_matches("DDJ-FLX4 2", "DDJ-FLX4"));
+    }
+
+    #[test]
+    fn mapping_filenames_are_portable_and_colliding_ports_save_separately() {
+        let root = Path::new("mappings");
+        for unsafe_name in ["CON", "nul.txt", "LPT9", "..", "a/../b", "tail. ", "Deck,A"] {
+            assert!(local_file(root, unsafe_name).starts_with(root.join("recordbox-overrides")));
+            assert_ne!(export_name(unsafe_name), "CON.csv");
+        }
+        assert_eq!(local_file(root, "DDJ-FLX4"), root.join("DDJ-FLX4.midi.csv"));
+        assert_eq!(export_name("nul.txt"), "_nul.txt.csv");
+        assert_ne!(local_file(root, "Studio/A"), local_file(root, "Studio:A"));
+        assert_ne!(local_file(root, "Studio/A"), local_file(root, "Studio_A"));
+        let long = "🎵".repeat(250);
+        assert!(export_name(&long).len() < 255);
+        assert!(validate_import("Deck,A", empty_user_file("Deck,A").as_bytes()).is_ok());
+        assert!(validate_import("Test", "@file,1,Test\n🎵é broken row".as_bytes()).is_err());
+        assert!(validate_import("Test", b"@file,1,Test\n@file,1,Other").is_err());
+    }
+
+    #[test]
+    fn installed_windows_mapping_directories_are_sorted_by_version_number() {
+        let temp = tempfile::tempdir().unwrap();
+        let old = temp.path().join("rekordbox/rekordbox 7.2.9/Data/MidiMappings");
+        let new = temp.path().join("rekordbox/rekordbox 7.2.10/Data/MidiMappings");
+        let unrelated = temp.path().join("Pioneer/Other application/MidiMappings");
+        for p in [&old, &new, &unrelated] { std::fs::create_dir_all(p).unwrap(); }
+        assert_eq!(windows_factory_dirs(temp.path()), vec![new, old]);
     }
 
     #[test]

@@ -16,6 +16,23 @@ pub fn key_alnum(k: i32) -> String {
     format!("{}{}", n, if k < 12 { "A" } else { "B" })
 }
 
+/// The order of a key as it is shown in the list. The Key column sorts by the label on
+/// screen, which for an imported track is the spelling its library gave it ("1A", "Em"),
+/// whatever notation is chosen here: codes of the number-and-letter kind go by number and
+/// then letter (2A before 10A), other spellings after them by text, no key first.
+pub fn key_sort_key(label: &str) -> (u8, u32, String) {
+    let t = label.trim();
+    if t.is_empty() {
+        return (0, 0, String::new());
+    }
+    let digits = t.chars().take_while(|c| c.is_ascii_digit()).count();
+    let rest = &t[digits..];
+    if digits > 0 && digits <= 2 && rest.chars().count() == 1 && rest.chars().all(|c| c.is_ascii_alphabetic()) {
+        return (1, t[..digits].parse().unwrap_or(0), rest.to_ascii_uppercase());
+    }
+    (2, 0, t.to_lowercase())
+}
+
 pub fn key_name(k: i32, alnum: bool) -> String {
     if !(0..24).contains(&k) {
         return String::new();
@@ -652,4 +669,16 @@ mod tests {
 /// An f32 that may have been written as null (serde_json writes NaN that way).
 fn f32_or_nan<'de, D: serde::Deserializer<'de>>(d: D) -> Result<f32, D::Error> {
     Ok(<Option<f32> as serde::Deserialize>::deserialize(d)?.unwrap_or(f32::NAN))
+}
+
+#[cfg(test)]
+mod key_sort_tests {
+    use super::*;
+
+    #[test]
+    fn keys_sort_as_they_are_shown() {
+        let mut v = vec!["10A", "1A", "Em", "8A", "", "3A", "1B", "12A", "2A", "Abm", "9A", "01A"];
+        v.sort_by_key(|k| key_sort_key(k));
+        assert_eq!(v, ["", "1A", "01A", "1B", "2A", "3A", "8A", "9A", "10A", "12A", "Abm", "Em"]);
+    }
 }

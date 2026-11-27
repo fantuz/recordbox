@@ -9,15 +9,29 @@
 //! BUILD FX which effects it is made of and how the knob moves their settings (decoded from
 //! `MergeFX::parameters`; written here as rules). The sample sounds are read from the
 //! installed rekordbox's `MERGE FX.zip` when MERGE FX is first enabled; nothing is copied.
+//! The BUILD SAMPLE's repeats follow `MFXController::changeNotesPerBeat` (0x1012c787c): a
+//! four-beat, 32-step note pattern with 1, 2, 4 or 8 notes a beat for |knob| below 25, 50,
+//! 75 and from 75 %; a change while the deck plays restarts the grid 0.02 beats later, a
+//! change on a stopped deck keeps its phase. REPEAT UP (pattern 201) sends the sample through
+//! CFX PITCH, COLOR 0.5 -> 1 over the travel, PARAM 0.5 (one octave up at the end).
+//! Where the sounds come from (`MFXPattern::getSamplePathFromPreset` 0x1012c3ab0): the factory
+//! components play "<Music>/rekordbox/Sampler/MERGE FX/MergeFX Sample Sound NNN.wav"
+//! (`SettingIF::getDefaultMFXSampleDirectory`; recordbox falls back to rekordbox's own
+//! `MERGE FX.zip` when that folder is missing); REPEAT SAMPLE, REPEAT UP SAMPLE and SAMPLER
+//! (`MFXPreset::isFilePathSelectable`: ids 21, 22, 43) play the file stored in the preset, one
+//! path for the BUILD SAMPLE column and one for the DROP SAMPLE column, chosen in the settings
+//! from the sampler's slots by bank (`PresetComponent::showSampleSelectionAt`). A path whose
+//! file is gone is silent, as in rekordbox.
 //! recordbox's own: the effect bodies (see `fx.rs` / `cfx.rs`), the release echoes' pitch as
-//! a change of speed, the repeat rates of the REPEAT samples (not in `MergeFX::parameters`;
-//! their pattern codes are -1 / 201, which only drive the pitch), and REPEAT SAMPLE / SAMPLER
-//! (a file path stored in the preset), which are listed but silent. ROLL's beat steps are the
-//! echoes' step table, as the parameter table says.
+//! a change of speed, the repeats' tempo (the deck's; rekordbox's sequence player starts at
+//! 120 BPM and its sync was not traced), a repeat restarting the sample without a fade.
+//! ROLL's beat steps are the echoes' step table, as the parameter table says.
 
 use crate::cfx::Cfx;
 use crate::fx::{Kind, Ring, Slot, SlotParams};
 use serde::{Deserialize, Serialize};
+use std::io::Read;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 /// "-" (no component).
@@ -49,6 +63,33 @@ pub fn sample_no(id: u8) -> Option<u16> {
     }
 }
 
+/// What a component plays: a factory sound's number, or 1 / 2 for the file chosen for the
+/// BUILD SAMPLE / DROP SAMPLE column (REPEAT SAMPLE, REPEAT UP SAMPLE, SAMPLER).
+pub fn voice_no(id: u8) -> Option<u16> {
+    match id {
+        21 | 22 => Some(1),
+        43 => Some(2),
+        _ => sample_no(id),
+    }
+}
+
+/// `MFXPreset::isFilePathSelectable`: the components that play a file of the user's choice.
+pub fn path_selectable(id: u8) -> bool {
+    matches!(id, 21 | 22 | 43)
+}
+
+/// `MFXController::changeNotesPerBeat`: the repeats a beat for |knob| in percent.
+pub fn notes_per_beat(pct: f32) -> u32 {
+    if pct < 25.0 { 1 } else if pct < 50.0 { 2 } else if pct < 75.0 { 4 } else { 8 }
+}
+
+/// The pattern it writes: 32 steps of an eighth of a beat, a note where `step % (8 / n) == 0`.
+#[cfg(test)]
+pub fn note_steps(n: u32) -> [bool; 32] {
+    let d = 8 / n.clamp(1, 8);
+    std::array::from_fn(|i| i as u32 % d == 0)
+}
+
 const FILES: [u16; 18] = [101, 102, 103, 104, 201, 202, 203, 204, 205, 206, 207, 208, 209, 301, 302, 303, 304, 305];
 
 /// How long the RELEASE FX runs before the drop (`MergeFX::dropTimes`): the release effects
@@ -77,13 +118,16 @@ pub struct MfxPrefs {
     pub upper: [bool; 2],
     /// Sample volume, dB (-12 .. +12).
     pub volume: f32,
+    /// MERGE FX 1..4: the files chosen for the BUILD SAMPLE and the DROP SAMPLE column
+    /// (rekordbox's preset keeps a path for SOUND_FX1 and SOUND_FX2; empty = none).
+    pub paths: [[String; 2]; 4],
 }
 
 impl Default for MfxPrefs {
     fn default() -> Self {
         // rekordbox's defaults: SNARE RISER, SPACE RISER, SPACE DROP, ECHO DROP.
         let preset = [0u8, 3, 5, 7];
-        MfxPrefs { enabled: false, stop_deck: true, preset, comps: preset.map(|p| PRESETS[p as usize].1), select: [0, 0], upper: [false; 2], volume: 0.0 }
+        MfxPrefs { enabled: false, stop_deck: true, preset, comps: preset.map(|p| PRESETS[p as usize].1), select: [0, 0], upper: [false; 2], volume: 0.0, paths: Default::default() }
     }
 }
 
@@ -107,6 +151,8 @@ pub struct Cmd {
     pub bpm: f32,
     /// Sample volume as a gain.
     pub gain: f32,
+    /// The deck is playing (a change of the repeat rate then restarts its grid).
+    pub playing: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -214,57 +260,125 @@ pub struct Sample {
     pub rate: f32,
 }
 
-/// PCM WAV (16 or 24 bit, 1 or 2 channels) to interleaved stereo.
-pub fn parse_wav(b: &[u8]) -> Option<Sample> {
+/// Up to 16 MiB of encoded PCM per factory sound and 128 MiB of decoded stereo
+/// across the 18 known filenames. User-selected audio uses the regular decoder.
+const MAX_FACTORY_WAV: u64 = 16 << 20;
+const FACTORY_FLOATS: usize = (128 << 20) / size_of::<f32>();
+
+/// PCM WAV (16 or 24 bit, mono or stereo) to interleaved stereo.
+fn parse_wav(b: &[u8], remaining_floats: usize) -> Option<Sample> {
     if b.len() < 12 || &b[0..4] != b"RIFF" || &b[8..12] != b"WAVE" {
         return None;
     }
     let (mut pos, mut fmt) = (12usize, None);
-    while pos + 8 <= b.len() {
-        let len = u32::from_le_bytes(b[pos + 4..pos + 8].try_into().ok()?) as usize;
-        let body = &b[pos + 8..(pos + 8 + len).min(b.len())];
-        match &b[pos..pos + 4] {
-            b"fmt " if body.len() >= 16 => fmt = Some((u16::from_le_bytes([body[2], body[3]]) as usize, u32::from_le_bytes(body[4..8].try_into().ok()?) as f32, u16::from_le_bytes([body[14], body[15]]) as usize)),
+    while let Some(header) = b.get(pos..pos.checked_add(8)?) {
+        let len = u32::from_le_bytes(header[4..8].try_into().ok()?) as usize;
+        pos += 8;
+        let end = pos.checked_add(len)?;
+        let body = b.get(pos..end)?;
+        match &header[..4] {
+            b"fmt " if body.len() >= 16 => {
+                let tag = u16::from_le_bytes(body[..2].try_into().ok()?);
+                // WAVE_FORMAT_EXTENSIBLE with the PCM subformat GUID.
+                let pcm_ext = tag == 0xfffe && body.get(24..40) == Some(&[1, 0, 0, 0, 0, 0, 16, 0, 128, 0, 0, 170, 0, 56, 155, 113]);
+                let ch = u16::from_le_bytes(body[2..4].try_into().ok()?) as usize;
+                let rate = u32::from_le_bytes(body[4..8].try_into().ok()?);
+                let bits = u16::from_le_bytes(body[14..16].try_into().ok()?);
+                if (tag != 1 && !pcm_ext) || !(1..=2).contains(&ch) || !(1..=384_000).contains(&rate) || !matches!(bits, 16 | 24) {
+                    return None;
+                }
+                fmt = Some((ch, rate, bits as usize / 8));
+            }
             b"data" => {
-                let (ch, rate, bits) = fmt?;
-                let bytes = bits / 8;
-                if ch == 0 || !(bytes == 2 || bytes == 3) {
+                let (ch, rate, bytes) = fmt?;
+                let frames = len / (ch * bytes);
+                let count = frames.checked_mul(2)?;
+                if frames < 2 || len % (ch * bytes) != 0 || count > remaining_floats {
                     return None;
                 }
                 let one = |s: &[u8]| if bytes == 2 { i16::from_le_bytes([s[0], s[1]]) as f32 / 32768.0 } else { (i32::from_le_bytes([0, s[0], s[1], s[2]]) >> 8) as f32 / 8388608.0 };
-                let mut data = Vec::with_capacity(body.len() / (bytes * ch) * 2);
+                let mut data = Vec::new();
+                data.try_reserve_exact(count).ok()?;
                 for f in body.chunks_exact(bytes * ch) {
-                    let l = one(&f[0..bytes]);
-                    let r = if ch > 1 { one(&f[bytes..2 * bytes]) } else { l };
-                    data.push(l);
-                    data.push(r);
+                    let l = one(f);
+                    data.extend([l, if ch == 2 { one(&f[bytes..]) } else { l }]);
                 }
-                return Some(Sample { data, rate });
+                return Some(Sample { data, rate: rate as f32 });
             }
             _ => {}
         }
-        pos += 8 + len + (len & 1);
+        pos = end.checked_add(len & 1)?;
     }
     None
 }
 
-/// Read rekordbox's sample sounds from its own archive (it is compressed, so the system's
-/// `unzip` unpacks each file to memory). Missing rekordbox or files: those sounds are silent.
-pub fn load_samples() -> Vec<(u16, Arc<Sample>)> {
-    let zip = "/Applications/rekordbox 7/rekordbox.app/Contents/Resources/MERGE FX.zip";
+fn factory_dir() -> Option<PathBuf> {
+    dirs::audio_dir().or_else(|| dirs::home_dir().map(|h| h.join("Music")))
+        .map(|p| p.join("rekordbox/Sampler/MERGE FX"))
+}
+
+/// Only read the declared number of bytes from a WAV, in memory. This also
+/// bounds decompression when a ZIP member's metadata disagrees with its contents.
+fn read_factory_wav(reader: impl Read, size: u64, remaining: usize) -> Option<Sample> {
+    if size > MAX_FACTORY_WAV { return None; }
+    let mut bytes = Vec::new();
+    bytes.try_reserve_exact(size as usize).ok()?;
+    let read = reader.take(size + 1).read_to_end(&mut bytes).ok()?;
+    (read as u64 == size).then(|| parse_wav(&bytes, remaining)).flatten()
+}
+
+fn open_factory_zip(path: &Path) -> Option<zip::ZipArchive<std::io::BufReader<std::fs::File>>> {
+    let file = std::fs::File::open(path).ok()?;
+    let info = file.metadata().ok()?;
+    if !info.is_file() || info.len() > 64 << 20 { return None; }
+    let mut archive = zip::ZipArchive::new(std::io::BufReader::new(file)).ok()?;
+    if archive.len() > 256 { return None; }
+    archive.validate_header_consistency().ok()?;
+    Some(archive)
+}
+
+fn factory_samples(dir: Option<&Path>, archive: Option<&Path>) -> Vec<(u16, Arc<Sample>)> {
+    let mut archive = archive.and_then(open_factory_zip);
+    let mut remaining = FACTORY_FLOATS;
     let mut out = Vec::new();
-    if !std::path::Path::new(zip).exists() {
-        return out;
-    }
     for no in FILES {
         let name = format!("MergeFX Sample Sound {no}.wav");
-        if let Ok(o) = std::process::Command::new("/usr/bin/unzip").args(["-p", zip, &name]).output() {
-            if let Some(s) = parse_wav(&o.stdout) {
-                out.push((no, Arc::new(s)));
-            }
+        let sample = dir.and_then(|dir| {
+            let path = dir.join(&name);
+            if !path.metadata().ok()?.is_file() { return None; }
+            let file = std::fs::File::open(path).ok()?;
+            let size = file.metadata().ok()?.len();
+            read_factory_wav(file, size, remaining)
+        }).or_else(|| {
+            let entry = archive.as_mut()?.by_name(&name).ok()?;
+            if !entry.is_file() || entry.is_symlink() { return None; }
+            let size = entry.size();
+            read_factory_wav(entry, size, remaining)
+        });
+        if let Some(sample) = sample {
+            remaining -= sample.data.len();
+            out.push((no, Arc::new(sample)));
         }
     }
     out
+}
+
+/// Prefer loose sounds in the platform Music folder. All platforms also support
+/// a user-provided MERGE FX.zip here or via RECORDBOX_MERGE_FX_ARCHIVE.
+pub fn load_samples() -> Vec<(u16, Arc<Sample>)> {
+    let dir = factory_dir();
+    let archive = std::env::var_os("RECORDBOX_MERGE_FX_ARCHIVE").map(PathBuf::from)
+        .or_else(|| dir.as_ref().map(|p| p.join("MERGE FX.zip")).filter(|p| p.is_file()));
+    #[cfg(target_os = "macos")]
+    let archive = archive.or_else(|| Some(PathBuf::from("/Applications/rekordbox 7/rekordbox.app/Contents/Resources/MERGE FX.zip")));
+    factory_samples(dir.as_deref(), archive.as_deref())
+}
+
+/// Decode the first two minutes of the selected sampler file on a worker.
+pub fn load_user(path: &str) -> Option<Arc<Sample>> {
+    if path.is_empty() || !Path::new(path).is_file() { return None; }
+    let d = crate::audio::decode_prefix(path, 120).ok()?;
+    (d.samples.len() >= 4).then(|| Arc::new(Sample { data: d.samples, rate: d.sr as f32 }))
 }
 
 /// A sample being played: its place (frames of the file) or `None`.
@@ -303,19 +417,32 @@ struct UnitEng {
     nz: [f32; 2],
     clock: f64,
     dry: f32,
+    /// The repeat pattern in use (notes a beat, 0 before the first) and the beat its grid
+    /// starts from.
+    npb: u32,
+    grid0: f64,
+    /// REPEAT UP: CFX PITCH on the build sample, and the buffer it is made in.
+    pitch: Cfx,
+    sbuf: Vec<f32>,
 }
 
 impl UnitEng {
     fn new() -> UnitEng {
-        UnitEng { slots: [Slot::new(), Slot::new(), Slot::new()], cfx: [Cfx::new(), Cfx::new()], cfx_last: [(0, 0.5); 2], ring: Ring::new(), phase: Phase::Idle, t: 0, rel_len: 0, comps: [NONE; 4], cancel: 0, knob: 0.0, rel_start: 0, gate: 0.0, brake: (1.0, 0.0), build: Voice::default(), hit: [Voice::default(); 2], osc: [0.0; 6], sweep: 0.0, seed: 0x1357_9BDF, nz: [0.0; 2], clock: 0.0, dry: 1.0 }
+        UnitEng { slots: [Slot::new(), Slot::new(), Slot::new()], cfx: [Cfx::new(), Cfx::new()], cfx_last: [(0, 0.5); 2], ring: Ring::new(), phase: Phase::Idle, t: 0, rel_len: 0, comps: [NONE; 4], cancel: 0, knob: 0.0, rel_start: 0, gate: 0.0, brake: (1.0, 0.0), build: Voice::default(), hit: [Voice::default(); 2], osc: [0.0; 6], sweep: 0.0, seed: 0x1357_9BDF, nz: [0.0; 2], clock: 0.0, dry: 1.0, npb: 0, grid0: 0.0, pitch: Cfx::new(), sbuf: vec![0.0; SBUF * 2] }
     }
 }
+
+/// Frames the build sample is made in at a time (longer buffers go in pieces).
+const SBUF: usize = 2048;
 
 /// The MERGE FX engine (about 25 MB; made when MERGE FX is first enabled).
 pub struct Engine {
     pub cmd: [Cmd; 2],
     units: [UnitEng; 2],
     samples: [Option<Arc<Sample>>; 18],
+    /// Per unit, the files chosen for the BUILD SAMPLE and DROP SAMPLE columns (decoded on
+    /// the interface's side and handed over).
+    user: [[Option<Arc<Sample>>; 2]; 2],
     /// Counted up each time a unit's drop starts (the interface then stops the deck).
     pub dropped: [u32; 2],
     off: SlotParams,
@@ -323,8 +450,14 @@ pub struct Engine {
 
 impl Engine {
     pub fn new() -> Engine {
-        let cmd = Cmd { on: false, cancel: 0, knob: 0.0, comps: [NONE; 4], deck: 0, bpm: 120.0, gain: 1.0 };
-        Engine { cmd: [cmd, Cmd { deck: 1, ..cmd }], units: [UnitEng::new(), UnitEng::new()], samples: Default::default(), dropped: [0; 2], off: SlotParams::new(Kind::Delay) }
+        let cmd = Cmd { on: false, cancel: 0, knob: 0.0, comps: [NONE; 4], deck: 0, bpm: 120.0, gain: 1.0, playing: false };
+        Engine { cmd: [cmd, Cmd { deck: 1, ..cmd }], units: [UnitEng::new(), UnitEng::new()], samples: Default::default(), user: Default::default(), dropped: [0; 2], off: SlotParams::new(Kind::Delay) }
+    }
+
+    /// Hand over (or take back) the file of a unit's column (0 BUILD SAMPLE, 1 DROP SAMPLE).
+    /// Called with the rack locked on the interface thread, so the old one is freed there.
+    pub fn set_user(&mut self, u: usize, col: usize, s: Option<Arc<Sample>>) -> Option<Arc<Sample>> {
+        std::mem::replace(&mut self.user[u][col], s)
     }
 
     pub fn set_samples(&mut self, list: &[(u16, Arc<Sample>)]) {
@@ -455,7 +588,9 @@ impl Engine {
                     e.comps = cmd.comps;
                     e.t = 0;
                     e.clock = 0.0;
-                    e.build = Voice { no: sample_no(cmd.comps[1]).unwrap_or(0), pos: None, speed: 1.0, wait: 0 };
+                    e.npb = 0;
+                    e.grid0 = 0.0;
+                    e.build = Voice { no: voice_no(cmd.comps[1]).unwrap_or(0), pos: None, speed: 1.0, wait: 0 };
                 }
                 Phase::Build if !cmd.on => {
                     // OFF: the RELEASE FX (or release sample) for its drop time.
@@ -477,83 +612,130 @@ impl Engine {
                 let wait = e.rel_len.saturating_sub(e.t) as usize;
                 e.phase = Phase::Drop;
                 self.dropped[u] = self.dropped[u].wrapping_add(1);
-                if let Some(no) = sample_no(e.comps[3]) {
+                if let Some(no) = voice_no(e.comps[3]) {
                     e.hit[1] = Voice { no, pos: Some(0.0), speed: 1.0, wait: wait.min(frames) };
                 }
             }
             let bpm = cmd.bpm.clamp(20.0, 1000.0);
             let pct = e.knob.abs() * 100.0;
-            // BUILD SAMPLE: the repeating samples are hit again one, two, four, then eight
-            // times a beat as the knob rises; the UP ones climb up to an octave with it.
+            // BUILD SAMPLE: the repeating samples are hit 1, 2, 4 or 8 times a beat as the knob
+            // turns (`changeNotesPerBeat`); the UP ones go through CFX PITCH, up to an octave.
             let id = e.comps[1];
             let building = e.phase == Phase::Build;
-            let per_beat = [1.0, 2.0, 4.0, 8.0][((pct / 25.0) as usize).min(3)];
-            let up = matches!(id, 16 | 18) as u8 as f32;
+            let repeat = (15..=22).contains(&id);
+            if building && repeat {
+                let n = notes_per_beat(pct);
+                if n != e.npb {
+                    if e.npb > 0 && cmd.playing {
+                        // (rekordbox moves its four-beat sequence to 3.98: the new grid
+                        // starts with a note 0.02 beats later.)
+                        e.grid0 = e.clock + 0.02;
+                    }
+                    e.npb = n;
+                }
+            }
+            let up = matches!(id, 16 | 18 | 22);
             let samples = &self.samples;
-            let find = |no: u16| FILES.iter().position(|f| *f == no).and_then(|i| samples[i].as_deref());
-            for n in 0..frames {
-                let mut s = (0.0f32, 0.0f32);
-                if building {
-                    let before = e.clock;
-                    e.clock += bpm as f64 / 60.0 / r as f64;
-                    if (15..=20).contains(&id) && ((before * per_beat).floor() != (e.clock * per_beat).floor() || before == 0.0) {
-                        e.build.pos = Some(0.0);
-                        e.build.speed = 1.0 + up * pct / 100.0;
-                    }
-                    match id {
-                        11..=13 => {
-                            // The MOBIUS oscillators: six saws an octave apart climbing (or
-                            // falling) an octave every 16 beats (LFO: every 4), loudest in the
-                            // middle of the range; the level follows the knob.
-                            let turn = if id == 12 { 4.0 } else { 16.0 };
-                            let dir = if id == 13 { -1.0 } else { 1.0 };
-                            e.sweep = (e.sweep + dir * bpm / 60.0 / r / turn).rem_euclid(1.0);
-                            let lvl = if id == 13 { lin(pct, 50.0, 100.0, 0.8, 0.0) } else { lin(pct, 0.0, 100.0, 0.8, 1.0) };
-                            let mut v = 0.0;
-                            for k in 0..6 {
-                                let x = k as f32 + e.sweep;
-                                e.osc[k] = (e.osc[k] + 55.0 * 2f32.powf(x) / r).fract();
-                                v += (0.5 - 0.5 * (std::f32::consts::TAU * x / 6.0).cos()) * (2.0 * e.osc[k] - 1.0);
+            let user = &self.user[u];
+            let find = |no: u16| match no {
+                1 | 2 => user[no as usize - 1].as_deref(),
+                _ => FILES.iter().position(|f| *f == no).and_then(|i| samples[i].as_deref()),
+            };
+            let rate_ratio = |smp: &Sample| (smp.rate / r) as f64;
+            let build_sample = find(e.build.no);
+            let hits = e.hit.map(|v| find(v.no));
+            let mut done = 0;
+            while done < frames {
+                let len = (frames - done).min(SBUF);
+                let sb = &mut e.sbuf[..len * 2];
+                sb.iter_mut().for_each(|v| *v = 0.0);
+                for k in 0..len {
+                    let n = done + k;
+                    let mut s = (0.0f32, 0.0f32);
+                    if building {
+                        let before = e.clock;
+                        e.clock += bpm as f64 / 60.0 / r as f64;
+                        if repeat && e.npb > 0 {
+                            let (a, b) = ((before - e.grid0) * e.npb as f64, (e.clock - e.grid0) * e.npb as f64);
+                            if b >= 0.0 && (a < 0.0 || a.floor() != b.floor() || before == e.grid0) {
+                                e.build.pos = Some(0.0);
                             }
-                            s = (v * 0.12 * lvl, v * 0.12 * lvl);
                         }
-                        14 => {
-                            // NOISE: white noise through a low-pass that opens with the knob.
-                            e.seed ^= e.seed << 13;
-                            e.seed ^= e.seed >> 17;
-                            e.seed ^= e.seed << 5;
-                            let x = (e.seed as f32 / u32::MAX as f32) * 2.0 - 1.0;
-                            let fc = 300.0 * (12000.0f32 / 300.0).powf(pct / 100.0);
-                            let k = 1.0 - (-std::f32::consts::TAU * fc / r).exp();
-                            e.nz[0] += (x - e.nz[0]) * k;
-                            e.nz[1] += (e.nz[0] - e.nz[1]) * k;
-                            let lvl = 0.25 * lin(pct, 70.0, 100.0, 0.9, 1.0);
-                            s = (e.nz[1] * lvl, e.nz[1] * lvl);
+                        match id {
+                            11..=13 => {
+                                // The MOBIUS oscillators: six saws an octave apart climbing (or
+                                // falling) an octave every 16 beats (LFO: every 4), loudest in the
+                                // middle of the range; the level follows the knob.
+                                let turn = if id == 12 { 4.0 } else { 16.0 };
+                                let dir = if id == 13 { -1.0 } else { 1.0 };
+                                e.sweep = (e.sweep + dir * bpm / 60.0 / r / turn).rem_euclid(1.0);
+                                let lvl = if id == 13 { lin(pct, 50.0, 100.0, 0.8, 0.0) } else { lin(pct, 0.0, 100.0, 0.8, 1.0) };
+                                let mut v = 0.0;
+                                for k in 0..6 {
+                                    let x = k as f32 + e.sweep;
+                                    e.osc[k] = (e.osc[k] + 55.0 * 2f32.powf(x) / r).fract();
+                                    v += (0.5 - 0.5 * (std::f32::consts::TAU * x / 6.0).cos()) * (2.0 * e.osc[k] - 1.0);
+                                }
+                                s = (v * 0.12 * lvl, v * 0.12 * lvl);
+                            }
+                            14 => {
+                                // NOISE: white noise through a low-pass that opens with the knob.
+                                e.seed ^= e.seed << 13;
+                                e.seed ^= e.seed >> 17;
+                                e.seed ^= e.seed << 5;
+                                let x = (e.seed as f32 / u32::MAX as f32) * 2.0 - 1.0;
+                                let fc = 300.0 * (12000.0f32 / 300.0).powf(pct / 100.0);
+                                let k = 1.0 - (-std::f32::consts::TAU * fc / r).exp();
+                                e.nz[0] += (x - e.nz[0]) * k;
+                                e.nz[1] += (e.nz[0] - e.nz[1]) * k;
+                                let lvl = 0.25 * lin(pct, 70.0, 100.0, 0.9, 1.0);
+                                s = (e.nz[1] * lvl, e.nz[1] * lvl);
+                            }
+                            _ => {}
                         }
-                        _ => {}
                     }
+                    // The build sample, into its own buffer (it may be pitched).
+                    if let Some(pos) = e.build.pos {
+                        match build_sample {
+                            Some(smp) if (pos as usize + 1) * 2 + 1 < smp.data.len() => {
+                                let i = pos as usize;
+                                let t = (pos - i as f64) as f32;
+                                sb[k * 2] += smp.data[i * 2] + (smp.data[i * 2 + 2] - smp.data[i * 2]) * t;
+                                sb[k * 2 + 1] += smp.data[i * 2 + 1] + (smp.data[i * 2 + 3] - smp.data[i * 2 + 1]) * t;
+                                e.build.pos = Some(pos + rate_ratio(smp));
+                            }
+                            _ => e.build.pos = None,
+                        }
+                    }
+                    for (v, sample) in e.hit.iter_mut().zip(hits) {
+                        if v.wait > n {
+                            continue;
+                        }
+                        let Some(pos) = v.pos else { continue };
+                        let Some(smp) = sample else {
+                            v.pos = None;
+                            continue;
+                        };
+                        let i = pos as usize;
+                        if (i + 1) * 2 + 1 >= smp.data.len() {
+                            v.pos = None;
+                            continue;
+                        }
+                        let t = (pos - i as f64) as f32;
+                        s.0 += smp.data[i * 2] + (smp.data[i * 2 + 2] - smp.data[i * 2]) * t;
+                        s.1 += smp.data[i * 2 + 1] + (smp.data[i * 2 + 3] - smp.data[i * 2 + 1]) * t;
+                        v.pos = Some(pos + rate_ratio(smp) * v.speed as f64);
+                    }
+                    buf[n * 2] += s.0 * cmd.gain;
+                    buf[n * 2 + 1] += s.1 * cmd.gain;
                 }
-                for v in std::iter::once(&mut e.build).chain(e.hit.iter_mut()) {
-                    if v.wait > n {
-                        continue;
-                    }
-                    let Some(pos) = v.pos else { continue };
-                    let Some(smp) = find(v.no) else {
-                        v.pos = None;
-                        continue;
-                    };
-                    let i = pos as usize;
-                    if (i + 1) * 2 + 1 >= smp.data.len() {
-                        v.pos = None;
-                        continue;
-                    }
-                    let t = (pos - i as f64) as f32;
-                    s.0 += smp.data[i * 2] + (smp.data[i * 2 + 2] - smp.data[i * 2]) * t;
-                    s.1 += smp.data[i * 2 + 1] + (smp.data[i * 2 + 3] - smp.data[i * 2 + 1]) * t;
-                    v.pos = Some(pos + (smp.rate / r * v.speed) as f64);
+                // REPEAT UP: CFX PITCH, COLOR 0.5 -> 1 with the knob (both sides), PARAM 0.5.
+                let color = if building && up { 0.5 + 0.5 * pct / 100.0 } else { 0.5 };
+                e.pitch.process(4, color, 0.5, sb, rate);
+                for (o, v) in buf[done * 2..(done + len) * 2].iter_mut().zip(sb.iter()) {
+                    *o += v * cmd.gain;
                 }
-                buf[n * 2] += s.0 * cmd.gain;
-                buf[n * 2 + 1] += s.1 * cmd.gain;
+                done += len;
             }
             for v in e.hit.iter_mut() {
                 v.wait = v.wait.saturating_sub(frames);
@@ -582,6 +764,40 @@ pub struct MfxState {
     loaded: bool,
     /// The bottom row of the FX panel shows MERGE FX instead of CFX.
     pub show: bool,
+    /// Each deck is playing (read before the rack is locked).
+    pub playing: [bool; 4],
+    /// Per unit and column (BUILD SAMPLE, DROP SAMPLE): the chosen file being decoded or
+    /// handed to the engine.
+    user: [[UserFile; 2]; 2],
+}
+
+#[derive(Default)]
+struct UserFile {
+    /// The path asked for, and the one the engine has.
+    want: String,
+    have: String,
+    rx: Option<std::sync::mpsc::Receiver<(String, Option<Arc<Sample>>)>>,
+}
+
+/// The file a unit's column should play: the preset's path when its component takes one.
+pub fn wanted_path(p: &MfxPrefs, sel: usize, col: usize) -> &str {
+    let id = p.comps[sel][if col == 0 { 1 } else { 3 }];
+    if path_selectable(id) { &p.paths[sel][col] } else { "" }
+}
+
+/// The sample menu (`PresetComponent::showSampleSelectionAt`): the file chosen now (if any),
+/// then BANK 1..4 with the sampler's loaded slots (up to 64, 16 a bank) by file name.
+pub fn sample_menu(slots: &[Option<crate::ui_sampler::SlotPrefs>]) -> [Vec<(String, String)>; 4] {
+    let mut banks: [Vec<(String, String)>; 4] = Default::default();
+    for (i, s) in slots.iter().enumerate().take(64) {
+        if let Some(s) = s {
+            if !s.path.is_empty() {
+                let stem = std::path::Path::new(&s.path).file_stem().map(|x| x.to_string_lossy().into_owned()).unwrap_or_default();
+                banks[i / 16].push((stem, s.path.clone()));
+            }
+        }
+    }
+    banks
 }
 
 /// A unit is ON (PAD FX is refused meanwhile).
@@ -609,7 +825,7 @@ pub fn toggle(app: &mut crate::app::App, u: usize, cancel: bool) {
 /// happened and should stop.
 pub fn sync(app: &mut crate::app::App, rack: &mut crate::fx::Rack, bpm: &[f32; crate::fx::CHANNELS]) -> Vec<usize> {
     let mut stop = Vec::new();
-    let p = app.prefs.fx.mfx.clone();
+    let p = &app.prefs.fx.mfx;
     let st = &mut app.px.fxx.mfx;
     if !p.enabled {
         if let Some(m) = rack.merge.as_deref_mut() {
@@ -638,8 +854,43 @@ pub fn sync(app: &mut crate::app::App, rack: &mut crate::fx::Rack, bpm: &[f32; c
     }
     for u in 0..2 {
         let deck = p.deck(u);
+        let sel = p.select[u].min(3) as usize;
+        let s = st.units[u];
+        m.cmd[u] = Cmd { on: s.on, cancel: s.cancel, knob: s.knob, comps: p.comps[sel], deck: deck as u8, bpm: bpm[deck], gain: 10f32.powf(p.volume.clamp(-12.0, 12.0) / 20.0), playing: st.playing[deck] };
+        // The chosen files: decoded on a worker thread, handed over when ready.
+        for col in 0..2 {
+            let f = &mut st.user[u][col];
+            let want = wanted_path(p, sel, col);
+            if want != f.want {
+                f.want = want.to_string();
+                f.have.clear();
+                drop(m.set_user(u, col, None));
+            }
+            match f.rx.as_ref().map(|rx| rx.try_recv()) {
+                Some(Ok((path, sample))) => {
+                    f.rx = None;
+                    if path == f.want {
+                        f.have = path;
+                        drop(m.set_user(u, col, sample));
+                    }
+                }
+                Some(Err(std::sync::mpsc::TryRecvError::Disconnected)) => f.rx = None,
+                _ => {}
+            }
+            // At most one decode per unit/column. If the selection changed while it ran,
+            // discard the stale result above, then request only the newest file.
+            if f.rx.is_none() && !want.is_empty() && want != f.have {
+                let (tx, rx) = std::sync::mpsc::channel();
+                let path = want.to_string();
+                f.have.clone_from(&path);
+                std::thread::spawn(move || {
+                    let sample = load_user(&path);
+                    let _ = tx.send((path, sample));
+                });
+                f.rx = Some(rx);
+            }
+        }
         let s = &mut st.units[u];
-        m.cmd[u] = Cmd { on: s.on, cancel: s.cancel, knob: s.knob, comps: p.comps[p.select[u].min(3) as usize], deck: deck as u8, bpm: bpm[deck], gain: 10f32.powf(p.volume.clamp(-12.0, 12.0) / 20.0) };
         s.phase_on = m.phase(u) != Phase::Idle;
         if m.dropped[u] != s.seen {
             s.seen = m.dropped[u];
@@ -803,13 +1054,207 @@ mod tests {
         }
     }
 
+    /// Frames where a run's left channel jumps up from silence (sample starts).
+    fn onsets(x: &[f32]) -> Vec<usize> {
+        let mut out = Vec::new();
+        let mut prev = 0.0f32;
+        for (i, f) in x.chunks_exact(2).enumerate() {
+            if f[0] > 0.05 && prev <= 0.05 {
+                out.push(i);
+            }
+            prev = f[0];
+        }
+        out
+    }
+
+    #[test]
+    fn repeat_rates_are_rekordboxs_notes_per_beat() {
+        // `changeNotesPerBeat`: 1 / 2 / 4 / 8 a beat below 25 / 50 / 75 / from 75 % of |knob|.
+        assert_eq!([0.0, 24.9, 25.0, 49.9, 50.0, 74.9, 75.0, 100.0].map(notes_per_beat), [1, 1, 2, 2, 4, 4, 8, 8]);
+        // Its 32-step pattern (eighths of a beat over four beats).
+        assert_eq!(note_steps(1).iter().filter(|b| **b).count(), 4);
+        assert_eq!(note_steps(8), [true; 32]);
+        let two = note_steps(2);
+        assert!(two[0] && !two[1] && !two[3] && two[4] && two[28]);
+        assert_eq!((voice_no(21), voice_no(22), voice_no(43), voice_no(15), voice_no(11)), (Some(1), Some(1), Some(2), Some(101), None));
+        assert!(path_selectable(21) && path_selectable(22) && path_selectable(43) && !path_selectable(15) && !path_selectable(38));
+        // In the engine: at 120 BPM (24,000 frames a beat at 48 kHz) a short click sample is
+        // hit every 24,000 frames at rest, every 3,000 at 80 % (either side).
+        for (knob, gap) in [(0.0f32, 24000usize), (0.3, 12000), (-0.6, 6000), (0.8, 3000)] {
+            let mut e = Engine::new();
+            e.cmd[0].comps = [44, 15, 23, 44];
+            let mut click = vec![0.0f32; 200 * 2];
+            click[..20].iter_mut().for_each(|v| *v = 0.5);
+            e.set_samples(&[(101, Arc::new(Sample { data: click, rate: 48000.0 }))]);
+            e.cmd[0].on = true;
+            e.cmd[0].knob = knob;
+            let mut out = Vec::new();
+            for _ in 0..200 {
+                let mut d = vec![0.0f32; 480 * 2];
+                e.deck(0, &mut d, 48000, None);
+                let mut m = vec![0.0f32; 480 * 2];
+                e.master(&mut m, 48000);
+                out.extend(m);
+            }
+            let o = onsets(&out);
+            // (The knob glides there in the first 30 ms; count the steady part.)
+            let steady: Vec<usize> = o.windows(2).filter(|w| w[0] > 2400).map(|w| w[1] - w[0]).collect();
+            assert!(!steady.is_empty() && steady.iter().all(|g| g.abs_diff(gap) <= 1), "{knob}: {steady:?}");
+        }
+    }
+
+    #[test]
+    fn repeat_grid_restarts_on_a_playing_deck_and_keeps_phase_on_a_stopped_one() {
+        for playing in [false, true] {
+            let mut e = Engine::new();
+            e.cmd[0].comps = [44, 15, 23, 44];
+            e.cmd[0].playing = playing;
+            let mut click = vec![0.0f32; 200 * 2];
+            click[..20].iter_mut().for_each(|v| *v = 0.5);
+            e.set_samples(&[(101, Arc::new(Sample { data: click, rate: 48000.0 }))]);
+            e.cmd[0].on = true;
+            let mut out = Vec::new();
+            for b in 0..150 {
+                // 1 a beat, then from frame 30,000 (1.25 beats) 2 a beat.
+                if b == 62 {
+                    e.cmd[0].knob = 0.3;
+                }
+                let mut d = vec![0.0f32; 480 * 2];
+                e.deck(0, &mut d, 48000, None);
+                let mut m = vec![0.0f32; 480 * 2];
+                e.master(&mut m, 48000);
+                out.extend(m);
+            }
+            let o = onsets(&out);
+            assert!(o[0] == 0 && o[1].abs_diff(24000) <= 1, "{o:?}");
+            // The knob reaches 25 % about 9 ms after it is turned (frame 29,760 + 432).
+            if playing {
+                // A note 0.02 beats (480 frames) after the change, then every half beat.
+                assert!(o[2].abs_diff(29760 + 432 + 480) <= 480 && (o[3] - o[2]).abs_diff(12000) <= 1, "{o:?}");
+            } else {
+                // The grid goes on from the start: the next half beat is 36,000.
+                assert!(o[2].abs_diff(36000) <= 1 && o[3].abs_diff(48000) <= 1, "{o:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn repeat_up_goes_an_octave_up_through_cfx_pitch() {
+        // A 440 Hz sample, a second long; REPEAT UP SNARE9 with the knob at the end: CFX PITCH
+        // at COLOR 1, PARAM 0.5 doubles it (and the sample's length stays: no speed-up).
+        let sine: Vec<f32> = (0..48000).flat_map(|i| { let v = (i as f32 * 440.0 * std::f32::consts::TAU / 48000.0).sin() * 0.4; [v, v] }).collect();
+        let level = |x: &[f32], f: f32| {
+            let w = f * std::f32::consts::TAU / 48000.0;
+            let (mut re, mut im) = (0.0f64, 0.0f64);
+            for (i, v) in x.chunks_exact(2).enumerate() {
+                re += (v[0] * (w * i as f32).cos()) as f64;
+                im += (v[0] * (w * i as f32).sin()) as f64;
+            }
+            (re * re + im * im).sqrt()
+        };
+        let mut res = Vec::new();
+        for id in [15u8, 16] {
+            let mut e = Engine::new();
+            e.cmd[0].comps = [44, id, 23, 44];
+            e.set_samples(&[(101, Arc::new(Sample { data: sine.clone(), rate: 48000.0 }))]);
+            e.cmd[0].on = true;
+            e.cmd[0].knob = 0.1;
+            let mut out = Vec::new();
+            for b in 0..40 {
+                if b == 1 {
+                    e.cmd[0].knob = 0.2;
+                }
+                let mut d = vec![0.0f32; 480 * 2];
+                e.deck(0, &mut d, 48000, None);
+                let mut m = vec![0.0f32; 480 * 2];
+                e.master(&mut m, 48000);
+                out.extend(m);
+            }
+            // COLOR at 20 %: 0.6 -> shift (2 - 1) * 0.0080645 * (153 - 131) = 0.177.
+            let tail = &out[9600 * 2..19200 * 2];
+            res.push((level(tail, 440.0), level(tail, 440.0 * 1.177)));
+        }
+        assert!(res[0].0 > 10.0 * res[0].1, "plain REPEAT stays at 440: {res:?}");
+        assert!(res[1].1 > 2.0 * res[1].0 && res[1].0 < 0.1 * res[0].0, "REPEAT UP moves to 518 Hz: {res:?}");
+        assert!((crate::cfx::pitch_law(255, 127).unwrap() - 1.0).abs() < 0.01, "an octave at the end");
+    }
+
+    #[test]
+    fn chosen_files_play_and_missing_ones_are_silent() {
+        let mut p = MfxPrefs::default();
+        p.comps[0] = [2, 21, 24, 43];
+        p.paths[0] = ["/a.wav".into(), "/b.wav".into()];
+        assert_eq!((wanted_path(&p, 0, 0), wanted_path(&p, 0, 1)), ("/a.wav", "/b.wav"));
+        p.comps[0][1] = 15;
+        assert_eq!(wanted_path(&p, 0, 0), "", "a factory component ignores the path");
+        assert!(load_user("/no/such/file.wav").is_none() && load_user("").is_none());
+        // The engine plays the file handed over for the column.
+        let mut e = Engine::new();
+        e.cmd[0].comps = [44, 21, 23, 44];
+        assert!(e.set_user(0, 0, Some(Arc::new(Sample { data: vec![0.5; 4800 * 2], rate: 48000.0 }))).is_none());
+        e.cmd[0].on = true;
+        let mut m = vec![0.0f32; 480 * 2];
+        e.deck(0, &mut vec![0.0f32; 960], 48000, None);
+        e.master(&mut m, 48000);
+        assert!(m[100] > 0.4, "{}", m[100]);
+        // Without one it is silent.
+        let mut e = Engine::new();
+        e.cmd[0].comps = [44, 21, 23, 44];
+        e.cmd[0].on = true;
+        let mut m = vec![0.0f32; 480 * 2];
+        e.master(&mut m, 48000);
+        assert!(m.iter().all(|v| *v == 0.0));
+        // The sample menu: slots by bank, the file's name without extension.
+        let mut slots: Vec<Option<crate::ui_sampler::SlotPrefs>> = vec![None; 64];
+        let mk = |p: &str| { let mut s: crate::ui_sampler::SlotPrefs = serde_json::from_str("{}").unwrap(); s.path = p.into(); Some(s) };
+        slots[3] = mk("/x/Kick.wav");
+        slots[17] = mk("/x/Clap 2.aiff");
+        slots[63] = mk("/x/Last.mp3");
+        let b = sample_menu(&slots);
+        assert_eq!((b[0][0].0.as_str(), b[1][0].0.as_str(), b[3][0].1.as_str(), b[2].len()), ("Kick", "Clap 2", "/x/Last.mp3", 0));
+    }
+
+    #[test]
+    fn factory_sounds_come_from_rekordboxs_folder() {
+        if let Some(dir) = factory_dir() { assert!(dir.ends_with("rekordbox/Sampler/MERGE FX")); }
+    }
+
     #[test]
     fn wav_parsing() {
         let mut b = b"RIFF\0\0\0\0WAVEfmt \x10\0\0\0\x01\0\x02\0\x44\xac\0\0\0\0\0\0\x06\0\x18\0data\x0c\0\0\0".to_vec();
         b.extend([0, 0, 0x40, 0, 0, 0xC0, 0xFF, 0xFF, 0x7F, 0, 0, 0x80]);
-        let s = parse_wav(&b).unwrap();
+        let s = parse_wav(&b, FACTORY_FLOATS).unwrap();
         assert_eq!((s.rate, s.data.len()), (44100.0, 4));
         assert!((s.data[0] - 0.5).abs() < 1e-6 && (s.data[1] + 0.5).abs() < 1e-6 && s.data[2] > 0.999 && s.data[3] == -1.0);
-        assert!(parse_wav(b"nope").is_none());
+        assert!(parse_wav(b"nope", FACTORY_FLOATS).is_none());
+        assert!(parse_wav(&b, 3).is_none());
+        assert!(parse_wav(&b[..b.len() - 1], FACTORY_FLOATS).is_none());
+    }
+
+    #[test]
+    fn local_factory_wav_precedes_zip_and_only_named_sounds_are_read() {
+        use std::io::Write;
+        let temp = tempfile::tempdir().unwrap();
+        let fixture = |value: i16| {
+            let mut wav = b"RIFF\x28\0\0\0WAVEfmt \x10\0\0\0\x01\0\x01\0\x44\xac\0\0\x88\x58\x01\0\x02\0\x10\0data\x04\0\0\0".to_vec();
+            wav.extend(value.to_le_bytes());
+            wav.extend(value.to_le_bytes());
+            wav
+        };
+        let zip = temp.path().join("MERGE FX.zip");
+        let mut pack = zip::ZipWriter::new(std::fs::File::create(&zip).unwrap());
+        for name in ["MergeFX Sample Sound 101.wav", "MergeFX Sample Sound 201.wav", "Unused.wav"] {
+            pack.start_file(name, zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated)).unwrap();
+            pack.write_all(&fixture(8192)).unwrap();
+        }
+        pack.finish().unwrap();
+        std::fs::write(temp.path().join("MergeFX Sample Sound 101.wav"), fixture(16384)).unwrap();
+        let samples = factory_samples(Some(temp.path()), Some(&zip));
+        assert_eq!(samples.len(), 2);
+        assert_eq!((samples[0].0, samples[0].1.data[0]), (101, 0.5));
+        assert_eq!((samples[1].0, samples[1].1.data[0]), (201, 0.25));
+        let wav = fixture(8192);
+        assert!(read_factory_wav(&wav[..], MAX_FACTORY_WAV + 1, FACTORY_FLOATS).is_none());
+        assert!(read_factory_wav(&wav[..], wav.len() as u64 - 1, FACTORY_FLOATS).is_none());
     }
 }

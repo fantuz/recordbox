@@ -11,7 +11,6 @@
 
 use crate::app::*;
 use crate::midi::*;
-use crate::midi_csv::CsvFile;
 use crate::midi_map::{LearnEntry, LearnFilter, Reject, NO_FUNCTION};
 use crate::theme::*;
 use eframe::egui;
@@ -141,7 +140,7 @@ pub fn header_button(app: &mut App, ui: &mut Ui, r: Rect) {
     let col = if !enabled { hex(0x363636) } else if app.midi.win.open { BLUE } else if resp.hovered() { WHITE } else { hex(0xE6E6E6) };
     ui.painter().text(r.center() + vec2(0.0, 0.5), Align2::CENTER_CENTER, "MIDI", caps(10.7), col);
     app.midi.win.at.insert("MIDI".into(), r.center());
-    let base = "MIDI LEARN :\nThe buttons, knobs, and faders on MIDI controllers can be mapped to perform different functions.";
+    let base = "MIDI LEARN :\nSelect a function, enable LEARN, then move a control on the selected device. LEARN pauses its current mappings until you turn it off.";
     let tip = if enabled { base.to_string() } else { format!("{base}\nThis can be used after a MIDI controller is connected.") };
     if resp.on_hover_text(tip).clicked() && enabled {
         if app.midi.win.open {
@@ -182,8 +181,9 @@ pub fn set_learn(app: &mut App, on: bool) {
     app.midi.win.learn = on;
     app.midi.win.filter.reset();
     if let Some(hub) = app.midi.hub.as_ref() {
-        for d in hub.devices.lock().iter() {
-            d.learning.store(on && d.name == app.midi.win.device, Relaxed);
+        let devices = hub.devices.lock().clone();
+        for d in &devices {
+            hub.set_learning(d, on && d.name == app.midi.win.device);
         }
     }
 }
@@ -420,54 +420,37 @@ fn pick_file(save_name: Option<&str>) -> Option<std::path::PathBuf> {
 /// EXPORT: the user's part of the mapping, in rekordbox's file format. False when the file
 /// could not be written; None when no place was chosen.
 pub fn export(app: &mut App) -> Option<bool> {
+    let hub = app.midi.hub.clone()?;
     let dev = device(app)?;
     let path = pick_file(Some(&crate::midi_csv::export_name(&dev.name)))?;
     let text = dev.map.lock().save_text();
-    let ok = std::fs::write(&path, text).is_ok();
-    if !ok {
-        app.midi.win.alert = Some((String::new(), "Export failed.".into()));
+    match hub.export_file(&path, text.as_bytes()) {
+        Ok(()) => Some(true),
+        Err(e) => {
+            app.midi.win.alert = Some(("Export failed".into(), e.to_string()));
+            Some(false)
+        }
     }
-    Some(ok)
 }
 
-/// IMPORT: the chosen file becomes the user's mapping of the selected device.
+/// Import into the recordbox copy only after validating the selected file.
 pub fn import(app: &mut App) {
     let (Some(hub), Some(dev)) = (app.midi.hub.clone(), device(app)) else { return };
     let Some(path) = pick_file(None) else { return };
-    let Ok(bytes) = std::fs::read(&path) else {
-        app.midi.win.alert = Some((String::new(), "Import failed.".into()));
+    if let Err(e) = crate::midi_csv::read_file(&path).and_then(|bytes| hub.write_override(&dev.name, &bytes)) {
+        app.midi.win.alert = Some(("Cannot import the MIDI setting file".into(), e.to_string()));
         return;
-    };
-    match CsvFile::parse(&bytes) {
-        Ok(f) if f.device.eq_ignore_ascii_case(&dev.name) => {
-            let _ = std::fs::create_dir_all(&hub.user_dir);
-            if std::fs::write(hub.user_file(&dev.name), &bytes).is_err() {
-                app.midi.win.alert = Some((String::new(), "Import failed.".into()));
-                return;
-            }
-        }
-        Ok(_) => {
-            app.midi.win.alert = Some(("Cannot import the MIDI setting file".into(), "You can import a MIDI setting file only for the selected equipment.".into()));
-            return;
-        }
-        Err(_) => {
-            // Not a mapping file: the setting goes back to the default.
-            let _ = std::fs::write(hub.user_file(&dev.name), crate::midi_csv::empty_user_file(&dev.name));
-            app.midi.win.alert = Some((String::new(), "Import failed.\nThe file is not in a supported format.\nThe MIDI setting will be reset back to default.".into()));
-        }
     }
     *dev.map.lock() = hub.load_map(&dev.name).0;
     dev.reindex();
     rebuild_rows(app);
 }
 
-/// DEFAULT: the user's mapping is emptied (a supported controller is back on its factory
-/// mapping; any other has nothing mapped).
+/// Reset this recordbox device to its factory mapping, including when a native user map exists.
 pub fn reset_default(app: &mut App) {
     let (Some(hub), Some(dev)) = (app.midi.hub.clone(), device(app)) else { return };
-    let _ = std::fs::create_dir_all(&hub.user_dir);
-    if std::fs::write(hub.user_file(&dev.name), crate::midi_csv::empty_user_file(&dev.name)).is_err() {
-        app.midi.win.alert = Some((String::new(), "MIDI settings did not reset back to default.".into()));
+    if let Err(e) = hub.write_override(&dev.name, crate::midi_csv::empty_user_file(&dev.name).as_bytes()) {
+        app.midi.win.alert = Some(("MIDI settings could not be reset".into(), e.to_string()));
         return;
     }
     *dev.map.lock() = hub.load_map(&dev.name).0;

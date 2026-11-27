@@ -498,7 +498,7 @@ pub fn run_pending(app: &mut App, what: Pending) {
         Pending::Close => unload(app),
         Pending::SwitchMode(m) => {
             unload(app);
-            app.prefs.app_mode = m.min(MODE_EDIT);
+            crate::midi::change_mode(app, m.min(MODE_EDIT));
             app.poll_decks();
             app.save_prefs();
         }
@@ -544,10 +544,10 @@ pub fn intercept_mode(app: &mut App, mode: u8) -> bool {
 }
 
 pub fn enter(app: &mut App) {
+    crate::midi::change_mode(app, MODE_EDIT);
     for d in &app.player.decks {
         d.lock().playing = false;
     }
-    app.prefs.app_mode = MODE_EDIT;
     app.poll_decks();
     app.save_prefs();
 }

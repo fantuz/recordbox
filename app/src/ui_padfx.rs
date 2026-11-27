@@ -10,6 +10,14 @@
 //! the pad's look in the list layout (colour square, "R" box on release pads, name, value at
 //! the right) and the default colour code of every effect. A deck's PAD FX unit sits before
 //! FX1 / FX2 in its path and runs the multi-mode effect classes, as rekordbox's does.
+//! Beat shift on held pads (`PadFxView::onBeatShift` 0x101e19dec): each held pad whose
+//! parameters start with BEAT (or have BEAT second, or have one or none; rekordbox's test)
+//! steps one entry along 1/16 .. 32 (Beat Up / Beat Down of a controller); the running effect
+//! or SLIP LOOP follows, and the pad's own beat comes back when it is let go
+//! (`stopFx` / `stopReleaseFx`). The combination pads (`PadFxCombination`, a controller's
+//! "PAD1..16_PadFxCombination"): sixteen more pads per deck that always play rekordbox's
+//! combination preset (`restorePadFxInfoCombinationPreset`; nothing of them is stored) and
+//! have no view of their own, as in rekordbox.
 //! recordbox's own: where the bank, edit and page buttons sit under the pads (rekordbox's
 //! controller strip is 18 pt high under the pads; its exact place on screen has no capture),
 //! a second press ending a latched RELEASE FX pad, and the menu the edit mode opens.
@@ -284,6 +292,27 @@ pub fn preset(which: u8) -> Vec<Pad> {
     }
 }
 
+/// Pads 0..31 are a deck's two banks, 32..47 the combination pads.
+pub const PADS: usize = 48;
+
+/// Whether `onBeatShift` moves this pad's beat: its first parameter is BEAT, it has one or
+/// no parameter, or its second is BEAT.
+pub fn beat_shiftable(fx: u8) -> bool {
+    match params_of(fx) {
+        [None, _] | [Some(Param::Beat), _] | [Some(_), None] | [_, Some(Param::Beat)] => true,
+        _ => false,
+    }
+}
+
+/// One step along rekordbox's beat list (`getBeatList`: 1/16 .. 32): up, or down; a beat not
+/// in the list goes to its first entry.
+pub fn shift_beat(cur: (u8, u8), down: bool) -> (u8, u8) {
+    let n = BEATS.len() as i32;
+    let i = BEATS.iter().position(|b| *b == cur).map(|i| i as i32).unwrap_or(-1);
+    let to = if down { i.max(1) - 1 } else { (i + 1).min(n - 1) };
+    BEATS[to as usize]
+}
+
 /// What is kept between sessions: every deck's 32 pads (bank * 16 + pad) and the bank shown.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -300,7 +329,22 @@ impl Default for PadFxPrefs {
 
 impl PadFxPrefs {
     pub fn pad(&self, deck: usize, idx: usize) -> Pad {
+        if idx >= 32 {
+            return COMBINATION.get(idx - 32).map(|t| Pad::from_preset(*t)).unwrap_or_default();
+        }
         self.decks[deck.min(3)].get(idx).copied().unwrap_or_default()
+    }
+
+    /// A deck's 48 pads as they play now: the two banks, the combination pads, and the
+    /// beats of held pads shifted (`shift`: pad, numerator, denominator).
+    pub fn all(&self, deck: usize, shift: &[(u8, u8, u8)]) -> [Pad; PADS] {
+        let mut out: [Pad; PADS] = std::array::from_fn(|i| self.pad(deck, i));
+        for &(i, num, den) in shift {
+            if let Some(p) = out.get_mut(i as usize) {
+                (p.num, p.den) = (num, den);
+            }
+        }
+        out
     }
 
     fn pad_mut(&mut self, deck: usize, idx: usize) -> &mut Pad {
@@ -333,12 +377,14 @@ pub struct DeckPads {
     pub release: Option<u8>,
     pub slip: Option<u8>,
     pub edit: bool,
+    /// Held pads whose beat has been shifted, and to what (until they are let go).
+    pub shift: Vec<(u8, u8, u8)>,
 }
 
 impl DeckPads {
-    /// Pad `idx` goes down. `pads`: the deck's 32 pads.
+    /// Pad `idx` goes down in either editable bank or the combination bank.
     pub fn press(&mut self, pads: &[Pad], idx: u8) -> Option<DeckAsk> {
-        let pad = pads.get(idx as usize).copied().unwrap_or_default();
+        let pad = *pads.get(idx as usize)?;
         if !self.held.contains(&idx) {
             self.held.push(idx);
         }
@@ -373,6 +419,8 @@ impl DeckPads {
         let fx_of = |i: u8| pads.get(i as usize).map(|p| p.fx).unwrap_or(255);
         let pad = pads.get(idx as usize).copied().unwrap_or_default();
         self.held.retain(|h| *h != idx);
+        // (Its own beat comes back.)
+        self.shift.retain(|s| s.0 != idx);
         // Another held pad of the same effect takes over with its own parameters.
         let heir = self.held.iter().rev().copied().find(|h| fx_of(*h) == pad.fx);
         if self.beat == Some(idx) {
@@ -398,6 +446,7 @@ impl DeckPads {
     pub fn stop(&mut self) -> Option<DeckAsk> {
         let slip = self.slip.take();
         self.held.clear();
+        self.shift.clear();
         self.beat = None;
         self.color = None;
         self.release = None;
@@ -408,6 +457,27 @@ impl DeckPads {
     pub fn engine(&self, pads: &[Pad]) -> PadSet {
         let of = |i: Option<u8>| i.and_then(|i| pads.get(i as usize)).map(|p| p.engine()).unwrap_or(PadSet::NONE);
         PadSet { beat: of(self.beat).beat, color: of(self.color).color, release: of(self.release).release }
+    }
+
+    /// `onBeatShift`: every held pad that has a beat steps it once (`pads`: as they play now).
+    /// SLIP LOOP on a shifted pad changes its loop.
+    pub fn beat_shift(&mut self, pads: &[Pad], down: bool) -> Option<DeckAsk> {
+        let mut ask = None;
+        for &idx in &self.held {
+            let Some(p) = pads.get(idx as usize) else { continue };
+            if !beat_shiftable(p.fx) {
+                continue;
+            }
+            let (num, den) = shift_beat((p.num, p.den), down);
+            match self.shift.iter_mut().find(|s| s.0 == idx) {
+                Some(s) => (s.1, s.2) = (num, den),
+                None => self.shift.push((idx, num, den)),
+            }
+            if self.slip == Some(idx) {
+                ask = Some(DeckAsk::SlipLoop(num.max(1) as f32 / den.max(1) as f32));
+            }
+        }
+        ask
     }
 
     pub fn lit(&self, idx: u8) -> bool {
@@ -436,7 +506,11 @@ impl Default for PadFxState {
 impl PadFxState {
     /// What each deck's unit is asked for (for the audio thread).
     pub fn sets(&self, prefs: &PadFxPrefs) -> [PadSet; 4] {
-        std::array::from_fn(|d| self.decks[d].engine(&prefs.decks[d]))
+        std::array::from_fn(|d| {
+            let deck = &self.decks[d];
+            if deck.beat.is_none() && deck.color.is_none() && deck.release.is_none() { return PadSet::NONE; }
+            deck.engine(&prefs.all(d, &deck.shift))
+        })
     }
 
     /// A deck's unit has to exist (it shows PAD FX or something is held).
@@ -483,13 +557,21 @@ pub fn pad_down(app: &mut App, n: usize, idx: u8) {
         app.toast_err("Invalid operation. PAD FX cannot be operated when MERGE FX is ON.");
         return;
     }
-    let pads = app.prefs.fx.padfx.decks[n.min(3)].clone();
+    let pads = app.prefs.fx.padfx.all(n.min(3), &app.px.fxx.pad.decks[n.min(3)].shift);
     let ask = app.px.fxx.pad.decks[n.min(3)].press(&pads, idx);
     deck_ask(app, n, ask);
 }
 
+/// Beat Up / Beat Down on deck `n` (a controller's Parameter1Right / Left of PAD FX): the held
+/// pads' beats step.
+pub fn beat_shift(app: &mut App, n: usize, down: bool) {
+    let pads = app.prefs.fx.padfx.all(n.min(3), &app.px.fxx.pad.decks[n.min(3)].shift);
+    let ask = app.px.fxx.pad.decks[n.min(3)].beat_shift(&pads, down);
+    deck_ask(app, n, ask);
+}
+
 pub fn pad_up(app: &mut App, n: usize, idx: u8) {
-    let pads = app.prefs.fx.padfx.decks[n.min(3)].clone();
+    let pads = app.prefs.fx.padfx.all(n.min(3), &app.px.fxx.pad.decks[n.min(3)].shift);
     let ask = app.px.fxx.pad.decks[n.min(3)].release(&pads, idx);
     deck_ask(app, n, ask);
 }
@@ -516,7 +598,11 @@ pub fn pads(app: &mut App, ui: &mut Ui, n: u8, pad: &dyn Fn(usize, usize) -> Rec
         let idx = (bank * 16 + page * 8 + i) as u8;
         let pr = pad(i / 4, i % 4);
         app.px.fxx.pad.rects[d][i] = pr;
-        let info = app.prefs.fx.padfx.pad(d, idx as usize);
+        let mut info = app.prefs.fx.padfx.pad(d, idx as usize);
+        if let Some(s) = app.px.fxx.pad.decks[d].shift.iter().find(|s| s.0 == idx) {
+            // (A shifted beat shows while the pad is held.)
+            (info.num, info.den) = (s.1, s.2);
+        }
         let lit = app.px.fxx.pad.decks[d].lit(idx);
         let resp = ui.interact(pr, ui.id().with(("padfx", n, i)), Sense::click_and_drag());
         p.rect_filled(pr, 0.0, if lit { hex(0x2C2C2C) } else if resp.hovered() { hex(0x1E1E1E) } else { hex(0x161616) });
@@ -754,6 +840,43 @@ mod tests {
         d.press(&pads, 0);
         assert_eq!(d.stop(), Some(DeckAsk::EndSlipLoop));
         assert!(d.held.is_empty() && !d.engine(&pads).any());
+    }
+
+    #[test]
+    fn beat_shift_on_held_pads_and_combination_pads() {
+        // rekordbox's list and steps: up to 32 at most, down to 1/16 at least.
+        assert_eq!((shift_beat((1, 2), false), shift_beat((1, 2), true), shift_beat((32, 1), false), shift_beat((1, 16), true), shift_beat((5, 7), false)), ((3, 4), (1, 4), (32, 1), (1, 16), (1, 16)));
+        // Which pads move: BEAT first or second, or one parameter or none (REVERB and ROBOT
+        // do not, NOISE (colour + level) does not).
+        assert!(beat_shiftable(1) && beat_shiftable(28) && beat_shiftable(29) && beat_shiftable(19) && beat_shiftable(34));
+        assert!(!beat_shiftable(3) && !beat_shiftable(8) && !beat_shiftable(26));
+        let prefs = PadFxPrefs::default();
+        let mut d = DeckPads::default();
+        // Standard bank 1: pad 5 ECHO 1/2, pad 6 REVERB, pad 16 SLIP LOOP 1/16.
+        let pads = prefs.all(0, &d.shift);
+        assert_eq!((pads[5].fx, pads[5].beats(), pads[6].fx, pads[16].fx), (1, 0.5, 3, SLIP_LOOP));
+        d.press(&pads, 6);
+        d.press(&pads, 5);
+        assert_eq!(d.beat_shift(&pads, false), None);
+        let pads = prefs.all(0, &d.shift);
+        assert_eq!((pads[5].num, pads[5].den, pads[6].room), (3, 4, 50));
+        // The running effect follows; letting go brings the pad's own beat back.
+        d.release(&pads, 6);
+        assert_eq!(d.engine(&prefs.all(0, &d.shift)).beat.unwrap().value, 0.75);
+        d.release(&prefs.all(0, &d.shift), 5);
+        assert!(d.shift.is_empty() && prefs.all(0, &d.shift)[5].beats() == 0.5);
+        // SLIP LOOP held: Beat Down halves its loop.
+        let pads = prefs.all(0, &d.shift);
+        assert_eq!(d.press(&pads, 17), Some(DeckAsk::SlipLoop(0.125)));
+        assert_eq!(d.beat_shift(&pads, true), Some(DeckAsk::SlipLoop(0.0625)));
+        // Combination pads (33..48): rekordbox's combination preset, whatever the banks hold.
+        let mut p2 = PadFxPrefs::default();
+        p2.decks[0][0] = Pad::of(7);
+        let all = p2.all(0, &[]);
+        assert_eq!((all[32].fx, all[32].num, all[32].den, all[33].fx, all[37].fx, all[37].room), (29, 3, 4, 31, 3, 50));
+        let mut c = DeckPads::default();
+        c.press(&all, 37);
+        assert_eq!(c.engine(&all).beat.unwrap().kind, Kind::Reverb);
     }
 
     #[test]

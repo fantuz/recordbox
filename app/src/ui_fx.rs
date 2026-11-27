@@ -364,6 +364,12 @@ pub fn sync(app: &mut App) {
     quantize[fx::MASTER] = quantize[m];
     bpm[fx::SAMPLER] = app.prefs.sampler.bpm.clamp(40.0, 499.0);
     let master_cfx = cfx_for(app, fx::MASTER);
+    if merge {
+        // (Read before the rack is locked: MERGE FX restarts its repeat grid on a playing deck.)
+        for n in 0..app.deck_count().min(4) {
+            app.px.fxx.mfx.playing[n as usize] = app.with_deck(n, |a| a.player.state.lock().playing);
+        }
+    }
     // With RELEASE FX > Unit Number 1 the one RELEASE FX is the master's (FX1's panel).
     let master_release = app.prefs.fx.effect.release_units == 1;
     let stop = {
@@ -525,7 +531,7 @@ pub fn knob_text(label: &str, v: f32) -> String {
             let x = ((v - 0.5) * 200.0).round();
             if x.abs() < 2.5 { "0".into() } else { format!("{x:+.0}") }
         }
-        "STAGE" => format!("{}", fx::phaser_stages(v)),
+        "STAGE" => format!("{}", { let (l, r) = fx::phaser_stages(v); l.max(r) }),
         _ => format!("{:.0}", v * 100.0),
     }
 }
@@ -1007,7 +1013,9 @@ fn mfx_row(app: &mut App, ui: &mut Ui, r: Rect) {
     crate::ui_browser::dropdown(ui, &gresp, "mfxsettingspop", |ui| {
         // "MERGE FX Settings": for each of MERGE FX 1..4 a preset and its four parts.
         ui.set_min_width(640.0);
-        ui.label(egui::RichText::new("MERGE FX Settings").strong());
+        ui.label(egui::RichText::new("MERGE FX Settings").strong()).on_hover_text(
+            "Factory sounds are read from rekordbox/Sampler/MERGE FX in your Music folder. Place the original WAV files or MERGE FX.zip there, or set RECORDBOX_MERGE_FX_ARCHIVE to a local ZIP before starting recordbox. REPEAT SAMPLE and SAMPLER use the file you choose from a sampler bank."
+        );
         egui::Grid::new("mfxgrid").num_columns(6).spacing([8.0, 4.0]).show(ui, |ui| {
             ui.label("");
             ui.label("PRESET");
@@ -1024,29 +1032,71 @@ fn mfx_row(app: &mut App, ui: &mut Ui, r: Rect) {
                         if ui.selectable_label(cur == k && !custom, *name).clicked() {
                             app.prefs.fx.mfx.preset[i] = k as u8;
                             app.prefs.fx.mfx.comps[i] = *comps;
+                            app.prefs.fx.mfx.paths[i] = Default::default();
                             app.save_prefs();
                         }
                     }
                 });
                 for (col, (_, ids)) in mfx::COLUMNS.iter().enumerate() {
                     let id = app.prefs.fx.mfx.comps[i][col];
-                    egui::ComboBox::from_id_salt(("mfxcomp", i, col)).width(120.0).selected_text(mfx::name(id)).show_ui(ui, |ui| {
-                        for k in ids.iter() {
-                            if ui.selectable_label(id == *k, mfx::name(*k)).clicked() {
-                                app.prefs.fx.mfx.comps[i][col] = *k;
-                                app.save_prefs();
+                    ui.horizontal(|ui| {
+                        egui::ComboBox::from_id_salt(("mfxcomp", i, col)).width(120.0).selected_text(mfx::name(id)).show_ui(ui, |ui| {
+                            for k in ids.iter() {
+                                if ui.selectable_label(id == *k, mfx::name(*k)).clicked() {
+                                    app.prefs.fx.mfx.comps[i][col] = *k;
+                                    app.save_prefs();
+                                }
                             }
+                        });
+                        // BUILD SAMPLE and DROP SAMPLE: the file of REPEAT SAMPLE / SAMPLER, from
+                        // the sampler's slots (rekordbox's sample button and its menu).
+                        if col == 1 || col == 3 {
+                            mfx_sample_button(app, ui, i, col / 2, mfx::path_selectable(id));
                         }
                     });
                 }
                 if ui.button("RESET").clicked() {
                     app.prefs.fx.mfx.comps[i] = mfx::PRESETS[cur].1;
+                    app.prefs.fx.mfx.paths[i] = Default::default();
                     app.save_prefs();
                 }
                 ui.end_row();
             }
         });
     });
+}
+
+/// The sample button beside a MERGE FX column: lit while a file is chosen, enabled for
+/// REPEAT SAMPLE / REPEAT UP SAMPLE / SAMPLER; its menu lists the file in use, then BANK 1..4
+/// with the sampler's slots, the chosen one ticked (`PresetComponent::showSampleSelectionAt`).
+fn mfx_sample_button(app: &mut App, ui: &mut Ui, i: usize, slot: usize, enabled: bool) {
+    let path = app.prefs.fx.mfx.paths[i][slot].clone();
+    let stem = |p: &str| std::path::Path::new(p).file_stem().map(|x| x.to_string_lossy().into_owned()).unwrap_or_default();
+    let lit = !path.is_empty();
+    let resp = ui.add_enabled(enabled, egui::Button::new(egui::RichText::new("SAMPLE").size(9.0)).selected(lit)).on_hover_text(if lit { stem(&path) } else { "No sample selected".into() });
+    let mut pick = None;
+    crate::ui_browser::dropdown(ui, &resp, &format!("mfxsample{i}{slot}"), |ui| {
+        let banks = crate::mfx::sample_menu(&app.prefs.sampler.slots);
+        ui.set_min_width(180.0);
+        if lit {
+            ui.add_enabled(false, egui::Button::new(stem(&path)).frame(false));
+            ui.separator();
+        }
+        for (b, list) in banks.iter().enumerate() {
+            ui.menu_button(format!("BANK {}", b + 1), |ui| {
+                for (name, p) in list {
+                    if ui.selectable_label(*p == path, name).clicked() {
+                        pick = Some(p.clone());
+                        ui.close_menu();
+                    }
+                }
+            });
+        }
+    });
+    if let Some(p) = pick {
+        app.prefs.fx.mfx.paths[i][slot] = p;
+        app.save_prefs();
+    }
 }
 
 /// Preferences > Controller > Effect, after rekordbox 7.2.19 (reference preferences/09):
@@ -1308,6 +1358,6 @@ mod tests {
         assert_eq!(knob_text("PITCH", 1.0), "+100");
         assert_eq!(knob_text("PITCH", 0.0), "-100");
         assert_eq!(knob_text("STAGE", 0.5), "6");
-        assert_eq!(knob_text("STAGE", 0.0), "2");
+        assert_eq!(knob_text("STAGE", 0.0), "60");
     }
 }

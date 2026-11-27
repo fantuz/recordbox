@@ -27,10 +27,14 @@ use crate::model::*;
 use parking_lot::{Condvar, Mutex};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering::Relaxed};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+
+mod routing;
+use routing::{Platter, Routing};
+pub(crate) use routing::change_mode;
 
 // ---------------------------------------------------------------------- settings
 
@@ -149,7 +153,7 @@ pub enum Stub {
     AutoMixStartStop,
     /// MIX POINT LINK: 0 panel, 1 cue select next, 2 back, 3 set, 4 exit, 5 deck select, 6 silent.
     MixPointLink(u8),
-    /// PAD FX: bank (1 or 2).
+    /// PAD FX: banks 1 and 2, or the controller's combination bank (3).
     PadFxMode(u8),
     PadFx(u8, u8),
     PadFxBeat(u8, i32),
@@ -407,6 +411,9 @@ fn build_registry() -> Vec<Func> {
         }
         add(t, "PadFX", &format!("PadFX{bank}Beat Up"), &format!("Parameter1Right_PadFx{bank}"), b, true, A::Stub(Stub::PadFxBeat(bank, 1)));
         add(t, "PadFX", &format!("PadFX{bank}Beat Down"), &format!("Parameter1Left_PadFx{bank}"), b, true, A::Stub(Stub::PadFxBeat(bank, -1)));
+    }
+    for n in 1..=16u8 {
+        add(t, "PadFX", &format!("PadFXCombination Pad{n}"), &format!("PAD{n}_PadFxCombination"), pad, true, A::Stub(Stub::PadFx(3, n - 1)));
     }
     for (lp, mode) in [(false, "Slicer"), (true, "SlicerLoop")] {
         add(t, "Slicer", &format!("{mode}Mode"), mode, b, true, A::Stub(Stub::SlicerMode(lp)));
@@ -686,6 +693,7 @@ pub struct Device {
     pub needs_auth: bool,
     pub has_output: bool,
     pub learning: AtomicBool,
+    input_epoch: Arc<AtomicU64>,
     pub alive: AtomicBool,
     out_index: Mutex<HashMap<(u32, u8), Vec<Entry>>>,
     leds: Mutex<HashMap<(u32, u8), Led>>,
@@ -694,7 +702,7 @@ pub struct Device {
     out: Mutex<OutState>,
     out_cv: Condvar,
     interval_ms: AtomicU64,
-    jog: Mutex<[Jog; 4]>,
+    jog: Mutex<[Platter; 4]>,
     /// Last Load press per deck (the DDJ-400 family's double press = Instant Doubles).
     load_at: Mutex<[Option<Instant>; 4]>,
     in_conn: Mutex<Option<midir::MidiInputConnection<()>>>,
@@ -703,6 +711,33 @@ pub struct Device {
 }
 
 impl Device {
+    fn mapped(name: &str, map: MidiMap, factory: bool, conn: Option<midir::MidiOutputConnection>) -> Arc<Self> {
+        let cpr = jog_counts(name);
+        let dev = Arc::new(Self {
+            name: name.to_string(),
+            map: Mutex::new(map),
+            factory,
+            needs_auth: needs_auth(name),
+            has_output: conn.is_some(),
+            learning: AtomicBool::new(false),
+            input_epoch: Arc::default(),
+            alive: AtomicBool::new(true),
+            out_index: Mutex::new(HashMap::new()),
+            leds: Mutex::new(HashMap::new()),
+            named: Mutex::new(HashMap::new()),
+            out: Mutex::new(OutState { queue: OutQueue::default(), blink: Blinker::default(), blinking: HashMap::new(), conn }),
+            out_cv: Condvar::new(),
+            interval_ms: AtomicU64::new(1),
+            jog: Mutex::new(std::array::from_fn(|_| Platter::new(cpr))),
+            load_at: Mutex::new([None; 4]),
+            in_conn: Mutex::new(None),
+            received: AtomicU64::new(0),
+            sent: AtomicU64::new(0),
+        });
+        dev.reindex();
+        dev
+    }
+
     /// After the map changed: mark the functions recordbox knows, index the outputs and
     /// forget what the LEDs were sent, so that they are all sent again.
     pub fn reindex(&self) {
@@ -841,7 +876,7 @@ pub fn hot_cue_led(color: u8, slot: i32, is_loop: bool, set: u8) -> u8 {
 /// to name the function rekordbox would run.
 pub fn probe(port: &str, secs: f64) {
     let say = |s: String| eprintln!("midiprobe: {s}");
-    let Ok(mut input) = midir::MidiInput::new("recordbox-probe") else { return say("CoreMIDI client could not be made".into()) };
+    let Ok(mut input) = midir::MidiInput::new("recordbox-probe") else { return say("MIDI input client could not be opened".into()) };
     input.ignore(midir::Ignore::None);
     let names: Vec<String> = input.ports().iter().filter_map(|p| input.port_name(p).ok()).collect();
     say(format!("input ports: {names:?}"));
@@ -860,10 +895,10 @@ pub fn probe(port: &str, secs: f64) {
     }
     say(format!("{} messages in {secs:.1} s", msgs.len()));
     // rekordbox's own mapping for the port (read only).
-    let rb_user = std::env::var_os("HOME").map(|h| PathBuf::from(h).join("Library/Application Support/Pioneer/rekordbox6/MidiMappings").join(crate::midi_csv::mapping_name(port)));
+    let rb_user = crate::midi_csv::native_user_files(&crate::midi_csv::native_user_dirs(), port).into_iter().find(|p| p.is_file());
     let rb_map = rb_user.as_ref().and_then(|f| std::fs::read(f).ok()).and_then(|b| MidiMap::load(port, None, Some(&b)).ok());
     say(format!("rekordbox's user mapping for the port: {}", match (&rb_user, &rb_map) { (Some(f), Some(m)) => format!("{} ({} output rows)", f.display(), m.outputs.len()), _ => "none".into() }));
-    let factory = crate::midi_csv::factory_file(&crate::midi_csv::factory_dir(), port);
+    let factory = crate::midi_csv::factory_dirs().iter().find_map(|dir| crate::midi_csv::factory_file(dir, port));
     say(format!("factory mapping in the installed rekordbox: {}", factory.map(|f| f.display().to_string()).unwrap_or_else(|| "none".into())));
     let raw: Vec<Vec<u8>> = msgs.iter().map(|m| m.1.clone()).collect();
     let learned = probe_learn(port, &raw, rb_map.as_ref());
@@ -909,6 +944,8 @@ pub fn needs_auth(name: &str) -> bool {
 /// Everything the port threads and the interface share.
 pub struct Hub {
     playback_enabled: bool,
+    routing: Mutex<Routing>,
+    mode_epoch: Arc<AtomicU64>,
     pub devices: Mutex<Vec<Arc<Device>>>,
     pub decks: [Arc<Mutex<PlayState>>; 4],
     pub snap: Mutex<Snapshot>,
@@ -918,7 +955,8 @@ pub struct Hub {
     pub ctx: Mutex<Option<eframe::egui::Context>>,
     /// Where the user's mappings are kept: `<data folder>/MidiMappings`.
     pub user_dir: PathBuf,
-    pub factory_dir: PathBuf,
+    factory_dirs: Vec<PathBuf>,
+    native_user_dirs: Vec<PathBuf>,
     /// A CUE held on a stopped deck is playing from the cue point.
     cue_preview: [AtomicBool; 4],
     /// A hot cue pad held on a stopped deck: where it started (bits of the seconds; NaN = none).
@@ -952,6 +990,8 @@ impl Hub {
         let (tx, rx) = crossbeam_channel::unbounded();
         let hub = Hub {
             playback_enabled,
+            routing: Mutex::new(Routing::default()),
+            mode_epoch: Arc::default(),
             devices: Mutex::new(vec![]),
             decks,
             snap: Mutex::new(Snapshot::default()),
@@ -960,7 +1000,8 @@ impl Hub {
             tx,
             ctx: Mutex::new(None),
             user_dir,
-            factory_dir: crate::midi_csv::factory_dir(),
+            factory_dirs: crate::midi_csv::factory_dirs(),
+            native_user_dirs: crate::midi_csv::native_user_dirs(),
             cue_preview: std::array::from_fn(|_| AtomicBool::new(false)),
             hot_preview: std::array::from_fn(|_| AtomicU64::new(nan_bits())),
             pads_down: std::array::from_fn(|_| AtomicU8::new(0)),
@@ -988,26 +1029,57 @@ impl Hub {
     }
 
     pub fn user_file(&self, device: &str) -> PathBuf {
-        self.user_dir.join(crate::midi_csv::mapping_name(device))
+        crate::midi_csv::local_file(&self.user_dir, device)
     }
 
-    /// The device's mapping: the installed rekordbox's factory file, when there is one, with
-    /// the user's file on top. A user file that cannot be read as this device's is left out.
+    fn factory_mapping(&self, device: &str) -> Option<Vec<u8>> {
+        self.factory_dirs.iter().find_map(|dir| {
+            let path = crate::midi_csv::factory_file(dir, device)?;
+            let bytes = crate::midi_csv::read_file(&path).ok()?;
+            let csv = crate::midi_csv::CsvFile::parse(&bytes).ok()?;
+            crate::midi_csv::factory_matches(device, &csv.device).then_some(bytes)
+        })
+    }
+
+    /// Factory rows plus one user delta. A first connection never creates a local file.
+    /// Earlier versions wrote a header before loading and thereby hid the native delta.
     pub fn load_map(&self, device: &str) -> (MidiMap, bool) {
-        let factory = crate::midi_csv::factory_file(&self.factory_dir, device).and_then(|p| std::fs::read(p).ok());
-        let user = std::fs::read(self.user_file(device)).ok();
-        let map = MidiMap::load(device, factory.as_deref(), user.as_deref()).or_else(|_| MidiMap::load(device, factory.as_deref(), None)).unwrap_or_else(|_| MidiMap::new(device));
-        (map, factory.is_some())
+        let factory = self.factory_mapping(device);
+        let local = self.user_file(device);
+        let legacy = self.user_dir.join(format!("{}.midi.csv", crate::midi_csv::legacy_stem(device)));
+        // An old reserved name (e.g. CON.midi.csv) can denote a device on Windows.
+        let legacy = (legacy != local && legacy.file_name() == Some(std::ffi::OsStr::new(&crate::midi_csv::mapping_name(device)))).then_some(legacy);
+        let native = crate::midi_csv::native_user_files(&self.native_user_dirs, device);
+        let inputs = std::iter::once((local, true)).chain(legacy.map(|p| (p, true))).chain(native.into_iter().map(|p| (p, false)));
+        for (path, own) in inputs {
+            if let Ok(data) = crate::midi_csv::read_file(&path) {
+                let Ok(csv) = crate::midi_csv::validate_import(device, &data) else { continue };
+                if own && crate::midi_csv::bare_header(&csv) { continue; }
+                if let Ok(map) = MidiMap::load(device, factory.as_deref(), Some(&data)) { return (map, factory.is_some()); }
+            }
+        }
+        (MidiMap::load(device, factory.as_deref(), None).unwrap_or_else(|_| MidiMap::new(device)), factory.is_some())
+    }
+
+    pub fn export_file(&self, path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+        crate::midi_csv::atomic_write(path, bytes, false, self.factory_dirs.iter().chain(&self.native_user_dirs))
+    }
+
+    pub fn write_override(&self, device: &str, bytes: &[u8]) -> std::io::Result<()> {
+        let csv = crate::midi_csv::validate_import(device, bytes)?;
+        let path = self.user_file(device);
+        // Distinguish an explicit empty reset/import from an old automatic placeholder.
+        let mut saved = bytes.to_vec();
+        if crate::midi_csv::bare_header(&csv) {
+            if !saved.ends_with(b"\n") { saved.extend_from_slice(b"\r\n"); }
+            saved.extend_from_slice(b"# recordbox local override\r\n");
+        }
+        crate::midi_csv::atomic_write(&path, &saved, true, self.factory_dirs.iter().chain(&self.native_user_dirs))
     }
 
     pub fn save_map(&self, dev: &Device) -> std::io::Result<()> {
-        std::fs::create_dir_all(&self.user_dir)?;
-        use std::io::Write;
-        let mut mapping = tempfile::NamedTempFile::new_in(&self.user_dir)?;
-        mapping.write_all(dev.map.lock().save_text().as_bytes())?;
-        mapping.as_file().sync_all()?;
-        mapping.persist(self.user_file(&dev.name))?;
-        Ok(())
+        let text = dev.map.lock().save_text();
+        self.write_override(&dev.name, text.as_bytes())
     }
 
     /// Look at the MIDI ports: connect controllers that appeared, drop those that left.
@@ -1051,49 +1123,25 @@ impl Hub {
     }
 
     fn connect(self: &Arc<Self>, name: &str, port: &midir::MidiInputPort) -> Option<Arc<Device>> {
-        // The user's file is made with its header the first time a device is seen.
-        let uf = self.user_file(name);
-        if !uf.exists() {
-            let _ = std::fs::create_dir_all(&self.user_dir);
-            if let Ok(mut mapping) = std::fs::File::create_new(&uf) {
-                use std::io::Write;
-                let _ = mapping.write_all(crate::midi_csv::empty_user_file(name).as_bytes());
-            }
-        }
         let (map, factory) = self.load_map(name);
-        // The output port of the same name, when the device has one.
         let conn = midir::MidiOutput::new("recordbox").ok().and_then(|out| {
-            let p = out.ports().into_iter().find(|p| out.port_name(p).map(|n| n == name).unwrap_or(false))?;
-            out.connect(&p, "recordbox-out").ok()
+            let ports: Vec<_> = out.ports().into_iter().filter_map(|p| out.port_name(&p).ok().map(|n| (n, p))).collect();
+            let names = ports.iter().map(|(n, _)| n.clone()).collect::<Vec<_>>();
+            let index = crate::midi_csv::paired_output(name, &names)?;
+            out.connect(&ports[index].1, "recordbox-out").ok()
         });
-        let cpr = jog_counts(name);
-        let dev = Arc::new(Device {
-            name: name.to_string(),
-            map: Mutex::new(map),
-            factory,
-            needs_auth: needs_auth(name),
-            has_output: conn.is_some(),
-            learning: AtomicBool::new(false),
-            alive: AtomicBool::new(true),
-            out_index: Mutex::new(HashMap::new()),
-            leds: Mutex::new(HashMap::new()),
-            named: Mutex::new(HashMap::new()),
-            out: Mutex::new(OutState { queue: OutQueue::default(), blink: Blinker::default(), blinking: HashMap::new(), conn }),
-            out_cv: Condvar::new(),
-            interval_ms: AtomicU64::new(1),
-            jog: Mutex::new(std::array::from_fn(|_| Jog::new(cpr))),
-            load_at: Mutex::new([None; 4]),
-            in_conn: Mutex::new(None),
-            received: AtomicU64::new(0),
-            sent: AtomicU64::new(0),
-        });
-        dev.reindex();
+        let dev = Device::mapped(name, map, factory, conn);
         // The callback only queues; the worker does the rest.
-        let (tx, rx) = crossbeam_channel::unbounded::<(u64, Vec<u8>)>();
+        let (tx, rx) = crossbeam_channel::unbounded();
+        let device_epoch = dev.input_epoch.clone();
+        let mode_epoch = self.mode_epoch.clone();
         let mut input = midir::MidiInput::new("recordbox").ok()?;
         input.ignore(midir::Ignore::None);
         let conn = input.connect(port, "recordbox-in", move |t, msg, _| {
-            let _ = tx.send((t, msg.to_vec()));
+            // Only channel messages with two data bytes can address a mapping or be learned.
+            if let &[status @ 0x80..=0xef, data1, data2] = msg {
+                let _ = tx.send((t, [status, data1, data2], mode_epoch.load(Relaxed), device_epoch.load(Relaxed)));
+            }
         }, ()).ok()?;
         *dev.in_conn.lock() = Some(conn);
         let (h, d) = (self.clone(), dev.clone());
@@ -1106,56 +1154,64 @@ impl Hub {
     }
 
     /// The worker of a port (rekordbox's `DeviceMidi::run`).
-    fn run_input(self: Arc<Self>, dev: Arc<Device>, rx: crossbeam_channel::Receiver<(u64, Vec<u8>)>) {
-        let mut last: Option<(f64, Instant)> = None;
+    fn run_input(self: Arc<Self>, dev: Arc<Device>, rx: crossbeam_channel::Receiver<(u64, [u8; 3], u64, u64)>) {
         while dev.alive.load(Relaxed) {
-            match rx.recv_timeout(Duration::from_millis(20)) {
-                Ok((t, msg)) => {
-                    let t_ms = t as f64 / 1000.0;
-                    last = Some((t_ms, Instant::now()));
-                    dev.received.fetch_add(1, Relaxed);
-                    if msg.first().map(|b| *b == 0xF0).unwrap_or(true) {
-                        continue;
-                    }
-                    // Learn sees the message, and it still does what it is mapped to.
-                    if dev.learning.load(Relaxed) && msg.len() == 3 {
-                        let _ = self.tx.send(UiEvent::Learn { device: dev.name.clone(), msg: [msg[0], msg[1], msg[2]] });
-                        self.wake();
-                    }
-                    let ev = dev.map.lock().handle(&msg, t_ms);
-                    if let Some(ev) = ev {
-                        self.dispatch(&dev, ev);
-                    }
+            // An idle controller sleeps until an input or disconnect. Continuous fader
+            // traffic must never starve a deadline set by a previous platter movement.
+            let deadline = dev.jog.lock().iter().filter_map(Platter::deadline).min();
+            let packet = match deadline {
+                Some(when) if when <= Instant::now() => {
+                    self.idle_jogs(&dev, Instant::now());
+                    continue;
                 }
-                Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
-                    // A bend ends 60 ms after its last count; a held platter that stopped
-                    // holds the record.
-                    if let Some((t, at)) = last {
-                        let now = t + at.elapsed().as_secs_f64() * 1000.0;
-                        for n in 0..4 {
-                            let out = dev.jog.lock()[n].idle(now);
-                            if out != JogOut::Nothing {
-                                self.jog_out(n, out);
-                            }
-                        }
-                    }
+                Some(when) => rx.recv_deadline(when),
+                None => rx.recv().map_err(|_| crossbeam_channel::RecvTimeoutError::Disconnected),
+            };
+            match packet {
+                Ok((t, msg, mode_epoch, device_epoch)) => {
+                    self.input_message(&dev, msg, t as f64 / 1000.0, mode_epoch, device_epoch);
                 }
-                Err(_) => break,
+                Err(crossbeam_channel::RecvTimeoutError::Timeout) => self.idle_jogs(&dev, Instant::now()),
+                Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break,
             }
+        }
+        self.release_device(&dev);
+    }
+
+    fn input_message(&self, dev: &Arc<Device>, msg: [u8; 3], t_ms: f64, mode_epoch: u64, device_epoch: u64) {
+        let mut route = self.routing.lock();
+        // A physical press queued before a mode or Learn transition belongs to the old mapping.
+        if !dev.alive.load(Relaxed) || self.mode_epoch.load(Relaxed) != mode_epoch || dev.input_epoch.load(Relaxed) != device_epoch {
+            return;
+        }
+        dev.received.fetch_add(1, Relaxed);
+        if dev.learning.load(Relaxed) {
+            let _ = self.tx.send(UiEvent::Learn { device: dev.name.clone(), msg });
+            self.wake();
+            return;
+        }
+        let ev = dev.map.lock().handle(&msg, t_ms);
+        if let Some(ev) = ev {
+            self.dispatch(&mut route, dev, ev);
         }
     }
 
-    fn dispatch(&self, dev: &Device, ev: Event) {
-        let mut done = false;
-        let mut seq = 0;
-        if ev.tag != 0 {
-            if let Some(f) = registry().get(ev.tag) {
-                if ev.fast {
-                    seq = self.seq.fetch_add(1, Relaxed);
-                    done = self.fast(dev, f, ev.deck, ev.val, seq);
-                }
+    fn dispatch(&self, route: &mut Routing, dev: &Arc<Device>, mut ev: Event) {
+        let Some(f) = registry().get(ev.tag) else { return };
+        if !route.performance && !routing::browsing(f.act) { return; }
+        if routing::momentary(f.act) {
+            if !matches!(ev.val, Val::On(false, _)) {
+                let Some(n) = self.deck_ix(ev.deck) else { return };
+                ev.deck = n as u8 + 1;
             }
+            if !route.hold(dev, &mut ev) { return; }
         }
+        self.deliver(route, dev, ev);
+    }
+
+    fn deliver(&self, route: &mut Routing, dev: &Arc<Device>, ev: Event) {
+        let seq = self.seq.fetch_add(1, Relaxed);
+        let done = ev.fast && registry().get(ev.tag).is_some_and(|f| self.fast(route, dev, f, ev.deck, ev.val, seq));
         let _ = self.tx.send(UiEvent::Control { device: dev.name.clone(), tag: ev.tag, deck: ev.deck, val: ev.val, fast_done: done, seq });
         self.wake();
     }
@@ -1347,8 +1403,11 @@ impl Hub {
 
     /// What a `Fast` row (or the jog) does from the worker. True when the engine side is done
     /// and the interface only has to follow.
-    fn fast(&self, dev: &Device, f: &Func, deck: u8, val: Val, seq: u64) -> bool {
-        let Some(n) = self.deck_ix(deck) else { return false };
+    fn fast(&self, route: &mut Routing, dev: &Arc<Device>, f: &Func, deck: u8, val: Val, seq: u64) -> bool {
+        let n = match (val, deck) {
+            (Val::On(false, _), 1..=4) => deck as usize - 1,
+            _ => { let Some(n) = self.deck_ix(deck) else { return false }; n }
+        };
         let press = matches!(val, Val::On(true, _));
         let release = matches!(val, Val::On(false, _));
         let over = |p: Param, v: f32| self.overlay.lock().push((n as u8, p, v, seq));
@@ -1441,17 +1500,17 @@ impl Hub {
                 let snap = *self.snap.lock();
                 let out = {
                     let mut j = dev.jog.lock();
-                    j[n].vinyl = self.vinyl[n].load(Relaxed);
-                    j[n].rpm = if snap.rpm45 { 45.0 } else { 100.0 / 3.0 };
-                    j[n].touch(on, playing)
+                    j[n].jog.vinyl = self.vinyl[n].load(Relaxed);
+                    j[n].jog.rpm = if snap.rpm45 { 45.0 } else { 100.0 / 3.0 };
+                    j[n].jog.touch(on, playing)
                 };
-                self.jog_out(n, out);
+                self.routed_jog(route, dev, n, out, false);
                 true
             }
             Act::Jog(scratch_row) => {
                 let Val::Jog { delta, t_ms } = val else { return true };
-                let out = dev.jog.lock()[n].rotate(delta, t_ms, scratch_row);
-                self.jog_out(n, out);
+                let out = dev.jog.lock()[n].rotate(delta, t_ms, scratch_row, Instant::now());
+                self.routed_jog(route, dev, n, out, false);
                 true
             }
             Act::JogSearch => {
@@ -1459,7 +1518,7 @@ impl Hub {
                 // Search: the track moves ten times as far as the platter turns.
                 let (cpr, rpm) = {
                     let j = dev.jog.lock();
-                    (j[n].cpr, j[n].rpm)
+                    (j[n].jog.cpr, j[n].jog.rpm)
                 };
                 let secs = delta as f64 / cpr * (60.0 / rpm) * 10.0;
                 let mut s = self.decks[n].lock();
@@ -1606,6 +1665,8 @@ fn start(app: &mut App) {
         return;
     }
     let (hub, rx) = Hub::new(app.player.decks.clone(), crate::db::data_dir().join("MidiMappings"), !app.deck_options.disable_play);
+    hub.routing.lock().performance = app.performance();
+    *hub.snap.lock() = snapshot(app);
     *hub.ctx.lock() = Some(app.ctx.clone());
     // The hardware probe (`probe`) has the port to itself: the hub opens nothing.
     if std::env::var("PREPDECK_MIDI_PROBE").is_ok() {
@@ -1727,6 +1788,19 @@ pub fn poll(app: &mut App) {
         app.midi.last_iso[n] = iso;
         app.midi.last_follow[n] = follow;
     }
+    apply_pending(app, &hub);
+    for n in 0..app.deck_count().min(4) as usize {
+        app.midi.last_tempo[n] = app.deck_of(n as u8).x.tempo_adj;
+    }
+    finish_double(app);
+    if have {
+        *hub.snap.lock() = snapshot(app);
+        leds(app, &hub);
+        hub.engine_outputs();
+    }
+}
+
+fn apply_pending(app: &mut App, hub: &Arc<Hub>) {
     let events: Vec<UiEvent> = app.midi.rx.as_ref().map(|r| r.try_iter().collect()).unwrap_or_default();
     for ev in events {
         match ev {
@@ -1738,19 +1812,10 @@ pub fn poll(app: &mut App) {
             UiEvent::Control { device, tag, deck, val, fast_done, seq } => {
                 if let Some(f) = registry().get(tag) {
                     app.midi.handled += 1;
-                    apply(app, &hub, &device, f, deck, val, fast_done, seq);
+                    apply(app, hub, &device, f, deck, val, fast_done, seq);
                 }
             }
         }
-    }
-    for n in 0..app.deck_count().min(4) as usize {
-        app.midi.last_tempo[n] = app.deck_of(n as u8).x.tempo_adj;
-    }
-    finish_double(app);
-    if have {
-        *hub.snap.lock() = snapshot(app);
-        leds(app, &hub);
-        hub.engine_outputs();
     }
 }
 
@@ -1847,8 +1912,7 @@ pub fn apply(app: &mut App, hub: &Arc<Hub>, device: &str, f: &Func, deck: u8, va
     let rel = if let Val::Rel(n) = val { n } else { 0 };
     let unit = val.unit();
     // Controllers act in PERFORMANCE mode; browsing works in both.
-    let browse = matches!(f.act, Act::Browse | Act::BrowseStep(_) | Act::Forward | Act::Back | Act::TagList | Act::Related | Act::Area | Act::Sort(_));
-    if !app.performance() && !browse {
+    if !app.performance() && !routing::browsing(f.act) {
         return;
     }
     let Some(n) = deck_of(app, deck) else { return };
@@ -2530,9 +2594,7 @@ fn fx_beat(fx: &mut crate::ui_fx::FxUi, slot: Option<usize>, dir: i32) {
 }
 
 /// The one place where the commands of features built elsewhere arrive.
-///
-/// TO WIRE AFTER THE MERGE: each arm names what it should call. Until then a command is
-/// noted in `app.midi.stub_log` and does the nearest thing recordbox has, if any.
+/// A short per-session log records the most recent control changes.
 pub fn stub(app: &mut App, hub: &Arc<Hub>, s: Stub, deck: u8, val: Val) {
     let press = matches!(val, Val::On(true, _));
     let release = matches!(val, Val::On(false, _));
@@ -2605,6 +2667,7 @@ pub fn stub(app: &mut App, hub: &Arc<Hub>, s: Stub, deck: u8, val: Val) {
         }
         Stub::PadFxBeat(bank, dir) => {
             if press {
+                crate::ui_padfx::beat_shift(app, deck as usize, dir < 0);
                 note(app, format!("PadFxBeat {bank} {dir:+} deck {}", deck + 1));
             }
         }
@@ -2678,6 +2741,9 @@ pub fn stub(app: &mut App, hub: &Arc<Hub>, s: Stub, deck: u8, val: Val) {
         // Vinyl Speed Adjust (Touch/Brake) of the left / right decks: 0..1.
         Stub::VinylBrake(side) => {
             if let Some(p) = val.unit() {
+                let brake = (p * 255.0).round() as u8;
+                app.prefs.rb.brake[side as usize] = brake;
+                app.prefs.deck.vinyl_brake[side as usize] = brake;
                 note(app, format!("VinylBrake side {side} {p:.3}"));
             }
         }
@@ -2700,6 +2766,7 @@ pub fn stub(app: &mut App, hub: &Arc<Hub>, s: Stub, deck: u8, val: Val) {
         }
         Stub::ActiveLoop => {
             if press {
+                app.with_deck(deck, |a| a.toggle_cue_point_active_loop());
                 note(app, format!("ActiveLoop deck {}", deck + 1));
             }
         }
@@ -2893,6 +2960,48 @@ mod tests {
         }
     }
 
+    #[test]
+    fn first_connection_reads_native_mappings_without_writing_and_local_edits_take_precedence() {
+        let temp = tempfile::tempdir().unwrap();
+        let native = temp.path().join("native");
+        let factory = temp.path().join("factory");
+        let local = temp.path().join("recordbox");
+        std::fs::create_dir(&native).unwrap();
+        std::fs::create_dir(&factory).unwrap();
+        let decks = std::array::from_fn(|_| Arc::new(Mutex::new(PlayState::default())));
+        let (mut hub, _) = Hub::new(decks, local.clone(), true);
+        let h = Arc::get_mut(&mut hub).unwrap();
+        h.native_user_dirs = vec![native.clone()];
+        h.factory_dirs = vec![factory.clone()];
+        let port = "Deck";
+        let name = "Deck.midi.csv";
+        let data = |code| format!("@file,1,Deck\r\nPlayPause,PlayPause,Button,{code:04X},,,,,,,,,,,\r\n");
+        let original = data(0x9011);
+        std::fs::write(native.join(name), &original).unwrap();
+        std::fs::write(factory.join(name), data(0x9001)).unwrap();
+        let inputs = || h.load_map(port).0.live_inputs().map(|e| e.e.code).collect::<Vec<_>>();
+        assert_eq!(inputs(), [0x9001, 0x9011]);
+        assert!(!local.exists(), "opening a device must not create a local mapping");
+        std::fs::create_dir(&local).unwrap();
+        std::fs::write(local.join(name), crate::midi_csv::empty_user_file(port)).unwrap();
+        assert_eq!(inputs(), [0x9001, 0x9011], "legacy empty artifact must not hide native edits");
+        let edited = data(0x9022);
+        h.write_override(port, edited.as_bytes()).unwrap();
+        assert_eq!(inputs(), [0x9001, 0x9022]);
+        assert!(h.write_override(port, b"invalid").is_err());
+        assert!(h.write_override(port, b"@file,1,Wrong").is_err());
+        assert!(h.write_override(port, b"@file,1,Deck\nbroken row").is_err());
+        assert_eq!(std::fs::read(local.join(name)).unwrap(), edited.as_bytes());
+        assert!(h.export_file(&native.join(name), b"bad").is_err());
+        assert!(h.export_file(&factory.join(name), b"bad").is_err());
+        let exported = temp.path().join("export.csv");
+        h.export_file(&exported, edited.as_bytes()).unwrap();
+        assert_eq!(std::fs::read(exported).unwrap(), edited.as_bytes());
+        h.write_override(port, crate::midi_csv::empty_user_file(port).as_bytes()).unwrap();
+        assert_eq!(inputs(), [0x9001], "explicit reset keeps only factory bindings across reconnects");
+        assert_eq!(std::fs::read(native.join(name)).unwrap(), original.as_bytes());
+    }
+
     fn tone(secs: f64) -> Arc<crate::audio::Decoded> {
         let n = (44100.0 * secs) as usize;
         Arc::new(crate::audio::Decoded { sr: 44100, samples: vec![0.0; n * 2], raw_frames: n, damaged: 0, truncated: false })
@@ -2956,9 +3065,17 @@ mod tests {
         std::fs::write(dir.join(format!("{name}.midi.csv")), csv).unwrap();
 
         // The virtual controller: its source (what it sends) and its destination (its LEDs).
-        let Some(mut ctl_out) = midir::MidiOutput::new("test-controller").ok().and_then(|o| o.create_virtual(&name).ok()) else {
-            eprintln!("a_virtual_controller...: skipped, CoreMIDI virtual ports are not available here");
-            return;
+        let mut ctl_out = match midir::MidiOutput::new("test-controller")
+            .map_err(|e| e.to_string())
+            .and_then(|o| o.create_virtual(&name).map_err(|e| e.to_string()))
+        {
+            Ok(port) => port,
+            Err(error) => {
+                assert!(std::env::var("RECORDBOX_REQUIRE_MIDI_LOOPBACK").as_deref() != Ok("1"),
+                    "the required virtual MIDI output could not be opened: {error}");
+                eprintln!("virtual MIDI exchange skipped: {error}");
+                return;
+            }
         };
         let leds: Arc<Mutex<Vec<Vec<u8>>>> = Arc::new(Mutex::new(vec![]));
         let l2 = leds.clone();
@@ -2971,6 +3088,8 @@ mod tests {
         let (hub, rx) = Hub::new(decks.clone(), dir.clone(), true);
         // Only this test's own port: a real controller on the machine (a DDJ-S1 was) is not
         // opened, so nothing is sent to it.
+        hub.routing.lock().performance = true;
+        hub.snap.lock().perf = true;
         *hub.only.lock() = Some(vec![name.clone()]);
         {
             let mut s = hub.snap.lock();
@@ -3104,8 +3223,8 @@ mod tests {
         });
         assert!(dev.received.load(Relaxed) >= 20 && dev.sent.load(Relaxed) >= 6);
 
-        // LEARN: the worker shows the message to the window and still acts on it.
-        dev.learning.store(true, Relaxed);
+        // LEARN captures the message without running its previous mapping.
+        hub.set_learning(&dev, true);
         while rx.try_recv().is_ok() {}
         ctl_out.send(&[0x90, 0x0B, 0x7F]).unwrap();
         let mut learned = false;
@@ -3117,7 +3236,7 @@ mod tests {
             }
         }
         assert!(learned);
-        wait("deck 1 playing again", || decks[0].lock().playing);
+        assert!(!decks[0].lock().playing, "LEARN must not play the deck");
 
         // Unplugged: the device goes at the next scan.
         drop(ctl_out);

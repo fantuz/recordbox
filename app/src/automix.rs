@@ -1376,7 +1376,7 @@ pub mod tests {
     }
 
     fn phrases(mood: u16, starts: &[u16]) -> crate::phrase::Structure {
-        crate::phrase::Structure { mood, phrases: starts.iter().map(|b| crate::phrase::Phrase { beat: *b, kind: 1 }).collect(), end_beat: starts.last().copied().unwrap_or(1) + 32 }
+        crate::phrase::Structure { mood, phrases: starts.iter().map(|b| crate::phrase::Phrase { beat: *b, kind: 1 }).collect(), end_beat: starts.last().copied().unwrap_or(1) + 32, rb: None }
     }
 
     #[test]

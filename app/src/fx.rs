@@ -22,10 +22,13 @@
 //! and REVERB UP / DOWN's laws, MT DELAY's taps, FX+ NOISE, STRETCH's turn, PITCH ECHO's
 //! feedback, pitch and mix, the echoes' single-mode FEEDBACK, DELAY's pan knob, PHASER's sweep
 //! curve, VINYL BRAKE's knob tables, every single-mode read-out, RELEASE FX ECHO.
-//! Still recordbox's own: SPIRAL's tape-like delay change (`SpiralBuffer`), Beat FX VINYL
-//! BRAKE's state machine, STRETCH's LOW / HI CUT knob, HELIX's single-mode laws, single-mode
-//! REVERB's ROOM SIZE / DECAY, TRANS / PAN / FILTER / FLANGER / PHASER / ROLL single-mode
-//! knobs beyond their read-outs, and the CrushCore inside the FX+ CRUSH buttons.
+//! Third pass: SPIRAL's read point follows `SpiralBuffer` (`fx_core::SpiralMotion`); single-mode
+//! ROLL's GATE knob (two square gates), HELIX's held loop after a TIME change and its TRACK
+//! SPEED, REVERB's DECAY, PHASER's stage knob.
+//! Still recordbox's own: STRETCH's LOW / HI CUT knob, the echoes' single-mode FILTER knob (a
+//! second-order filter at the ends of rekordbox's InstFx tables), SPIRAL's loop filters
+//! (state-variable sections at rekordbox's cutoffs), the soft clip in the delay lines, and the
+//! CrushCore inside the FX+ CRUSH buttons.
 
 use parking_lot::Mutex;
 
@@ -528,6 +531,22 @@ pub fn half_value(k: f32) -> f32 {
     }
 }
 
+/// Single-mode ROLL / SLIP ROLL / REV ROLL's first knob (`SingleBeatFxRollBase::
+/// updateAndSetParameter` 0x102a2fca0 into its two `Trans` units, square waves): (roll gate
+/// duty, its start, live-sound gate duty, its start) over one turn of the roll. Centre: the
+/// roll alone. Left by `v`: the roll for the first 1 - v of each turn, the live sound for the
+/// rest (all live at the end). Right: the roll for the first 1 - 0.95 v, then silence.
+pub fn roll_gates(k: f32) -> (f32, f32, f32, f32) {
+    let v = through_value(k);
+    if k < 0.48627 {
+        (1.0 - v, 0.0, v, if (v - 1.0).abs() >= 1.1921e-7 { v } else { 0.0 })
+    } else if k <= 0.51373 {
+        (1.0, 0.0, 0.0, 0.0)
+    } else {
+        (1.0 - 0.95 * v, 0.0, 0.0, 0.0)
+    }
+}
+
 pub fn through_value(k: f32) -> f32 {
     const S: f32 = 1.0 / 0.48627;
     if k <= 0.0 || k >= 1.0 {
@@ -771,11 +790,21 @@ pub fn stretch_speed(level: f32) -> f32 {
     if level >= 0.5 { 0.75 - 0.5 * level } else { 1.0 - level }
 }
 
-/// PHASER's number of all-pass stages for the STAGE knob: 2 at the left end, 6 at the centre
-/// (what multi mode uses), 24 at the right end (rekordbox's range is 2..60; its knob law was
-/// not traced).
-pub fn phaser_stages(k: f32) -> usize {
-    if k <= 0.5 { 2 + (k.max(0.0) * 8.0).round() as usize } else { 6 + ((k.min(1.0) - 0.5) * 36.0).round() as usize }
+/// PHASER's all-pass stages (left, right) for single mode's second knob
+/// (`SingleBeatFxPhaser::updateParameter` 0x102a0d14c, KnobPara2Assign 0 as the single-mode
+/// layer makes it): 6 and 6 at the centre; turned left the left channel's count rises to 60
+/// (`PhaserCore` "Stages Lch" range 2..60), turned right the right channel's, in even steps
+/// (6 + trunc(v x 54), an odd count one more).
+pub fn phaser_stages(k: f32) -> (usize, usize) {
+    if (0.48627..=0.51373).contains(&k) {
+        return (6, 6);
+    }
+    let mut n = (through_value(k) * 54.0) as usize + 6;
+    if n % 2 == 1 {
+        n += 1;
+    }
+    let n = n.min(60);
+    if k < 0.5 { (n, 6) } else { (6, n) }
 }
 
 /// REVERB (`MultiBeatFxReverb::CoreParameterCalculator`), for the percent value `p` (1..100):
@@ -795,6 +824,20 @@ pub fn reverb_in_gain(p: f32) -> f32 {
 pub fn reverb_rt60_ms(p: f32) -> f32 {
     let p = p.clamp(1.0, 100.0);
     (((((2.27830833e-9 * p - 5.30411715e-7) * p + 3.42242528e-5) * p + 6.5895372e-5) * p + 1.18306299e-2) * p + 6.6592768).exp()
+}
+
+/// Single-mode REVERB's DECAY (`SingleBeatFxReverb::getDynamicParameter` 0x102a11c74): the
+/// knob's percent `d` (1..50..100, read as ROOM SIZE is) gives the time to -60 dB in seconds
+/// (1.53 s at 1 %, 8.7 s at 50 %, 101 s at 100 %); ROOM SIZE alone sets the size.
+pub fn reverb_decay_secs(d: f32) -> f32 {
+    let d = d.clamp(1.0, 100.0);
+    let d2 = d * d;
+    d2 * d2 * 0.0000028728 + d2 * (d * -0.00033391) + d2 * 0.016808 + d * -0.22553 + 1.7409
+}
+
+/// Its input gain: 0.2, falling to 0.1 as DECAY turns right of the centre.
+pub fn reverb_decay_in_gain(k: f32) -> f32 {
+    if k > 0.51373 { 0.2 - 0.1 * half_value(k) } else { 0.2 }
 }
 
 /// The reverb's comb delays at size 1 (ms; left and right of each of the five), and the two
@@ -1037,6 +1080,11 @@ pub(crate) struct Slot {
     w: usize,
     /// Delay time in use (frames), moving toward the wanted time.
     time: f32,
+    /// SPIRAL's read point (`SpiralBuffer`).
+    spiral: crate::fx_core::SpiralMotion,
+    /// HELIX after a change of TIME (`HelixCore` states 3 / 4): the loop is held and played
+    /// at a speed gliding toward recorded / new time; (held, speed, place in the loop).
+    hx: (bool, f64, f64),
     /// Wet gain in use (0 off .. 1 on).
     gate: f32,
     lfo: f32,
@@ -1047,7 +1095,7 @@ pub(crate) struct Slot {
     f2: [[f32; 2]; 2],
     f3: [[f32; 2]; 2],
     lp: [f32; 2],
-    ap: [[f32; 24]; 2],
+    ap: [[f32; 60]; 2],
     fb: [f32; 2],
     /// Beat FX FILTER: per channel, the six first-order sections' memories and the resonance
     /// path's last output.
@@ -1110,7 +1158,7 @@ impl Slot {
 
     /// A slot without its lines, for a place that is never switched on.
     pub(crate) fn empty() -> Slot {
-        Slot { kind: Kind::Delay, delay: Vec::new(), w: 0, time: 0.0, gate: 0.0, lfo: 0.0, bands: [[0.0; 16]; 2], f1: [[0.0; 2]; 2], f2: [[0.0; 2]; 2], f3: [[0.0; 2]; 2], lp: [0.0; 2], ap: [[0.0; 24]; 2], fb: [0.0; 2], lf: [[0.0; 13]; 2], combs: Vec::new(), comb_w: 0, comb_lp: [0.0; 10], aps: Vec::new(), ap_w: 0, rin: [0.0; 4], roll: None, was_on: false, odd: false, ps: crate::fx_core::PitchShifter::empty(), ps_rate: 48000, ej: crate::fx_core::EnigmaJet::empty(), mob: crate::fx_core::Mobius::empty(), pk: 0.0, quiet: 0, aux: Vec::new(), aux_w: 0, og: 0.0, taps: [0.0; 8], rob: [1.0, 0.177778, 0.0, 0.0], ga: [0.75, 0.75], vb_state: 0, vb: [0.0; 6], rev_k: 0.0, seed: 0x2468_ACE1, hold: [0.0; 2], hold_n: 0.0, lag: 0.0, t: 0.0, speed: 1.0, osc: [0.0; 6], env: 0.0, lfo2: 0.0 }
+        Slot { kind: Kind::Delay, delay: Vec::new(), w: 0, time: 0.0, spiral: crate::fx_core::SpiralMotion::new(48000.0, 0), hx: (false, 1.0, 0.0), gate: 0.0, lfo: 0.0, bands: [[0.0; 16]; 2], f1: [[0.0; 2]; 2], f2: [[0.0; 2]; 2], f3: [[0.0; 2]; 2], lp: [0.0; 2], ap: [[0.0; 60]; 2], fb: [0.0; 2], lf: [[0.0; 13]; 2], combs: Vec::new(), comb_w: 0, comb_lp: [0.0; 10], aps: Vec::new(), ap_w: 0, rin: [0.0; 4], roll: None, was_on: false, odd: false, ps: crate::fx_core::PitchShifter::empty(), ps_rate: 48000, ej: crate::fx_core::EnigmaJet::empty(), mob: crate::fx_core::Mobius::empty(), pk: 0.0, quiet: 0, aux: Vec::new(), aux_w: 0, og: 0.0, taps: [0.0; 8], rob: [1.0, 0.177778, 0.0, 0.0], ga: [0.75, 0.75], vb_state: 0, vb: [0.0; 6], rev_k: 0.0, seed: 0x2468_ACE1, hold: [0.0; 2], hold_n: 0.0, lag: 0.0, t: 0.0, speed: 1.0, osc: [0.0; 6], env: 0.0, lfo2: 0.0 }
     }
 
     fn clear(&mut self) {
@@ -1134,12 +1182,14 @@ impl Slot {
         self.f2 = [[0.0; 2]; 2];
         self.f3 = [[0.0; 2]; 2];
         self.lp = [0.0; 2];
-        self.ap = [[0.0; 24]; 2];
+        self.ap = [[0.0; 60]; 2];
         self.fb = [0.0; 2];
         self.lf = [[0.0; 13]; 2];
         self.comb_lp = [0.0; 10];
         self.rin = [0.0; 4];
         self.time = 0.0;
+        self.spiral.reset();
+        self.hx = (false, 1.0, 0.0);
         self.lfo = 0.0;
         self.lfo2 = 0.0;
         self.roll = None;
@@ -1425,11 +1475,33 @@ impl Slot {
             _ => secs,
         };
         let want_time = (echo_secs.min(4.0) * r).min((DELAY_LEN - 2) as f32).min(if matches!(kind, SpiralUp | SpiralDown) { (AUX_LEN - 4) as f32 } else { f32::MAX });
+        // SPIRAL's read point moves as rekordbox's `SpiralBuffer` moves it (a new beat value
+        // bends the repeats' pitch on the way); the other echoes glide in 50 ms.
+        let spiral_kind = matches!(kind, Spiral | SpiralUp | SpiralDown);
+        if spiral_kind {
+            self.spiral.setup(r, match kind { SpiralUp => 1, SpiralDown => 2, _ => 0 });
+            self.spiral.beat = (beat_secs * r) as i32;
+            self.spiral.set_target(want_time, self.time <= 0.0);
+        }
         if self.time <= 0.0 {
             self.time = want_time;
         }
-        // (SPIRAL's time slides slowly, so a new beat value bends the repeats' pitch.)
-        let glide = 1.0 / (if matches!(kind, Spiral | SpiralUp | SpiralDown) { 0.3 } else { 0.05 } * r);
+        let glide = 1.0 / (0.05 * r);
+        // HELIX keeps the length it recorded; a new TIME while it is fully on holds the loop
+        // and plays it faster or slower (`HelixCore::updateParameter` / `processEffect`).
+        if kind == Helix {
+            if !p.on {
+                self.hx = (false, 1.0, 0.0);
+            }
+            if !self.hx.0 {
+                if p.on && self.gate >= 1.0 && (want_time - self.time).abs() >= 1.0 {
+                    self.hx = (true, 1.0, 0.0);
+                } else {
+                    self.time = want_time;
+                }
+            }
+        }
+        let helix_target = (self.time / want_time.max(1.0)) as f64;
 
         // The echo core's settings.
         let swing = |k: f32| 1.0 + (k - 0.5) * 0.6667;
@@ -1589,7 +1661,7 @@ impl Slot {
         let (rob_a, rob_b, rob_mod) = robot_law(level);
         let rob_mod = if multi { rob_mod } else { 0.8 * k2 };
         let speed = stretch_speed(level);
-        let stages = if multi { 6 } else { phaser_stages(k2) };
+        let stages = if multi { (6, 6) } else { phaser_stages(k2) };
         let (helix_keep, helix_in) = helix_law(level);
         let env_k = (1.0 - (-1.0 / (0.002 * r)).exp(), 1.0 - (-1.0 / (0.12 * r)).exp());
         let base = (ring.w + 2 * RING_LEN - frames) as f64;
@@ -1611,12 +1683,17 @@ impl Slot {
         let nz_m = ((if multi { 0.5 } else { k2 }) * 255.9) as i32;
         let nz_step = 1.0 / ((200.0 - 0.70588 * nz_m as f32) * 0.001 * r);
         let nz_depth = { let m = nz_m as f32 * 0.0039216; if m < 0.015625 { 0.0 } else if m < 0.15625 { nz_m as f32 * 0.027887 - 0.11111 } else { 1.0 } } * if nz_v > 230 { (255 - nz_v) as f32 * 0.04 } else { 1.0 };
-        // REVERB: the percent value; single mode's ROOM SIZE scales the lines (half to one and
-        // a half) and DECAY the decay time (a quarter to four times).
+        // REVERB: the percent value sets size, decay and input gain; single mode's ROOM SIZE
+        // is the percent for the size and DECAY sets the decay time and input gain
+        // (`SingleBeatFxReverb::updateParameter` / `getDynamicParameter`).
         let rv = match kind {
-            // (Single mode: ROOM SIZE is the percent value, `SingleBeatFxReverb::updateParameter`;
-            // DECAY scales the decay time, recordbox's own.)
-            Reverb => Rv::new(if multi { p.value } else { reverb_room(k1) as f32 }, 1.0, if multi { 1.0 } else { 4f32.powf(2.0 * k2 - 1.0) }, r),
+            Reverb if multi => Rv::new(p.value, 1.0, 1.0, r),
+            Reverb => {
+                let room = reverb_room(k1) as f32;
+                let mut v = Rv::new(room, 1.0, reverb_decay_secs(reverb_room(k2) as f32) * 1000.0 / reverb_rt60_ms(room), r);
+                v.gin = reverb_decay_in_gain(k2);
+                v
+            }
             ReverbUp => {
                 let (_, _, _, size, rt, gin) = reverb_up_law(fxp_v as i32, fxr_t);
                 Rv::raw(size, rt, gin, r)
@@ -1646,11 +1723,11 @@ impl Slot {
         let fxp_lvl: [f32; 4] = std::array::from_fn(|i| (4.0 * fxp_echo - i as f32).clamp(0.0, 1.0));
         // HELIX's SPEED (single mode) and which effects run the pitch shifter this buffer.
         let vb_echo = kind == VinylBrake && !multi && vinyl_echo_beats(k2).is_some();
-        let helix_r = if multi { 1.0 } else if k2 >= 0.5 { 1.0 + (k2 - 0.5) * 2.0 * 0.78 } else { 1.0 - (0.5 - k2) * 2.0 * (1.0 - 1.0 / 1.38) };
+        // (TRACK SPEED: how fast the held loop's speed follows, 0.5 in multi mode.)
+        let helix_v = if multi { 0.5 } else { k2 };
         let ps_on = match kind {
             UpEcho | DownEcho | PitchEcho | Spiral | SpiralUp | SpiralDown => (e.ratio - 1.0).abs() > 1e-4,
             Robot | Pitch => true,
-            Helix => (helix_r - 1.0).abs() > 0.004,
             Stretch => !b1 && speed < 0.999,
             VinylBrake => self.vb_state == 2,
             _ => false,
@@ -1717,7 +1794,12 @@ impl Slot {
                     tr = 0.0;
                 }
             }
-            self.time += (want_time - self.time) * glide;
+            if spiral_kind {
+                self.time = self.spiral.next();
+            } else if kind != Helix {
+                // (HELIX's length is set once a buffer, above.)
+                self.time += (want_time - self.time) * glide;
+            }
             if !hold_lfo {
                 self.lfo += lfo_step;
                 if self.lfo >= 1.0 {
@@ -1920,7 +2002,7 @@ impl Slot {
                     let mut o = [0.0f32; 2];
                     for (c, x) in [dl, dr].into_iter().enumerate() {
                         let mut y = x + self.fb[c] * ph_fb;
-                        for k in 0..stages {
+                        for k in 0..if c == 0 { stages.0 } else { stages.1 } {
                             let z = self.ap[c][k];
                             let out = a * y + z;
                             self.ap[c][k] = y - a * out;
@@ -1938,13 +2020,18 @@ impl Slot {
                         let i = *pos as usize % *len;
                         let j = if kind == RevRoll { *len - 1 - i } else { i };
                         let k = (*start + j) % RING_LEN;
-                        // A few frames of fade at the loop's ends, so the splice is silent;
-                        // single mode's DUTY under its centre cuts the end of every turn short.
+                        // A few frames of fade at the loop's ends, so the splice is silent.
                         let edge = (i.min(*len - 1 - i) as f32 / (0.002 * r)).min(1.0);
-                        let duty = if !multi && k1 < 0.5 && (i as f32) > *len as f32 * (k1 * 2.0).max(0.05) { 0.0 } else { 1.0 };
-                        self.fb[0] += (duty - self.fb[0]).clamp(-gate_k, gate_k);
-                        ol = ring.buf[k * 2] * edge * self.fb[0];
-                        or = ring.buf[k * 2 + 1] * edge * self.fb[0];
+                        // Single mode's first knob (`SingleBeatFxRollBase::updateAndSetParameter`):
+                        // two square gates over each turn (3.33 ms edges), one on the roll and
+                        // one on the live sound; see `roll_gates`.
+                        let (rd, rh, dd, dh) = if multi { (1.0, 0.0, 0.0, 0.0) } else { roll_gates(k1) };
+                        let ph = i as f32 / *len as f32;
+                        let sq = |d: f32, h: f32| if d >= 1.0 || (ph + h).fract() < d { 1.0f32 } else { 0.0 };
+                        self.fb[0] += (sq(rd, rh) - self.fb[0]).clamp(-gate_k, gate_k);
+                        self.fb[1] += (sq(dd, dh) - self.fb[1]).clamp(-gate_k, gate_k);
+                        ol = ring.buf[k * 2] * edge * self.fb[0] + dl * self.fb[1];
+                        or = ring.buf[k * 2 + 1] * edge * self.fb[0] + dr * self.fb[1];
                         *pos += 1.0;
                         if *pos as usize >= *len {
                             *pos = 0.0;
@@ -2003,13 +2090,23 @@ impl Slot {
                 Helix => {
                     // The beat value held as a loop the input is laid over: each turn keeps
                     // rekordbox's share of the loop and lets in its share of the input, so
-                    // fully up the loop is held and the input is shut out. Single mode: SPEED
-                    // plays the loop higher or lower (rekordbox's 1.38 and 1.78 as the ends).
-                    let (el, er) = (self.tap(self.time, 0), self.tap(self.time, 1));
-                    let (yl, yr) = (il * helix_in + el * helix_keep, ir * helix_in + er * helix_keep);
-                    self.push(yl, yr);
-                    let (sl, sr) = if (helix_r - 1.0).abs() > 0.004 { self.shift(el, er, helix_r) } else { (el, er) };
-                    mixed(dl * helix_in + sl * helix_keep, dr * helix_in + sr * helix_keep)
+                    // fully up the loop is held and the input is shut out. After a new TIME
+                    // the loop is held as it was and played at `helix_speed`.
+                    if self.hx.0 {
+                        let sp = crate::fx_core::helix_speed(self.hx.1, helix_target, helix_v, r);
+                        self.hx.1 = sp;
+                        let len = self.time.max(2.0) as f64;
+                        let d = (len - self.hx.2).clamp(1.0, len) as f32;
+                        self.hx.2 = (self.hx.2 + sp).rem_euclid(len);
+                        let g = crate::fx_core::helix_gain(sp);
+                        let (el, er) = (self.tap(d, 0) * g, self.tap(d, 1) * g);
+                        mixed(dl * helix_in + el * helix_keep, dr * helix_in + er * helix_keep)
+                    } else {
+                        let (el, er) = (self.tap(self.time, 0), self.tap(self.time, 1));
+                        let (yl, yr) = (il * helix_in + el * helix_keep, ir * helix_in + er * helix_keep);
+                        self.push(yl, yr);
+                        mixed(dl * helix_in + el * helix_keep, dr * helix_in + er * helix_keep)
+                    }
                 }
                 VinylBrake => {
                     // `BeatFxVinylBrake::updateStateAndParameter` / `updatePitchSpeed`: turning
@@ -3015,6 +3112,132 @@ mod tests {
     }
 
     #[test]
+    fn single_roll_gates_follow_rekordbox() {
+        // Centre: the roll alone; fully left: the live sound alone; half left: roll then live.
+        assert_eq!(roll_gates(0.5), (1.0, 0.0, 0.0, 0.0));
+        assert_eq!(roll_gates(0.0), (0.0, 0.0, 1.0, 0.0));
+        let (rd, rh, dd, dh) = roll_gates(0.48627 / 2.0);
+        assert!((rd - 0.5).abs() < 1e-4 && rh == 0.0 && (dd - 0.5).abs() < 1e-4 && (dh - 0.5).abs() < 1e-4);
+        // Right: the roll's share shrinks to 5 %, the rest is silent.
+        let (rd, _, dd, _) = roll_gates(1.0);
+        assert!((rd - 0.05).abs() < 1e-6 && dd == 0.0);
+        // In a run: single ROLL 1 beat, knob half left: the second half of each turn is the
+        // live sound (a 440 Hz tone that changes to 880 Hz once the roll has caught it).
+        let mut rack = Rack::new();
+        rack.enabled = true;
+        let mut p = unit(Kind::Roll, 1.0, 1.0);
+        p.single = true;
+        p.one = SlotParams { on: false, level: 1.0, value: 1.0, knob: [0.48627 / 2.0, 0.5], ..SlotParams::new(Kind::Roll) };
+        rack.units[0].params = p;
+        let a = rack.units[0].params.assign;
+        rack.units[0].prepare(&a);
+        let mut x = tone(48000, 440.0);
+        rack.process(0, &mut x, 48000);
+        rack.units[0].params.one.on = true;
+        let mut y = tone(48000, 880.0);
+        let live = y.clone();
+        for c in y.chunks_mut(480) {
+            rack.process(0, c, 48000);
+        }
+        // Turn = 1 beat = 24,000 frames: frames 14,000..23,000 of it are the live sound.
+        let d: f32 = y[14000 * 2..23000 * 2].iter().zip(&live[14000 * 2..23000 * 2]).map(|(a, b)| (a - b).abs()).fold(0.0, f32::max);
+        let r: f32 = y[1000 * 2..11000 * 2].iter().zip(&live[1000 * 2..11000 * 2]).map(|(a, b)| (a - b).abs()).fold(0.0, f32::max);
+        assert!(d < 0.02 && r > 0.2, "live part off by {d}, roll part {r}");
+    }
+
+    #[test]
+    fn helix_holds_its_loop_and_follows_a_new_time_at_track_speed() {
+        // The speed law: an octave per 0.9 s up (TRACK SPEED 0.5), per 0.7 s down.
+        let mut s = 1.0f64;
+        let mut n = 0;
+        while s < 2.0 {
+            s = crate::fx_core::helix_speed(s, 2.0, 0.5, 48000.0);
+            n += 1;
+        }
+        assert!((n as f32 / 48000.0 - 0.9).abs() < 0.001, "{n}");
+        let mut s = 1.0f64;
+        let mut n = 0;
+        while s > 0.5 {
+            s = crate::fx_core::helix_speed(s, 0.5, 0.5, 48000.0);
+            n += 1;
+        }
+        assert!((n as f32 / 48000.0 - 0.7).abs() < 0.001, "{n}");
+        assert_eq!((crate::fx_core::helix_gain(1.5), crate::fx_core::helix_gain(3.0), crate::fx_core::helix_gain(9.0)), (1.0, 0.5, 0.25));
+        // In a run: single HELIX on a 440 Hz tone, then silence and TIME from the centre to the
+        // right end (a quarter of the beat): the held loop goes up two octaves, to 1760 Hz.
+        let mut rack = Rack::new();
+        rack.enabled = true;
+        let mut p = unit(Kind::Helix, 1.0, 0.5);
+        p.single = true;
+        p.one = SlotParams { on: true, level: 0.5, value: 1.0, knob: [0.5, 0.0], ..SlotParams::new(Kind::Helix) };
+        rack.units[0].params = p;
+        let a = rack.units[0].params.assign;
+        rack.units[0].prepare(&a);
+        let mut x = tone(48000, 440.0);
+        for c in x.chunks_mut(480) {
+            rack.process(0, c, 48000);
+        }
+        rack.units[0].params.one.knob[0] = 1.0;
+        let mut y = vec![0.0f32; 48000 * 2];
+        for c in y.chunks_mut(480) {
+            rack.process(0, c, 48000);
+        }
+        let slot = &rack.units[0].channels[0].as_ref().unwrap().slots[3];
+        assert!(slot.hx.0 && (slot.hx.1 - 4.0).abs() < 1e-3, "{:?}", slot.hx);
+        let crossings = y[24000 * 2..].chunks_exact(2).zip(y[24000 * 2..].chunks_exact(2).skip(1)).filter(|(a, b)| a[0] <= 0.0 && b[0] > 0.0).count();
+        assert!((crossings as f32 * 2.0 - 1760.0).abs() < 40.0, "{crossings}");
+    }
+
+    #[test]
+    fn single_reverb_decay_law() {
+        // rekordbox's polynomial at the ends and the centre, and the input gain.
+        assert!((reverb_decay_secs(1.0) - 1.5318).abs() < 1e-3 && (reverb_decay_secs(50.0) - 8.7007).abs() < 2e-3 && (reverb_decay_secs(100.0) - 100.6).abs() < 0.1, "{} {} {}", reverb_decay_secs(1.0), reverb_decay_secs(50.0), reverb_decay_secs(100.0));
+        assert_eq!((reverb_decay_in_gain(0.0), reverb_decay_in_gain(0.5)), (0.2, 0.2));
+        assert!((reverb_decay_in_gain(1.0) - 0.1).abs() < 1e-6);
+        // The comb gains come out as rekordbox writes them: 10^(-k x size / time), with k =
+        // 0.066281 for the first left comb (3 x 22.0938 ms).
+        let v = Rv::new(50.0, 1.0, reverb_decay_secs(50.0) * 1000.0 / reverb_rt60_ms(50.0), 48000.0);
+        let want = 10f32.powf(-0.066281 * reverb_size(50.0) / reverb_decay_secs(50.0));
+        assert!((v.g[0] - want).abs() < 1e-4, "{} {}", v.g[0], want);
+    }
+
+    #[test]
+    fn phaser_stage_knob_law() {
+        // `SingleBeatFxPhaser::updateParameter`, KnobPara2Assign 0: centre 6 / 6; left end 60 on
+        // the left channel; right end 60 on the right; even counts on the way.
+        assert_eq!((phaser_stages(0.5), phaser_stages(0.0), phaser_stages(1.0)), ((6, 6), (60, 6), (6, 60)));
+        let (l, r) = phaser_stages(0.3);
+        assert!(r == 6 && l % 2 == 0 && l == { let n = (through_value(0.3) * 54.0) as usize + 6; n + n % 2 });
+    }
+
+    #[test]
+    fn spiral_time_moves_as_spiral_buffer_moves_it() {
+        // SPIRAL at 120 BPM, 1/2 beat (12,000 frames), then 1 beat: the read point does not
+        // jump; it sets off slowly (rekordbox's `SpiralBuffer`, 2 s time constant).
+        let mut rack = Rack::new();
+        rack.enabled = true;
+        rack.units[0].params = unit(Kind::Spiral, 0.5, 0.8);
+        let a = rack.units[0].params.assign;
+        rack.units[0].prepare(&a);
+        let time = |rack: &Rack| rack.units[0].channels[0].as_ref().unwrap().slots[0].time;
+        let mut x = tone(4800, 440.0);
+        rack.process(0, &mut x, 48000);
+        assert!((time(&rack) - 12000.0).abs() < 1.0, "{}", time(&rack));
+        rack.units[0].params.slots[0].value = 1.0;
+        let mut last = time(&rack);
+        let mut max_step = 0.0f32;
+        for _ in 0..100 {
+            let mut x = tone(480, 440.0);
+            rack.process(0, &mut x, 48000);
+            max_step = max_step.max((time(&rack) - last).abs());
+            last = time(&rack);
+        }
+        // After a second it has moved, but far from all the way (0.5 x 0.087 x 48,000 at most).
+        assert!(last > 12000.5 && last < 14200.0 && max_step < 480.0 * 0.1, "{last} {max_step}");
+        assert!(x.iter().all(|v| v.is_finite()));
+    }
+
+    #[test]
     fn off_fades_out_and_the_dry_signal_returns() {
         let mut rack = Rack::new();
         rack.enabled = true;
@@ -3089,6 +3312,17 @@ mod tests {
         run("REVERB + PHASER + PITCH ECHO-like", &|p| {
             p.slots = [SlotParams { on: true, ..SlotParams::new(Kind::Reverb) }, SlotParams { on: true, ..SlotParams::new(Kind::Phaser) }, SlotParams { on: true, ..SlotParams::new(Kind::UpEcho) }];
         });
+        // The Sound Color FX on one channel, COLOR at 0.85.
+        for (name, kind) in crate::cfx::LIST.iter().filter_map(|(n, k)| k.map(|k| (*n, k))) {
+            let mut c = crate::cfx::Cfx::new();
+            let mut x = tone(48000 * 20, 330.0);
+            let t = std::time::Instant::now();
+            for chunk in x.chunks_mut(512 * 2) {
+                c.process(kind, 0.85, 0.5, chunk, 48000);
+            }
+            let secs = t.elapsed().as_secs_f64();
+            println!("fx cost: CFX {name:<30} {:6.2} % of real time ({:.1} us per 512-frame buffer)", secs / 20.0 * 100.0, secs / (48000.0 * 20.0 / 512.0) * 1e6);
+        }
     }
 
     #[test]

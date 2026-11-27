@@ -149,6 +149,49 @@ pub fn decode_until(path: &str, cancelled: impl Fn() -> bool) -> Result<Decoded>
 }
 
 fn decode_with_timeline(path: &str, timeline: Mp3Timeline, cancelled: impl Fn() -> bool) -> Result<Decoded> {
+    decode_with_budget(path, timeline, cancelled, None)
+}
+
+/// Read a bounded prefix for an effect sample. Stop at a packet boundary, retaining
+/// the requested audible frames, up to the shared PCM safety limit.
+pub fn decode_prefix(path: &str, seconds: usize) -> Result<Decoded> {
+    decode_with_budget(path, mp3_timeline(), || false, Some(DecodeLimit { seconds, prefix: true }))
+}
+
+/// Optional whole-track analysis must skip over-budget files, never infer phrases
+/// for a truncated prefix. The duration header is only an early-out.
+pub fn decode_bounded(path: &str, seconds: usize, cancelled: impl Fn() -> bool) -> Result<Decoded> {
+    decode_with_budget(path, mp3_timeline(), cancelled, Some(DecodeLimit { seconds, prefix: false }))
+}
+
+#[derive(Clone, Copy)]
+struct DecodeLimit {
+    seconds: usize,
+    prefix: bool,
+}
+
+impl DecodeLimit {
+    fn frames(self, sr: u32, trim: usize) -> usize {
+        // 256 MiB stereo PCM, even for unusually high source sample rates.
+        self.seconds.saturating_mul(sr as usize).min(32 * 1024 * 1024) + trim
+    }
+
+    fn packet(self, out: &mut Vec<f32>, sr: u32, trim: usize, frames: usize) -> Result<usize> {
+        let limit = self.frames(sr, trim);
+        let used = out.len() / 2;
+        let room = limit.saturating_sub(used);
+        anyhow::ensure!(used <= limit && (self.prefix || frames <= room), "audio exceeds the optional decode limit");
+        let frames = frames.min(room);
+        if (used + frames) * 2 > out.capacity() {
+            // Bound speculative allocation and avoid one reallocation per packet.
+            let capacity = (used + frames).max(out.capacity()).max(65536).min(limit);
+            out.try_reserve_exact(capacity * 2 - out.len())?;
+        }
+        Ok(frames)
+    }
+}
+
+fn decode_with_budget(path: &str, timeline: Mp3Timeline, cancelled: impl Fn() -> bool, limit: Option<DecodeLimit>) -> Result<Decoded> {
     if cancelled() { anyhow::bail!("stopped"); }
     let file = std::fs::File::open(path)?;
     let mss = MediaSourceStream::new(Box::new(file), Default::default());
@@ -173,19 +216,30 @@ fn decode_with_timeline(path: &str, timeline: Mp3Timeline, cancelled: impl Fn() 
         .find(|t| t.codec_params.codec != CODEC_TYPE_NULL)
         .ok_or_else(|| anyhow!("no audio track"))?
         .clone();
-    let mut decoder = symphonia::default::get_codecs().make(&track.codec_params, &DecoderOptions::default())?;
     let track_id = track.id;
     let mut sr = track.codec_params.sample_rate.unwrap_or(44100);
     let mut out = vec![0.0; lead * 2];
     let declared_frames = track.codec_params.n_frames;
     let time_base = track.codec_params.time_base;
-    if let Some(n) = track.codec_params.n_frames {
+    let trim = if trim_untagged { MP3_UNTAGGED_SKIP } else { 0 };
+    if let Some(limit) = limit {
+        anyhow::ensure!(limit.seconds > 0, "zero audio decode limit");
+        if !limit.prefix {
+            if let (Some(n), Some(tb)) = (declared_frames, time_base) {
+                let t = tb.calc_time(n);
+                let max_secs = limit.frames(sr, trim) as f64 / sr.max(1) as f64;
+                anyhow::ensure!(t.seconds as f64 + t.frac <= max_secs + 1.0, "audio exceeds the optional decode limit");
+            }
+        }
+    } else if let Some(n) = track.codec_params.n_frames {
         out.reserve((n as usize).min(60 * 60 * 48000) * 2);
     }
+    let mut decoder = symphonia::default::get_codecs().make(&track.codec_params, &DecoderOptions::default())?;
     let mut sbuf: Option<SampleBuffer<f32>> = None;
     let mut damaged = 0usize;
     loop {
         if cancelled() { anyhow::bail!("stopped"); }
+        if limit.is_some_and(|l| l.prefix && out.len() / 2 >= l.frames(sr, trim)) { break; }
         let packet = match format.next_packet() {
             Ok(p) => p,
             Err(symphonia::core::errors::Error::IoError(_)) => break,
@@ -201,7 +255,8 @@ fn decode_with_timeline(path: &str, timeline: Mp3Timeline, cancelled: impl Fn() 
                 // Silence for the packet's length, so everything after stays where it belongs.
                 damaged += 1;
                 let n = (packet.dur as usize).min(1 << 20);
-                out.extend(std::iter::repeat(0.0f32).take(n * 2));
+                let n = match limit { Some(l) => l.packet(&mut out, sr, trim, n)?, None => n };
+                out.resize(out.len() + n * 2, 0.0);
                 continue;
             }
             Err(e) => return Err(e.into()),
@@ -209,12 +264,17 @@ fn decode_with_timeline(path: &str, timeline: Mp3Timeline, cancelled: impl Fn() 
         let spec = *decoded.spec();
         sr = spec.rate;
         let ch = spec.channels.count();
+        let frames = decoded.frames();
+        let frames = if let Some(l) = limit {
+            anyhow::ensure!(ch != 0 && decoded.capacity().saturating_mul(ch) <= 8 * 1024 * 1024, "audio packet exceeds the optional decode limit");
+            l.packet(&mut out, sr, trim, frames)?
+        } else { frames };
         if sbuf.as_ref().map(|b| b.capacity() < decoded.capacity() * ch).unwrap_or(true) {
             sbuf = Some(SampleBuffer::<f32>::new(decoded.capacity() as u64, spec));
         }
         let b = sbuf.as_mut().unwrap();
         b.copy_interleaved_ref(decoded);
-        let s = b.samples();
+        let s = &b.samples()[..frames * ch];
         if ch == 1 {
             for v in s {
                 out.push(*v);
@@ -273,6 +333,9 @@ fn decode_with_timeline(path: &str, timeline: Mp3Timeline, cancelled: impl Fn() 
         None => n as f64 / sr.max(1) as f64,
     });
     let truncated = declared_secs.map(|d| decoded_frames as f64 / sr.max(1) as f64 + 1.0 < d).unwrap_or(false);
+    if limit.is_some_and(|l| !l.prefix) && truncated {
+        anyhow::bail!("incomplete audio for whole-track analysis");
+    }
     let mut raw_frames = decoded_frames + lead;
     if gapless {
         raw_frames += track.codec_params.delay.unwrap_or(0) as usize + track.codec_params.padding.unwrap_or(0) as usize;
@@ -300,6 +363,39 @@ mod mp3_timeline_tests {
         assert!(parse(&["--mp3-timeline"]).is_err());
         assert!(parse(&["--mp3-timeline", "other"]).is_err());
         assert!(parse(&["--mp3-timeline=rekordbox", "--mp3-timeline=legacy"]).is_err());
+    }
+
+    #[test]
+    fn optional_decodes_respect_time_and_pcm_budgets() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("two_seconds.wav");
+        let sr = 8_000u32;
+        let frames = sr * 2;
+        let bytes = frames * 2;
+        let mut wav = Vec::from(&b"RIFF"[..]);
+        wav.extend_from_slice(&(bytes + 36).to_le_bytes());
+        wav.extend_from_slice(b"WAVEfmt ");
+        for value in [16u32, 0x00010001, sr, sr * 2, 0x00100002] { wav.extend_from_slice(&value.to_le_bytes()); }
+        wav.extend_from_slice(b"data");
+        wav.extend_from_slice(&bytes.to_le_bytes());
+        for i in 0..frames { wav.extend_from_slice(&(i as i16).to_le_bytes()); }
+        std::fs::write(&path, wav)?;
+        let path = path.to_str().unwrap();
+        let one = decode_prefix(path, 1)?;
+        let two = decode_bounded(path, 2, || false)?;
+        assert_eq!(one.frames(), sr as usize);
+        assert_eq!(two.frames(), frames as usize);
+        assert_eq!(one.samples, two.samples[..one.samples.len()]);
+        assert!(decode_bounded(path, 1, || false).is_err());
+        let polls = std::cell::Cell::new(0);
+        assert!(decode_bounded(path, 2, || { polls.set(polls.get() + 1); polls.get() == 3 }).is_err());
+        // The output budget also applies when the container omits its duration.
+        let limit = DecodeLimit { seconds: 1, prefix: false };
+        let mut out = vec![0.0; sr as usize * 2 - 2];
+        assert!(limit.packet(&mut out, sr, 0, 2).is_err());
+        assert_eq!(DecodeLimit { prefix: true, ..limit }.packet(&mut out, sr, 0, 2)?, 1);
+        assert_eq!(limit.frames(u32::MAX, 0), 32 * 1024 * 1024);
+        Ok(())
     }
 
     #[test]

@@ -63,7 +63,8 @@ To open the Homebrew app in Finder, run `open "$(brew --prefix fantuz/recordbox/
 - **Build a collection.** Import local tracks and folders, M3U playlists or a rekordbox XML collection. Rate and tag tracks, organise playlists, and back up or restore your recordbox library.
 - **Prepare a track in EXPORT.** Analyse BPM, key and waveforms, edit the beat grid, and set loops, memory cues and hot cues. New analysis uses the Rekordbox-compatible beat detector. Choose **recordbox classic** in **Preferences → Analysis → Beat grid estimator** to use the earlier detector. Optional high-precision refinement works with either choice.
   By default, press **1–8** to set or recall hot cues A–H. Hold **Shift** and press the same number to clear that slot.
-- **Mix in PERFORMANCE.** Use the performance layouts, MIDI mappings, mixer, Beat FX and sampler to rehearse transitions or record a set.
+- **Prepare phrases.** Deck loading and USB export can reuse Rekordbox phrase data. To generate missing phrases, choose **Rekordbox-compatible** or **recordbox classic** under **Preferences → Analysis → Phrase estimator**.
+- **Mix in PERFORMANCE.** Use MIDI Learn to map a controller to the decks, mixer and pads. SPACE, GATE COMP, Beat FX, Pad FX and MERGE FX are available for rehearsing and recording a set. [Controller support and effects](docs/UPSTREAM-INTEGRATION.md#controllers-and-effects)
 - **Edit an arrangement.** Use the EDIT timeline to arrange, audition and render a local track. WAV, AIFF and FLAC are available across platforms. M4A uses the macOS AAC encoder.
 - **Use the library on a second screen.** The overlapping-windows button at the far right of the top bar detaches the library browser. Your playlist, search, selection and scroll position follow it. Close the library window to reattach it.
   **F11** toggles fullscreen for both windows together. **Space** plays or pauses the active deck when you’re outside a text field.

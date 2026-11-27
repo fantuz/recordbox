@@ -59,7 +59,7 @@ fn tabs_of(page: u8, mode: Mode) -> &'static [&'static str] {
 }
 
 /// Every setting by name, for the search field: (page, tab, name).
-const SETTINGS: [(u8, &str, &str); 187] = [
+const SETTINGS: [(u8, &str, &str); 188] = [
     (7, "Effect", "Apply CFX to Sampler using MIC COLOR control knob."),
     (7, "Sampler", "SLOT"),
     (7, "Sampler", "Do not overwrite the loaded Slot."),
@@ -118,6 +118,7 @@ const SETTINGS: [(u8, &str, &str); 187] = [
     (1, "Track Analysis", "BPM / Grid"),
     (1, "Track Analysis", "KEY"),
     (1, "Track Analysis", "Phrase"),
+    (1, "Track Analysis", "Phrase estimator"),
     (1, "Track Analysis", "Vocal"),
     (1, "Track Analysis", "Auto Analysis"),
     (1, "Track Analysis", "Auto Gain"),
@@ -1062,6 +1063,14 @@ fn page_analysis(app: &mut App, ui: &mut Ui, tab: usize) {
         });
         kit::checkbox(ui, &mut app.prefs.analyze_key, "KEY");
         kit::checkbox(ui, &mut app.prefs.phrase_analysis, "Phrase").on_hover_text("Phrases (Intro, Up, Down, Chorus, Outro) are shown under the overview and written to USB exports. rekordbox's own phrases are used for tracks it analysed.");
+        kit::labeled(ui, "Phrase estimator", |ui| {
+            let label = if app.prefs.classic_phrase_estimator { "recordbox classic" } else { "Rekordbox-compatible" };
+            kit::combo("phrase_estimator", 220.0, label, 14.0).show_ui(ui, |ui| {
+                ui.selectable_value(&mut app.prefs.classic_phrase_estimator, false, "Rekordbox-compatible");
+                ui.selectable_value(&mut app.prefs.classic_phrase_estimator, true, "recordbox classic");
+            });
+        });
+        note(ui, "Used for missing phrases on deck load and USB export. Rekordbox-compatible can fall back to classic. Existing phrase data takes priority.");
         kit::checkbox(ui, &mut app.prefs.vocal_analysis, "Vocal").on_hover_text("Use imported vocal positions when available. For other tracks, recordbox can use an explicitly configured local vocal model or its downloaded STEMS model.");
         separator(ui);
         sub(ui, "Auto Analysis");

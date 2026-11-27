@@ -1031,13 +1031,15 @@ impl App {
                     self.load_adjacent(1);
                 }
             }
-            Transport::ActiveLoop => {
-                // (The memory loop at the cue point becomes active or not, `eventActiveLoop`.)
-                let cp = self.deck.cue_point;
-                if let Some(c) = self.deck.cues.iter_mut().find(|c| c.kind == CueKind::Memory && c.end.is_some() && (c.start - cp).abs() < 0.005) {
-                    c.active_loop = !c.active_loop;
-                }
-            }
+            Transport::ActiveLoop => self.toggle_cue_point_active_loop(),
+        }
+    }
+
+    pub(crate) fn toggle_cue_point_active_loop(&mut self) {
+        let cp = self.deck.cue_point;
+        if let Some(mut cue) = self.deck.cues.iter().find(|c| c.kind == CueKind::Memory && c.end.is_some() && (c.start - cp).abs() < 0.005).cloned() {
+            cue.active_loop = !cue.active_loop;
+            self.update_cue(cue);
         }
     }
 

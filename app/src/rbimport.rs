@@ -451,16 +451,27 @@ pub fn pqtz_beat_indices_match(dat: &Path, beats: &[Beat]) -> bool {
 }
 
 fn pqtz_indices_match(b: &[u8], beats: &[Beat]) -> bool {
-    let Some(mut source) = pqtz_beats(b) else { return false };
+    pqtz_beats(b).and_then(|source| matching_pqtz_prefix(source, beats)).is_some()
+}
+
+/// Edited/inferred phrases can refer to any local beat, including tail beats that
+/// a shorter native grid never contained. Check the exact section USB will write.
+pub(crate) fn pqtz_matches_all_beats(section: &[u8], beats: &[Beat]) -> bool {
+    pqtz_section_beats(section).and_then(|source| matching_pqtz_prefix(source, beats)) == Some(beats.len())
+}
+
+fn matching_pqtz_prefix(source: impl Iterator<Item = Option<Beat>>, beats: &[Beat]) -> Option<usize> {
     let mut count = 0;
-    let same = source.all(|source| {
-        let Some(source) = source else { return false };
+    for entry in source {
+        let source = entry?;
+        let local = beats.get(source.index)?;
+        if local.index != source.index || local.beat != source.beat || (local.time - source.time).abs() > 0.0011 || (local.bpm - source.bpm).abs() >= 0.01
+            || !local.time.is_finite() || !local.bpm.is_finite() {
+            return None;
+        }
         count += 1;
-        beats.get(source.index).map(|beat| {
-            beat.index == source.index && beat.beat == source.beat && (beat.time - source.time).abs() <= 0.0011 && (beat.bpm - source.bpm).abs() < 0.01
-        }).unwrap_or(false)
-    });
-    same && count > 0
+    }
+    (count > 0).then_some(count)
 }
 
 fn pqtz_beats(b: &[u8]) -> Option<impl Iterator<Item = Option<Beat>> + '_> {
@@ -480,32 +491,33 @@ fn pqtz_beats(b: &[u8]) -> Option<impl Iterator<Item = Option<Beat>> + '_> {
         }
         let section = b.get(i..i.checked_add(total)?)?;
         if section.get(..4)? == b"PQTZ" {
-            if header != 24 {
-                return None;
-            }
-            let n = be32(i + 20)? as usize;
-            if n.checked_mul(8)?.checked_add(header)? != section.len() {
-                return None;
-            }
-            // Deck grid edits keep the original entries and store a signed millisecond
-            // adjustment in the header. Negative effective times are unsupported: the
-            // grid model drops preroll beats, which would change native phrase indices.
-            let shift = i16::from_be_bytes([section[18], section[19]]) as i64;
-            let mut previous = None;
-            return Some(section[header..].chunks_exact(8).enumerate().map(move |(index, entry)| {
-                let beat = u16::from_be_bytes([entry[0], entry[1]]);
-                let tempo = u16::from_be_bytes([entry[2], entry[3]]);
-                let ms = i64::from(u32::from_be_bytes(entry[4..8].try_into().ok()?)) + shift;
-                if ms < 0 || tempo == 0 || !(1..=4).contains(&beat) || previous.map(|last| ms <= last).unwrap_or(false) {
-                    return None;
-                }
-                previous = Some(ms);
-                Some(Beat { time: ms as f64 / 1000.0, bpm: tempo as f64 / 100.0, beat: beat as u8, index })
-            }));
+            return pqtz_section_beats(section);
         }
         i += total;
     }
     None
+}
+
+fn pqtz_section_beats(section: &[u8]) -> Option<impl Iterator<Item = Option<Beat>> + '_> {
+    if section.get(..4)? != b"PQTZ" || section.get(4..8)? != 24u32.to_be_bytes() { return None; }
+    let total = u32::from_be_bytes(section.get(8..12)?.try_into().ok()?) as usize;
+    let n = u32::from_be_bytes(section.get(20..24)?.try_into().ok()?) as usize;
+    if total != section.len() || n.checked_mul(8)?.checked_add(24)? != total { return None; }
+    // Deck grid edits keep the original entries and store a signed millisecond
+    // adjustment in the header. Negative effective times are unsupported: the
+    // grid model drops preroll beats, which would change native phrase indices.
+    let shift = i16::from_be_bytes([section[18], section[19]]) as i64;
+    let mut previous = None;
+    Some(section[24..].chunks_exact(8).enumerate().map(move |(index, entry)| {
+        let beat = u16::from_be_bytes([entry[0], entry[1]]);
+        let tempo = u16::from_be_bytes([entry[2], entry[3]]);
+        let ms = i64::from(u32::from_be_bytes(entry[4..8].try_into().ok()?)) + shift;
+        if ms < 0 || tempo == 0 || !(1..=4).contains(&beat) || previous.map(|last| ms <= last).unwrap_or(false) {
+            return None;
+        }
+        previous = Some(ms);
+        Some(Beat { time: ms as f64 / 1000.0, bpm: tempo as f64 / 100.0, beat: beat as u8, index })
+    }))
 }
 
 #[cfg(test)]
@@ -570,7 +582,7 @@ mod pqtz_tests {
         let b = fixture(-166, &[(1, 12000, 178), (2, 12000, 678)]);
         let beats = parse_pqtz_grid(&b).unwrap().beats(1.1);
         assert!(pqtz_indices_match(&b, &beats));
-        let phrase = crate::phrase::Structure { mood: 1, phrases: vec![crate::phrase::Phrase { beat: 2, kind: crate::phrase::UP }], end_beat: 2 };
+        let phrase = crate::phrase::Structure { mood: 1, phrases: vec![crate::phrase::Phrase { beat: 2, kind: crate::phrase::UP }], end_beat: 2, rb: None };
         assert_eq!(crate::phrase::cue_proposals(&phrase, &beats), vec![(0.512, "Up")]);
         assert!(!pqtz_indices_match(&b, &beats[..1]), "missing source records cannot be reused");
         for field in 0..4 {

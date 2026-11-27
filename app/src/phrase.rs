@@ -26,28 +26,80 @@ pub struct Structure {
     pub phrases: Vec<Phrase>,
     /// Beat number where the last phrase ends.
     pub end_beat: u16,
+    // Older phrase edits contain only the three fields above.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rb: Option<RbFields>,
+}
+
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct RbFields {
+    version: u16,
+    // All supported header and row bytes, in plain form. Only needed if the
+    // canonical encoder cannot reproduce them (bank, auxiliary beats, etc.).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    original: Option<Vec<u8>>,
+}
+
+impl Structure {
+    fn edited(&mut self) {
+        if let Some(fields) = &mut self.rb {
+            fields.original = None;
+            if fields.version == 0 { self.rb = None; }
+        }
+    }
+}
+
+pub(crate) use crate::phrase_rb::{MAX_BEATS, MAX_SECONDS as MAX_ANALYSIS_SECONDS};
+
+/// Current-grid inference consumes the deck's stereo samples directly, including the
+/// classic fallback. A cancelled native job must never start the fallback.
+pub fn analyze_audio(d: &crate::audio::Decoded, beats: &[Beat], classic: bool, cancelled: &dyn Fn() -> bool) -> Option<Structure> {
+    if cancelled() || d.sr == 0 || d.frames() == 0 || d.frames() > MAX_ANALYSIS_SECONDS.saturating_mul(d.sr as usize) || !(8..=MAX_BEATS).contains(&beats.len()) {
+        return None;
+    }
+    let duration = d.duration();
+    if beats.iter().any(|b| !b.time.is_finite() || b.time < 0.0 || b.time > duration + 0.002 || !b.bpm.is_finite() || b.bpm <= 0.0 || !(1..=4).contains(&b.beat))
+        || beats.windows(2).any(|pair| pair[1].time <= pair[0].time) {
+        return None;
+    }
+    if !classic && std::env::var("PREPDECK_PHRASE").as_deref() != Ok("own") {
+        let key = crate::phrase_rb::analyser_key(-1);
+        if let Some(result) = crate::phrase_rb::analyze_with_cancel(&d.samples, d.sr, beats, key, cancelled) {
+            if cancelled() { return None; }
+            if let Some(structure) = parse(&crate::phrase_rb::pssi_bytes(&result)) {
+                return Some(structure);
+            }
+        }
+    }
+    let mono = |i: usize| 0.5 * (d.samples[2 * i] + d.samples[2 * i + 1]);
+    analyze_classic(d.frames(), mono, d.sr as f64, beats, cancelled)
 }
 
 /// Per-bar log energies in three bands (low < 200 Hz, mid, high > 2.5 kHz).
-fn bar_features(mono: &[f32], sr: f64, bar_times: &[f64], end_time: f64) -> Vec<[f64; 3]> {
+fn bar_features(n: usize, mono: impl Fn(usize) -> f32, sr: f64, bar_times: &[f64], end_time: f64, cancelled: &dyn Fn() -> bool) -> Option<Vec<[f64; 3]>> {
     let mut lp = crate::analysis::Biquad::new("lp", 200.0, 0.707, sr, 0.0);
     let mut hp = crate::analysis::Biquad::new("hp", 2500.0, 0.707, sr, 0.0);
-    let n = mono.len();
     let mut idx = 0usize;
     let mut out = Vec::with_capacity(bar_times.len());
     for (k, t) in bar_times.iter().enumerate() {
         let start = ((*t * sr) as usize).min(n);
         let end = ((bar_times.get(k + 1).copied().unwrap_or(end_time)) * sr) as usize;
         let end = end.min(n);
+        if cancelled() { return None; }
         while idx < start {
-            lp.run(mono[idx] as f64);
-            hp.run(mono[idx] as f64);
+            if idx % 16384 == 0 && cancelled() { return None; }
+            let x = mono(idx) as f64;
+            if !x.is_finite() { return None; }
+            lp.run(x);
+            hp.run(x);
             idx += 1;
         }
         let mut e = [0f64; 3];
         let mut c = 0f64;
         while idx < end {
-            let x = mono[idx] as f64;
+            if idx % 16384 == 0 && cancelled() { return None; }
+            let x = mono(idx) as f64;
+            if !x.is_finite() { return None; }
             let l = lp.run(x);
             let h = hp.run(x);
             e[0] += l * l;
@@ -59,22 +111,27 @@ fn bar_features(mono: &[f32], sr: f64, bar_times: &[f64], end_time: f64) -> Vec<
         let c = c.max(1.0);
         out.push([10.0 * (e[0] / c + 1e-10).log10(), 10.0 * (e[1] / c + 1e-10).log10(), 10.0 * (e[2] / c + 1e-10).log10()]);
     }
-    out
+    Some(out)
 }
 
 /// Analyse the phrase structure of a track from its audio and beat grid.
+#[cfg(test)]
 pub fn analyze(mono: &[f32], sr: f64, beats: &[Beat]) -> Option<Structure> {
-    if beats.len() < 64 {
+    analyze_classic(mono.len(), |i| mono[i], sr, beats, &|| false)
+}
+
+fn analyze_classic(n: usize, mono: impl Fn(usize) -> f32, sr: f64, beats: &[Beat], cancelled: &dyn Fn() -> bool) -> Option<Structure> {
+    if cancelled() || beats.len() < 64 || beats.len() > u16::MAX as usize {
         return None;
     }
-    let end_time = mono.len() as f64 / sr;
+    let end_time = n as f64 / sr;
     // Bars start at beats numbered 1. Beats before the first bar start belong to phrase 1.
     let bar_idx: Vec<usize> = beats.iter().enumerate().filter(|(_, b)| b.beat == 1).map(|(i, _)| i).collect();
     if bar_idx.len() < 8 {
         return None;
     }
     let bar_times: Vec<f64> = bar_idx.iter().map(|i| beats[*i].time).collect();
-    let f = bar_features(mono, sr, &bar_times, end_time);
+    let f = bar_features(n, mono, sr, &bar_times, end_time, cancelled)?;
     let nb = f.len();
     // Novelty between consecutive 4-bar blocks at every bar.
     let mean = |a: usize, b: usize, band: usize| -> f64 { f[a..b].iter().map(|x| x[band]).sum::<f64>() / (b - a).max(1) as f64 };
@@ -87,12 +144,13 @@ pub fn analyze(mono: &[f32], sr: f64, beats: &[Beat]) -> Option<Structure> {
     // Boundaries: every 8 bars from the first bar; a 4-bar boundary in between when the music
     // changes clearly there; a final short phrase is merged into the previous one.
     let threshold = params().0;
+    let max_bars = max_bars();
     let mut cuts: Vec<usize> = vec![0];
     let mut last = 0usize;
     let mut i = 4;
     while i < nb {
         let since = i - last;
-        if since >= max_bars() || (since >= 4 && nov(i) > threshold) {
+        if since >= max_bars || (since >= 4 && nov(i) > threshold) {
             cuts.push(i);
             last = i;
         }
@@ -138,7 +196,7 @@ pub fn analyze(mono: &[f32], sr: f64, beats: &[Beat]) -> Option<Structure> {
         .enumerate()
         .map(|(k, ((a, _), kind))| Phrase { beat: if k == 0 { 1 } else { (bar_idx[*a] + 1) as u16 }, kind: *kind })
         .collect();
-    Some(Structure { mood: 1, phrases, end_beat: beats.len().min(u16::MAX as usize) as u16 })
+    Some(Structure { mood: 1, phrases, end_beat: beats.len() as u16, rb: None })
 }
 
 fn max_bars() -> usize {
@@ -213,6 +271,7 @@ pub fn cut(s: &mut Structure, beat: u16) -> bool {
     }
     let kind = s.phrases[i].kind;
     s.phrases.insert(i + 1, Phrase { beat, kind });
+    s.edited();
     true
 }
 
@@ -222,6 +281,7 @@ pub fn set_kind(s: &mut Structure, beat: u16, kind: u16) -> bool {
     match index_at(s, beat) {
         Some(i) if s.phrases[i].kind != kind => {
             s.phrases[i].kind = kind;
+            s.edited();
             true
         }
         _ => false,
@@ -291,9 +351,36 @@ pub fn is_masked(section: &[u8]) -> bool {
     !(1..=3).contains(&mood)
 }
 
+/// Can this plain or masked section be interpreted on the local grid?
+/// Check framing and mood without allocating the row list during export planning.
+pub fn supported_section(section: &[u8]) -> bool {
+    let Some((version, n)) = pssi_layout(section) else { return false };
+    let mood = u16::from_be_bytes([section[18], section[19]]);
+    if (1..=3).contains(&mood) { return true; }
+    let decoded = u16::from_be_bytes([
+        section[18] ^ KEY[version].wrapping_add(n as u8),
+        section[19] ^ KEY[version + 1].wrapping_add(n as u8),
+    ]);
+    (1..=3).contains(&decoded)
+}
+
 /// The PSSI section (unmasked) for a structure.
 pub fn pssi(s: &Structure) -> Vec<u8> {
-    let n = s.phrases.len() as u16;
+    let version = s.rb.as_ref().map_or(0, |rb| rb.version.min(1));
+    if let Some(bytes) = s.rb.as_ref().and_then(|rb| rb.original.as_ref()) {
+        // A saved edit may come from an older or manually edited JSON snapshot.
+        // Replay only matching, supported bytes from the same semantic structure.
+        if pssi_layout(bytes) == Some((version as usize, s.phrases.len()))
+            && bytes[18..20] == s.mood.to_be_bytes() && bytes[26..28] == s.end_beat.to_be_bytes()
+            && bytes[32..].chunks_exact(24).zip(&s.phrases).all(|(r, p)| r[2..4] == p.beat.to_be_bytes() && r[4..6] == p.kind.to_be_bytes()) {
+            return bytes.clone();
+        }
+    }
+    canonical_pssi(s, version)
+}
+
+fn canonical_pssi(s: &Structure, version: u16) -> Vec<u8> {
+    let n = s.phrases.len().min(u16::MAX as usize) as u16;
     let mut body = vec![];
     body.extend_from_slice(&s.mood.to_be_bytes());
     body.extend_from_slice(&0u32.to_be_bytes());
@@ -302,7 +389,7 @@ pub fn pssi(s: &Structure) -> Vec<u8> {
     body.extend_from_slice(&0u16.to_be_bytes());
     body.push(0); // bank: default
     body.push(0);
-    for (i, p) in s.phrases.iter().enumerate() {
+    for (i, p) in s.phrases.iter().take(n as usize).enumerate() {
         let mut e = [0u8; 24];
         e[0..2].copy_from_slice(&(i as u16 + 1).to_be_bytes());
         e[2..4].copy_from_slice(&p.beat.to_be_bytes());
@@ -315,7 +402,8 @@ pub fn pssi(s: &Structure) -> Vec<u8> {
     v.extend_from_slice(b"PSSI");
     v.extend_from_slice(&32u32.to_be_bytes());
     v.extend_from_slice(&((18 + body.len()) as u32).to_be_bytes());
-    v.extend_from_slice(&24u32.to_be_bytes());
+    v.extend_from_slice(&version.to_be_bytes());
+    v.extend_from_slice(&24u16.to_be_bytes());
     v.extend_from_slice(&n.to_be_bytes());
     v.extend_from_slice(&body);
     v
@@ -323,7 +411,8 @@ pub fn pssi(s: &Structure) -> Vec<u8> {
 
 /// Parse an (unmasked or masked) PSSI section.
 pub fn parse(section: &[u8]) -> Option<Structure> {
-    let (_, n) = pssi_layout(section)?;
+    let (version, n) = pssi_layout(section)?;
+    let version = version as u16;
     let mut s = section.to_vec();
     if is_masked(&s) {
         mask_section(&mut s);
@@ -338,7 +427,12 @@ pub fn parse(section: &[u8]) -> Option<Structure> {
         let e = s.get(32 + k * 24..32 + (k + 1) * 24)?;
         phrases.push(Phrase { beat: u16::from_be_bytes([e[2], e[3]]), kind: u16::from_be_bytes([e[4], e[5]]) });
     }
-    Some(Structure { mood, phrases, end_beat })
+    let mut result = Structure { mood, phrases, end_beat, rb: None };
+    let original = (s != canonical_pssi(&result, version)).then_some(s);
+    if version != 0 || original.is_some() {
+        result.rb = Some(RbFields { version, original });
+    }
+    Some(result)
 }
 
 #[cfg(test)]
@@ -346,8 +440,17 @@ mod tests {
     use super::*;
 
     #[test]
+    fn cancelled_classic_analysis_does_not_publish_a_partial_structure() {
+        let beats: Vec<_> = (0..80).map(|i| Beat { time: i as f64 * 0.5, bpm: 120.0, beat: (i % 4) as u8 + 1, index: i }).collect();
+        let calls = std::cell::Cell::new(0);
+        let stopped = || { calls.set(calls.get() + 1); calls.get() >= 5 };
+        assert!(analyze_classic(160_000, |_| 0.0, 4000.0, &beats, &stopped).is_none());
+        assert_eq!(calls.get(), 5);
+    }
+
+    #[test]
     fn phrase_edits() {
-        let mut s = Structure { mood: 1, phrases: vec![Phrase { beat: 1, kind: INTRO }, Phrase { beat: 33, kind: UP }, Phrase { beat: 65, kind: CHORUS }], end_beat: 129 };
+        let mut s = Structure { mood: 1, phrases: vec![Phrase { beat: 1, kind: INTRO }, Phrase { beat: 33, kind: UP }, Phrase { beat: 65, kind: CHORUS }], end_beat: 129, rb: None };
         // CUT inside the Up phrase: a second Up phrase starts at the cut.
         assert!(cut(&mut s, 49));
         assert_eq!(s.phrases.iter().map(|p| (p.beat, p.kind)).collect::<Vec<_>>(), vec![(1, INTRO), (33, UP), (49, UP), (65, CHORUS)]);
@@ -388,7 +491,7 @@ mod tests {
 
     #[test]
     fn pssi_roundtrip_and_mask() {
-        let s = Structure { mood: 1, phrases: vec![Phrase { beat: 1, kind: INTRO }, Phrase { beat: 33, kind: UP }, Phrase { beat: 65, kind: CHORUS }, Phrase { beat: 129, kind: OUTRO }], end_beat: 160 };
+        let s = Structure { mood: 1, phrases: vec![Phrase { beat: 1, kind: INTRO }, Phrase { beat: 33, kind: UP }, Phrase { beat: 65, kind: CHORUS }, Phrase { beat: 129, kind: OUTRO }], end_beat: 160, rb: None };
         let mut b = pssi(&s);
         assert_eq!(b.len(), 32 + 4 * 24);
         assert_eq!(parse(&b), Some(s.clone()));
@@ -426,14 +529,29 @@ mod tests {
 
     #[test]
     fn pssi_accepts_masked_and_plain_versions_zero_and_one() {
-        let expected = Structure { mood: 3, phrases: vec![Phrase { beat: 16, kind: 2 }, Phrase { beat: 64, kind: 5 }], end_beat: 128 };
+        let expected = Structure { mood: 3, phrases: vec![Phrase { beat: 16, kind: 2 }, Phrase { beat: 64, kind: 5 }], end_beat: 128, rb: None };
         for version in [0, 1] {
             let plain = pssi_fixture(version, 3, false);
             let masked = pssi_fixture(version, 3, true);
             for (bytes, is_ciphertext) in [(&plain, false), (&masked, true)] {
                 let before = bytes.clone();
                 assert_eq!(is_masked(bytes), is_ciphertext);
-                assert_eq!(parse(bytes), Some(expected.clone()));
+                assert!(supported_section(bytes));
+                let parsed = parse(bytes).unwrap();
+                assert_eq!((parsed.mood, &parsed.phrases, parsed.end_beat), (expected.mood, &expected.phrases, expected.end_beat));
+                let mut stored: Structure = serde_json::from_str(&serde_json::to_string(&parsed).unwrap()).unwrap();
+                assert!(!set_kind(&mut stored, 64, 5));
+                assert_eq!(pssi(&stored), plain, "unedited rows and header survive persistence");
+                let mut direct_edit = stored.clone();
+                direct_edit.phrases[0].beat += 1;
+                assert_eq!(parse(&pssi(&direct_edit)).unwrap().phrases, direct_edit.phrases);
+                assert!(cut(&mut stored, 32));
+                assert!(set_kind(&mut stored, 32, 8));
+                let mut edited = pssi(&stored);
+                assert_eq!(pssi_layout(&edited), Some((version as usize, 3)));
+                assert_eq!(&edited[20..26], &[0; 6]);
+                mask_section(&mut edited);
+                assert_eq!(parse(&edited).unwrap(), stored);
                 assert_eq!(*bytes, before, "parsing must not change source bytes");
             }
             let mut transformed = plain.clone();
@@ -474,7 +592,9 @@ mod tests {
         for version in [0, 1] {
             for mood in [0, 4, u16::MAX] {
                 for masked in [false, true] {
-                    assert!(parse(&pssi_fixture(version, mood, masked)).is_none());
+                    let bytes = pssi_fixture(version, mood, masked);
+                    assert!(!supported_section(&bytes));
+                    assert!(parse(&bytes).is_none());
                 }
             }
         }

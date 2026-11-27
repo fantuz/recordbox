@@ -355,6 +355,7 @@ pub struct Prefs {
     pub hot_cue_auto_load_on_import: bool,
     /// Phrase analysis: shown in the player and written to USB exports.
     pub phrase_analysis: bool,
+    pub classic_phrase_estimator: bool,
     /// Library (see library_ext.rs). Auto Relocate Search Folders: missing files are looked
     /// for under these.
     pub relocate_folders: Vec<String>,
@@ -1087,6 +1088,7 @@ impl Default for Prefs {
             device_import_dir: String::new(),
             hot_cue_auto_load_on_import: true,
             phrase_analysis: true,
+            classic_phrase_estimator: false,
             relocate_folders: vec![],
             itunes_xml: None,
             rekordbox_xml_path: None,
@@ -2686,6 +2688,11 @@ impl App {
         let col = self.prefs.sort_col;
         let asc = self.prefs.sort_asc;
         let alnum = self.prefs.key_alnum;
+        let key_labels: HashMap<_, _> = if col == Col::Key {
+            v.iter().filter_map(|id| self.track(*id).map(|t| (*id, key_sort_key(&t.key_label(alnum))))).collect()
+        } else {
+            HashMap::new()
+        };
         let tagtexts: HashMap<i64, String> = if col == Col::MyTag { v.iter().map(|id| (*id, tag_text(*id))).collect() } else { HashMap::new() };
         // Text columns compare case- and accent-folded text: fold each row's text once, not
         // twice per comparison.
@@ -2734,13 +2741,7 @@ impl App {
                 Col::Bpm => fc(ta.bpm, tb.bpm),
                 Col::Rating => ta.rating.cmp(&tb.rating),
                 Col::Time => fc(ta.duration, tb.duration),
-                Col::Key => {
-                    if alnum {
-                        (ta.key % 12, ta.key / 12).cmp(&(tb.key % 12, tb.key / 12))
-                    } else {
-                        key_name(ta.key, false).cmp(&key_name(tb.key, false))
-                    }
-                }
+                Col::Key => key_labels[a].cmp(&key_labels[b]),
                 Col::DateAdded => ta.date_added.cmp(&tb.date_added).then(ta.id.cmp(&tb.id)),
                 Col::Color => ta.color.cmp(&tb.color),
                 Col::Comments => tc(&ta.comment, &tb.comment),
@@ -2801,6 +2802,7 @@ impl App {
         let beats = self.deck.beats.clone();
         let (tx, rx) = crossbeam_channel::bounded(1);
         let ctx = self.ctx.clone();
+        let classic = self.prefs.classic_phrase_estimator;
         let cancel = self.deck.cancel_work.clone();
         std::thread::spawn(move || {
             let from_rb = base.and_then(|b| {
@@ -2809,10 +2811,11 @@ impl App {
                 if !same || !crate::rbimport::pqtz_beat_indices_match(&dat, &beats) {
                     return None;
                 }
-                crate::export::anlz::read_sections(&b.with_extension("EXT")).get("PSSI").and_then(|s| crate::phrase::parse(s))
+                crate::export::anlz::read_pssi(&b.with_extension("EXT")).and_then(|s| crate::phrase::parse(&s))
             });
-            let r = from_rb.or_else(|| if beats.is_empty() || cancel.load(std::sync::atomic::Ordering::Relaxed) { None } else { crate::phrase::analyze(&a.mono(), a.sr as f64, &beats) });
-            let _ = tx.send((id, r));
+            let stopped = || cancel.load(std::sync::atomic::Ordering::Relaxed);
+            let r = from_rb.or_else(|| crate::phrase::analyze_audio(&a, &beats, classic, &stopped));
+            let _ = tx.send((id, if stopped() { None } else { r }));
             ctx.request_repaint();
         });
         self.deck.phrases_rx = Some(rx);
@@ -5434,7 +5437,7 @@ impl App {
             .filter(|c| c.parent == 0)
             .map(|c| (c.name.clone(), self.mytags.iter().filter(|t| t.parent == c.id).map(|t| t.name.clone()).collect()))
             .collect();
-        let req = crate::export::usb::ExportRequest { root: std::path::PathBuf::from(root), nodes, tracks, tag_categories, skipped, analysis: settings, settings: self.prefs.usb_settings.clone(), browse: self.prefs.usb_browse.clone(), phrases: self.prefs.phrase_analysis, ..self.export_options(root) };
+        let req = crate::export::usb::ExportRequest { root: std::path::PathBuf::from(root), nodes, tracks, tag_categories, skipped, analysis: settings, settings: self.prefs.usb_settings.clone(), browse: self.prefs.usb_browse.clone(), phrases: self.prefs.phrase_analysis, classic_phrase_estimator: self.prefs.classic_phrase_estimator, ..self.export_options(root) };
         self.export_report = None;
         self.export_job = Some(spawn_export(req, self.ctx.clone()));
     }

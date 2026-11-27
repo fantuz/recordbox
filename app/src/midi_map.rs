@@ -256,7 +256,7 @@ impl MidiMap {
         }
         if let Some(b) = user {
             let u = CsvFile::parse(b).map_err(|_| ())?;
-            if !u.device.eq_ignore_ascii_case(device) {
+            if !crate::midi_csv::device_matches(device, &u.device) {
                 return Err(());
             }
             for r in u.rows() {

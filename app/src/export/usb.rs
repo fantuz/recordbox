@@ -747,7 +747,7 @@ pub struct ExportTrack {
 impl ExportTrack {
     /// rekordbox's own phrase section can be used (its grid is unchanged and it has one).
     fn has_rb_phrases(&self) -> bool {
-        self.phrases.is_none() && self.grid_same && self.rb_anlz.as_ref().map(|b| anlz::read_sections(&b.with_extension("EXT")).contains_key("PSSI")).unwrap_or(false)
+        self.phrases.is_none() && self.grid_same && self.rb_anlz.as_ref().is_some_and(|b| anlz::read_pssi(&b.with_extension("EXT")).is_some())
     }
 }
 
@@ -825,6 +825,7 @@ pub struct ExportRequest {
     pub browse: UsbBrowse,
     /// Write phrase sections (PSSI) for tracks without rekordbox's own.
     pub phrases: bool,
+    pub classic_phrase_estimator: bool,
 }
 
 /// Files this export created. Unless the export commits, they are removed again, so a
@@ -1490,7 +1491,13 @@ pub fn run_export(mut req: ExportRequest, progress: &dyn Fn(Progress), cancel: &
     // Phrases for tracks without rekordbox's own (computed on the track's grid).
     // Phrases edited by the user are written as they are.
     let mut phrases: HashMap<i64, crate::phrase::Structure> = req.tracks.values().filter_map(|t| t.phrases.clone().map(|p| (t.track.id, p))).collect();
-    let todo: Vec<i64> = if req.phrases { req.tracks.values().filter(|t| t.grid.is_some() && t.phrases.is_none() && !t.has_rb_phrases()).map(|t| t.track.id).collect() } else { vec![] };
+    let mut todo = Vec::new();
+    if req.phrases {
+        for track in req.tracks.values().filter(|t| t.grid.is_some() && t.phrases.is_none()) {
+            if cancel.load(Relaxed) { return Err(anyhow!("Export was stopped. The device library was not changed.")); }
+            if !track.has_rb_phrases() { todo.push(track.track.id); }
+        }
+    }
     let n_todo = todo.len();
     for (i, id) in todo.into_iter().enumerate() {
         if cancel.load(Relaxed) {
@@ -1498,13 +1505,24 @@ pub fn run_export(mut req: ExportRequest, progress: &dyn Fn(Progress), cancel: &
         }
         let Some(et) = req.tracks.get(&id) else { continue };
         progress(Progress::Step { done: i, total: n_todo, text: format!("Analyzing phrases of {}", et.track.display_title()) });
-        if let Ok(d) = crate::audio::decode_file(&et.track.path) {
-            let full = d.duration();
-            let beats = et.grid.as_ref().map(|g| g.beats(full)).unwrap_or_default();
-            if let Some(st) = crate::phrase::analyze(&d.mono(), d.sr as f64, &beats) {
+        let stopped = || cancel.load(Relaxed);
+        let Some(grid) = &et.grid else { continue };
+        // A corrupt anchor can expand to an arbitrarily large beat list. Only
+        // expand a finite, ordered grid within this optional inference budget.
+        if grid.anchors.len() > crate::phrase::MAX_BEATS || grid.anchors.windows(2).any(|a| a[0].time >= a[1].time)
+            || grid.anchors.iter().any(|a| !(0.0..=crate::phrase::MAX_ANALYSIS_SECONDS as f64).contains(&a.time)
+                || !(1.0..=1000.0).contains(&a.bpm) || !(1..=4).contains(&a.beat)) {
+            continue;
+        }
+        if let Ok(d) = crate::audio::decode_bounded(&et.track.path, crate::phrase::MAX_ANALYSIS_SECONDS, stopped) {
+            let beats = grid.beats(d.duration());
+            if let Some(st) = crate::phrase::analyze_audio(&d, &beats, req.classic_phrase_estimator, &stopped) {
                 phrases.insert(id, st);
             }
         }
+    }
+    if cancel.load(Relaxed) {
+        return Err(anyhow!("Export was stopped. The device library was not changed."));
     }
 
     // Space check.

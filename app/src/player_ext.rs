@@ -425,7 +425,7 @@ impl App {
     /// EXPORT (0) or PERFORMANCE (1).
     pub fn set_app_mode(&mut self, mode: u8) {
         if crate::ui_edit::intercept_mode(self, mode) { return; }
-        self.prefs.app_mode = mode.min(1);
+        crate::midi::change_mode(self, mode.min(1));
         self.poll_decks();
         self.save_prefs();
     }
@@ -1618,7 +1618,7 @@ mod tests {
         use crate::phrase::*;
         // A track whose phrases were cut and relabelled: the EXT file's PSSI section is the edit.
         let beats = grid(128);
-        let mut st = Structure { mood: 1, phrases: vec![Phrase { beat: 1, kind: INTRO }, Phrase { beat: 33, kind: UP }, Phrase { beat: 65, kind: CHORUS }], end_beat: 128 };
+        let mut st = Structure { mood: 1, phrases: vec![Phrase { beat: 1, kind: INTRO }, Phrase { beat: 33, kind: UP }, Phrase { beat: 65, kind: CHORUS }], end_beat: 128, rb: None };
         assert!(cut(&mut st, 49) && set_kind(&mut st, 49, DOWN));
         let ov = crate::export::anlz::Overrides { sections: Default::default(), grid_same: false, pssi: Some(pssi(&st)), device: Default::default(), pvdi: None };
         let files = crate::export::anlz::build_with("/Contents/a.mp3", &beats, &Waveform::default(), &[], 0, 44100, Some(&ov));

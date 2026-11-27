@@ -782,6 +782,205 @@ pub fn make_pass2_db(fc: f64, db: f64, prewarp: bool, hp: bool, rate: f64) -> [f
     [b0 as f32, b1 as f32, b0 as f32, (2.0 * (v10 - 4.0) * n) as f32, (n * (v10 + 4.0 - v11)) as f32]
 }
 
+/// HELIX's held loop speed (`HelixCore::processEffect` 0x1029f8630, state 3): it moves an
+/// octave toward `target` (recorded length / new length) every (V x 1.78 + 0.01) s going up
+/// or (V x 1.38 + 0.01) s going down, V = TRACK SPEED (0.5 in multi mode), and stops there.
+pub fn helix_speed(cur: f64, target: f64, v: f32, rate: f32) -> f64 {
+    if cur == target {
+        return cur;
+    }
+    let up = cur < target;
+    let secs = v.clamp(0.0, 1.0) as f64 * if up { 1.78 } else { 1.38 } + 0.01;
+    let k = 2f64.powf((if up { 1.0 } else { -1.0 }) / (secs * rate as f64));
+    let next = cur * k;
+    if (up && next >= target) || (!up && next <= target) { target } else { next }
+}
+
+/// The held loop's level at speed `s`: 1 up to twice the speed, then 1 / (s - 1), at least 0.25.
+pub fn helix_gain(s: f64) -> f32 {
+    if s > 2.0 { (1.0 / (s - 1.0)).max(0.25) as f32 } else { 1.0 }
+}
+
+/// `SpiralBuffer` (0x1028d5fa0; `calcAccel` 0x1028d62f4, `getDelayDataInternal`
+/// 0x1028d6860): how SPIRAL's read point follows a new delay time. It does not jump: it moves
+/// at a speed (frames of delay per frame, -2 .. 0.8) that accelerates toward a limit set by the
+/// distance left, re-planned every 30 frames while it moves, and stops on the target once it
+/// is within a frame at a speed under 0.011. A small triangle wobble rides on the read point
+/// (±1.04e-5 x rate frames, 1 s period, for Beat FX SPIRAL; ±2.08e-5 x rate, 20 s, for SPIRAL
+/// UP / DOWN). Mode 0 = Beat FX SPIRAL, 1 = SPIRAL UP, 2 = SPIRAL DOWN (`RmxSpiral`).
+#[derive(Clone, Copy, Debug)]
+pub struct SpiralMotion {
+    mode: u8,
+    rate: f64,
+    /// Target and current delay in frames (`+48`, `+52`).
+    pub target: f32,
+    pub cur: f32,
+    speed: f64,
+    accel: f64,
+    limit: f64,
+    moving: bool,
+    tri: f32,
+    up: bool,
+    tri_step: f32,
+    tri_max: f32,
+    k_pos: f32,
+    k_neg: f32,
+    max_pos: i32,
+    max_neg: i32,
+    /// One beat in frames (modes 1 and 2).
+    pub beat: i32,
+    left: usize,
+}
+
+impl SpiralMotion {
+    pub fn new(rate: f32, mode: u8) -> SpiralMotion {
+        let r = rate as f64;
+        let (amp, half) = if mode == 0 { (0.000010416667, 0.5) } else { (0.000020833334, 10.0) };
+        let (tmax, tmin) = ((r * amp) as f32, (r * -amp) as f32);
+        let (k_pos, k_neg) = if mode == 0 { ((0.5 / r) as f32, (3.33333333 / r) as f32) } else { ((1000.0 / r) as f32, (1000.0 / r) as f32) };
+        SpiralMotion { mode, rate: r, target: 0.0, cur: 0.0, speed: 0.0, accel: 0.0, limit: 0.0, moving: false, tri: 0.0, up: true, tri_step: (tmax - tmin) / (r * half) as f32, tri_max: tmax, k_pos, k_neg, max_pos: (4.0 * r) as i32, max_neg: (-2.0 * r) as i32, beat: r as i32 / 2, left: 0 }
+    }
+
+    /// Made again (at rest) when the rate or the mode differs.
+    pub fn setup(&mut self, rate: f32, mode: u8) {
+        if self.mode != mode || self.rate != rate as f64 {
+            *self = SpiralMotion::new(rate, mode);
+        }
+    }
+
+    /// `DelayBufferBase::setDelaySampleNum`: the first time (or with `jump`) the read point
+    /// is put there at once and its motion cleared (`onDelayTimeChanged(true)`).
+    pub fn set_target(&mut self, frames: f32, jump: bool) {
+        self.target = frames;
+        if self.cur <= 0.0 || jump {
+            self.cur = frames;
+            self.moving = false;
+            self.speed = 0.0;
+            self.accel = 0.0;
+            self.limit = 0.0;
+        }
+    }
+
+    pub fn reset(&mut self) {
+        self.cur = 0.0;
+        self.target = 0.0;
+        self.speed = 0.0;
+        self.accel = 0.0;
+        self.limit = 0.0;
+        self.moving = false;
+        self.tri = 0.0;
+        self.up = true;
+        self.left = 0;
+    }
+
+    /// `calcAccel` for the distance `a2` (target - current).
+    pub fn calc_accel(&mut self, mut a2: f32) {
+        let sp = self.speed;
+        let ms = (self.rate * 0.001) as f32;
+        let beat = self.beat.max(1) as f32;
+        if a2 > 1.0 {
+            match self.mode {
+                0 => {
+                    a2 = a2.min(self.max_pos as f32);
+                    if sp <= 0.01 || ms <= a2 {
+                        let v = (a2 / self.max_pos as f32) as f64;
+                        self.limit = 0.21 - 0.2 * (1.0 - v).powi(3);
+                        self.accel = (self.limit - sp) * self.k_pos as f64;
+                    } else {
+                        self.limit = 0.01;
+                        self.accel = (0.01 - sp) / a2 as f64;
+                    }
+                }
+                1 => {
+                    a2 = a2.max(beat);
+                    self.limit = 0.11;
+                    self.accel = (0.11 - sp) * self.k_pos as f64;
+                }
+                _ => {
+                    a2 = a2.max(beat);
+                    if sp > 0.01 && a2 < ms {
+                        self.limit = 0.01;
+                        a2 = a2.max((self.rate * 0.00066667) as f32);
+                        self.accel = (0.01 - sp) / a2 as f64;
+                    } else {
+                        let v = (a2 / beat) as f64;
+                        self.limit = 0.180010448 - 0.170010448 * (1.0 - v).powi(3);
+                        self.accel = (self.limit - sp) * self.k_pos as f64;
+                    }
+                }
+            }
+        } else if a2 < -1.0 {
+            match self.mode {
+                0 => {
+                    a2 = a2.max(self.max_neg as f32);
+                    if sp < -0.01 && -ms < a2 {
+                        self.limit = -0.01;
+                        self.accel = (sp + 0.01) / a2 as f64;
+                    } else {
+                        let v = (a2 / self.max_neg as f32) as f64;
+                        self.limit = 0.401568621 * (1.0 - v).powi(3) - 0.411568621;
+                        self.accel = (self.limit - sp) * self.k_neg as f64;
+                    }
+                }
+                m => {
+                    a2 = a2.max(-beat);
+                    if sp < -0.01 && -ms < a2 {
+                        self.limit = -0.01;
+                        self.accel = (sp + 0.01) / a2 as f64;
+                    } else {
+                        let v = (a2 / beat) as f64;
+                        let (k, c) = if m == 1 { (0.701917112, -0.711917112) } else { (0.170010448, -0.180010448) };
+                        self.limit = k * (1.0 + v).powi(3) + c;
+                        self.accel = (self.limit - sp) * self.k_neg as f64;
+                    }
+                }
+            }
+        }
+        if sp > -0.011 && sp < 0.011 && a2 > -1.0 && a2 < 1.0 {
+            // Arrived: the read point sits on the target and stops.
+            self.cur = self.target;
+            self.moving = false;
+            self.speed = 0.0;
+            self.accel = 0.0;
+            self.limit = 0.0;
+        }
+    }
+
+    /// The delay (frames) to read the next frame at.
+    pub fn next(&mut self) -> f32 {
+        if self.left == 0 {
+            // A new piece: re-planned when the target is elsewhere (30 frames while moving).
+            let diff = self.target - self.cur;
+            if diff.abs() > 1.1921e-7 {
+                self.moving = true;
+                self.calc_accel(diff);
+            }
+            self.left = 30;
+        }
+        self.left -= 1;
+        if self.up {
+            self.tri += self.tri_step;
+            if self.tri > self.tri_max {
+                self.up = false;
+                self.tri = 2.0 * self.tri_max - self.tri;
+            }
+        } else {
+            self.tri -= self.tri_step;
+            if self.tri < -self.tri_max {
+                self.up = true;
+                self.tri = -2.0 * self.tri_max - self.tri;
+            }
+        }
+        self.cur = ((self.speed + self.cur as f64).max(44.0999985)) as f32;
+        self.speed = (self.accel + self.speed).clamp(-2.0, 0.8);
+        let d = self.cur + self.tri;
+        if (self.accel <= 0.0 && self.speed <= self.limit) || (self.accel > 0.0 && self.speed >= self.limit) {
+            self.accel = 0.0;
+        }
+        d
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -790,6 +989,59 @@ mod tests {
         (0..n).map(|i| (i as f32 * f * std::f32::consts::TAU / 48000.0).sin() * 0.5).collect()
     }
 
+
+    #[test]
+    fn spiral_motion_follows_rekordboxs_speed_law() {
+        // Beat FX SPIRAL at 48 kHz: half a second to a second. The read point starts slowly
+        // (the limit for 24,000 frames of 192,000 is 0.21 - 0.2 x 0.875^3 = 0.076 a frame,
+        // approached with a 2 s time constant), never jumps, and arrives.
+        let mut m = SpiralMotion::new(48000.0, 0);
+        m.set_target(24000.0, false);
+        assert_eq!(m.cur, 24000.0);
+        m.set_target(48000.0, false);
+        let mut last = m.next();
+        let mut max_step = 0.0f32;
+        let mut t = 0;
+        while (m.cur - 48000.0).abs() > 0.5 || m.moving {
+            let d = m.next();
+            if m.moving {
+                max_step = max_step.max((d - last).abs());
+            }
+            last = d;
+            t += 1;
+            assert!(t < 48000 * 60, "never arrives");
+        }
+        // (Under a tenth of a frame per frame while it moves; the last step onto the target
+        // is under a frame, as rekordbox's snap.)
+        assert!(max_step < 0.1, "{max_step}");
+        assert!(m.limit == 0.0 && m.speed == 0.0);
+        // It takes seconds, as a tape would: 12.8 s here.
+        assert!((t as f32 / 48000.0 - 12.83).abs() < 0.1, "{t}");
+        // The first plan's numbers.
+        let mut m = SpiralMotion::new(48000.0, 0);
+        m.set_target(24000.0, false);
+        m.set_target(48000.0, false);
+        m.calc_accel(24000.0);
+        assert!((m.limit - (0.21 - 0.2 * 0.875f64.powi(3))).abs() < 1e-9 && (m.accel - m.limit * 0.5 / 48000.0).abs() < 1e-12);
+        // Shorter: toward a quarter of the time the limit is negative and faster.
+        m.speed = 0.0;
+        m.calc_accel(-24000.0);
+        assert!((m.limit - (0.401568621 * 0.75f64.powi(3) - 0.411568621)).abs() < 1e-9);
+        // SPIRAL UP (mode 1): a fixed 0.11 going up; DOWN (2) by the beat.
+        let mut u = SpiralMotion::new(48000.0, 1);
+        u.beat = 24000;
+        u.calc_accel(1000.0);
+        assert!((u.limit - 0.11).abs() < 1e-12);
+        u.speed = 0.0;
+        u.calc_accel(-12000.0);
+        assert!((u.limit - (0.701917112 * 0.125 - 0.711917112)).abs() < 1e-9);
+        // The wobble: ±0.5 frame at 48 kHz for SPIRAL, a 1 s period.
+        let mut w = SpiralMotion::new(48000.0, 0);
+        w.set_target(4800.0, false);
+        let v: Vec<f32> = (0..48000).map(|_| w.next() - 4800.0).collect();
+        let (lo, hi) = v.iter().fold((f32::MAX, f32::MIN), |a, b| (a.0.min(*b), a.1.max(*b)));
+        assert!((hi - 0.5).abs() < 0.01 && (lo + 0.5).abs() < 0.01, "{lo} {hi}");
+    }
 
     /// The strongest frequency (0.5 Hz steps between 50 Hz and 1 kHz) of `x` at `rate`.
     pub(crate) fn peak_at(x: &[f32], rate: f32) -> f32 {
