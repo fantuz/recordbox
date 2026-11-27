@@ -59,7 +59,7 @@ fn tabs_of(page: u8, mode: Mode) -> &'static [&'static str] {
 }
 
 /// Every setting by name, for the search field: (page, tab, name).
-const SETTINGS: [(u8, &str, &str); 186] = [
+const SETTINGS: [(u8, &str, &str); 187] = [
     (7, "Effect", "Apply CFX to Sampler using MIC COLOR control knob."),
     (7, "Sampler", "SLOT"),
     (7, "Sampler", "Do not overwrite the loaded Slot."),
@@ -111,6 +111,7 @@ const SETTINGS: [(u8, &str, &str); 186] = [
     (5, "Input/Output", "Output channels"),
     (5, "Input/Output", "Master Output"),
     (1, "Track Analysis", "Beat grid estimator"),
+    (1, "Track Analysis", "MP3 cue timing"),
     (1, "Track Analysis", "High precision: refine beat timing"),
     (1, "Track Analysis", "Analysis Mode"),
     (1, "Track Analysis", "BPM Range"),
@@ -999,6 +1000,17 @@ fn page_analysis(app: &mut App, ui: &mut Ui, tab: usize) {
             });
         });
         note(ui, "Rekordbox-compatible uses the port of the original detector. Classic uses the earlier recordbox detector. Both support Normal and Dynamic.");
+        kit::sub_help(ui, "MP3 cue timing", Some("Some MP3 encoders add a short lead-in. On one track the same cue might land about 25 ms earlier or later on a kick. On another it can land in exactly the same place. Both modes read the original audio file."));
+        match crate::audio::mp3_timeline() {
+            crate::audio::Mp3Timeline::Legacy => {
+                kit::line(ui, "Active timing · Standard recordbox (usual collection)");
+                note(ui, "Listen to a cue imported from AlphaTheta Rekordbox. Restart with --mp3-timeline rekordbox and import the same track and cue into the separate trial collection. Start normally to return.");
+            }
+            crate::audio::Mp3Timeline::Rekordbox => {
+                kit::line(ui, "Active timing · Rekordbox-compatible (separate trial collection)");
+                note(ui, "Import a cue you know from AlphaTheta Rekordbox. Jump to it and listen for the start of the beat before exporting or writing cues back. Restart normally to return to the cues in your usual collection.");
+            }
+        }
         kit::sub_help(ui, "Track Analysis Mode", Some("Normal: optimized for tracks which have a constant BPM.\nDynamic: for tracks whose tempo changes, the beat grid follows the tempo."));
         kit::labeled(ui, "Analysis Mode", |ui| {
             let modes = [("Normal", "Optimized for tracks which have a constant BPM"), ("Dynamic", "For tracks whose tempo changes: the beat grid follows the tempo")];
@@ -1737,6 +1749,7 @@ mod tests {
         assert!(search_settings("WAVEFORM", ex).len() >= 5, "search ignores case");
         assert!(search_settings("zzzz", ex).is_empty());
         assert_eq!(search_settings("grid estimator", ex), vec![(1, 0, "Beat grid estimator".to_string())]);
+        assert_eq!(search_settings("MP3 cue", ex), vec![(1, 0, "MP3 cue timing".to_string())]);
         // A page that exists only in Performance mode is found only there.
         assert!(search_settings("needle lock", ex).is_empty());
         assert_eq!(search_settings("needle lock", Mode::Performance), vec![(7, 0, "Needle Lock".to_string())]);

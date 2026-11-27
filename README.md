@@ -36,11 +36,11 @@ recordbox focuses on local libraries and audio files you own or have permission 
 ## Running it
 
 Choose your package from the **Downloads** table on the latest release. Check its SHA-256 digest against `SHA256SUMS`, then extract the whole archive.
-The packages are unsigned, and macOS builds ship without Apple notarization. [Latest release and downloads](https://github.com/fantuz/recordbox/releases/latest) · [Runtime requirements and verification](docs/BUILD-AND-PACKAGING.md)
+The macOS downloads currently ship without Developer ID signing or Apple notarization. Windows downloads are unsigned. [Latest release and downloads](https://github.com/fantuz/recordbox/releases/latest) · [Runtime requirements and verification](docs/BUILD-AND-PACKAGING.md)
 
 | Platform | Start recordbox | STEMS processing |
 | --- | --- | --- |
-| macOS | Choose the Apple Silicon or Intel ZIP for your Mac and open `Recordbox.app`. | The standard app uses Metal when available. |
+| macOS | Choose the Apple Silicon or Intel ZIP for your Mac, extract it and move `Recordbox.app` to Applications. The app runs without Rust or Homebrew. If macOS blocks the first launch, check the warning against [Apple’s instructions for opening a trusted app](https://support.apple.com/en-us/102445). | The standard app uses Metal when available. |
 | Windows x64 | Run `recordbox.exe` from the extracted portable ZIP. | The standard ZIP uses the CPU. Choose the CUDA 12 preview for a compatible NVIDIA GPU such as the Quadro P2000, or the DirectML preview for a supported Radeon such as Vega 8. [CUDA and driver requirements](docs/CUDA12.md) · [Radeon drivers and setup](docs/DIRECTML.md) |
 | Linux x64 (experimental) | Run `./recordbox` from the extracted tarball. | The standard build uses the CPU. Optional builds offer CUDA 12 for compatible NVIDIA GPUs or Vulkan for partial GPU acceleration alongside the CPU. [CUDA setup](docs/CUDA12.md) · [Vulkan setup](docs/VULKAN.md) |
 
@@ -48,7 +48,7 @@ On Linux, `./recordbox --disable-load` disables deck loading for the session. Us
 
 ### Homebrew on macOS
 
-On Apple Silicon or Intel, you can build recordbox locally with Homebrew and the Xcode Command Line Tools. The first install downloads the pinned source and build dependencies, then compiles the app on your Mac.
+If you already use Homebrew and have the Xcode Command Line Tools, the formula builds the tagged release on your Mac and manages upgrades. The first install downloads the Rust toolchain and compiles the app. For a prebuilt app, use the ZIP above.
 
 ```sh
 brew tap fantuz/recordbox https://github.com/fantuz/recordbox
@@ -56,7 +56,7 @@ brew install --build-from-source fantuz/recordbox/recordbox
 recordbox
 ```
 
-To open the installed macOS app bundle, run `open "$(brew --prefix fantuz/recordbox/recordbox)/libexec/Recordbox.app"`. Homebrew manages the bundle and its command-line launcher. The local build uses an ad-hoc signature. Apple Developer ID signing and notarization are separate steps for distributing prebuilt downloads.
+To open the Homebrew app in Finder, run `open "$(brew --prefix fantuz/recordbox/recordbox)/libexec/Recordbox.app"`. Homebrew applies a local ad-hoc signature. Use the Cargo instructions below when developing or testing a particular revision. [macOS distribution and notarization](docs/BUILD-AND-PACKAGING.md#distributing-a-macos-app-to-djs)
 
 ## Prepare and play
 
@@ -70,7 +70,7 @@ To open the installed macOS app bundle, run `open "$(brew --prefix fantuz/record
 - **Separate a track into STEMS.** In **Preferences → Extensions → STEMS**, download HTDemucs for speed or HTDemucs fine-tuned for sound quality. Both save drums, bass, instruments and vocals as four stereo parts. Completed separations are available across decks and restarts.
   Saved parts from both models share a 20 GB budget by default. Choose **Keep all saved stems** to retain completed results without a size limit. [STEMS storage and backups](docs/LIBRARY-SYNC.md#how-much-separation-is-saved)
 
-See the [integration report](docs/UPSTREAM-INTEGRATION.md) for measured beat timing, live STEMS availability and the separate MP3 timing trial.
+If an imported MP3 cue sounds early or late, you can audition the same timestamp using a separate collection. [Compare MP3 cue timing](docs/PLAYBACK-PERFORMANCE.md#auditioning-rekordbox-mp3-timing) · [Integration report and measurements](docs/UPSTREAM-INTEGRATION.md)
 
 ## Working with AlphaTheta libraries and USB drives
 

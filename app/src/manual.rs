@@ -49,6 +49,7 @@ const CHAPTERS: [(&str, &str, &str); 14] = [
 <li><i>Track &gt; Stop Analyzing</i> empties the queue.</li>
 </ul>
 <p>Preferences &gt; Analysis sets the <b>Analysis Mode</b> (Normal for steady tempo, Dynamic for tempo that drifts), the <b>BPM Range</b>, and which items are analysed. <b>CUE Analysis</b> can place a memory cue on the first beat and hot cue A ("1.1Bars") on the first downbeat when a track is first analysed.</p>
+<p>To check where an imported MP3 cue lands against a drum hit, open <b>Preferences &gt; Analysis &gt; Track Analysis &gt; MP3 cue timing</b>. It shows which timing is active and how to audition the same cue in a separate collection. Starting recordbox normally returns to your usual collection.</p>
 "#),
     ("browser", "The browser and track list", r#"
 <ul>

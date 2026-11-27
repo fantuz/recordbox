@@ -31,28 +31,51 @@ numerical backends. The changes keep the existing floating-point mode.
 
 ## Auditioning Rekordbox MP3 timing
 
-Ordinary launches and `recordbox --mp3-timeline legacy` open your usual
-collection. Start `recordbox --mp3-timeline rekordbox` to audition the MP3
-clock traced from AlphaTheta Rekordbox 7.2.19. It retains the encoder delay
-and counts a leading MP3 info frame when its header matches the following
-audio frames. Depending on the encoder and headers, a saved cue can land at
-a different sound on this clock. Other audio formats decode as before.
+A cue stores a time into a track. MP3 encoders can put a short lead-in before
+the music. Two players can therefore read the same cue time and start on
+slightly different sounds. For example, we encoded a click at 1.000 s. With
+one 44.1 kHz MP3 it played at 1.000 s using the usual recordbox timing and
+at 1.025 s using the timing traced from AlphaTheta Rekordbox 7.2.19. A cue
+at 1.000 s in the second case starts about 25 ms before the click. The amount
+depends on the file. A timing difference of this kind persists even when both
+players show exactly the same BPM.
 
-The option opens a second collection at `mp3-timeline-rekordbox/library.db`
-inside your recordbox data folder (or inside `PREPDECK_DATA` when set). The
-startup message and the library footer show the path. Add files or import a
-Rekordbox snapshot into this collection. Listen to a known native cue and
-check the downbeat against its transient before exporting or approving any
-write-back. Each collection keeps its own cues, grids, waveforms, analysis
-and preferences. The application retains their saved times and restores
-library backups into the collection with the matching clock.
+**Which timing should I use?** Open recordbox normally for cues you placed
+by ear in your usual collection. If a cue imported from AlphaTheta sounds
+early or late, use the separate Rekordbox timing collection to compare it.
+In Preferences, search for **MP3 cue timing** to see which timing is active.
 
-Both collections share downloaded separation models. Each MP3 clock has a
-separate STEMS cache entry for a track and model. Other audio formats can
-reuse stems saved by either collection. Each collection clears or prunes
-only its own folder. Restart with the same
-option to continue this collection, or start normally to return to the
-original one.
+1. In your usual collection, pick an MP3 with an imported cue on a clear
+   kick or snare. Note its timestamp and listen to the start of the cue.
+2. Quit recordbox and open the timing trial using the command for your build
+   below. The footer shows a library path ending in
+   `mp3-timeline-rekordbox/library.db`. A fresh trial starts with its own
+   collection. Import the same AlphaTheta library snapshot, or add the same
+   MP3 and seek to the timestamp you noted.
+3. Play the cue or seek point and listen for the attack. You can do the whole
+   comparison locally without writing back to AlphaTheta. Quit and open
+   recordbox normally to return to your usual collection. Launch the trial
+   again to keep working in its collection.
+
+| How you installed recordbox | Start the timing trial |
+| --- | --- |
+| Windows portable ZIP | In PowerShell in the extracted folder, run `.\recordbox.exe --mp3-timeline rekordbox`. |
+| Linux archive | In the extracted folder, run `./recordbox --mp3-timeline rekordbox`. |
+| macOS app in Applications | In Terminal, run `open -a /Applications/Recordbox.app --args --mp3-timeline rekordbox`. |
+| Homebrew | In Terminal, run `recordbox --mp3-timeline rekordbox`. |
+
+The launcher's `--help` lists `--mp3-timeline` on builds that include the
+trial. The choice lasts for that launch. Both collections read the same
+source audio and keep their own cues, grids, waveforms and preferences.
+They share downloaded STEMS models. The trial saves fresh MP3 separations
+on its own clock. Other formats can reuse compatible separations. Each
+collection clears or prunes its own cache. Backups restore into the
+collection with the matching clock.
+
+For a technical comparison, the Rekordbox clock retains encoder delay and
+counts a leading MP3 info frame when its header matches the following audio
+frames. Other formats decode as usual. Both collections live under your
+recordbox data folder, or under `PREPDECK_DATA` if you set it.
 
 ## Linux deck loading and playback
 
