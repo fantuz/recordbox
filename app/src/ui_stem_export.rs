@@ -18,11 +18,12 @@ pub fn frame(app: &mut App, ctx: &egui::Context) {
 
 /// A folder as the user knows it ("~/Music/recordbox/Stems").
 pub fn shown_dir(p: &std::path::Path) -> String {
-    let s = p.to_string_lossy().to_string();
-    match dirs::home_dir().map(|h| h.to_string_lossy().to_string()) {
-        Some(h) if s.starts_with(&h) => format!("~{}", &s[h.len()..]),
-        _ => s,
+    if let Some(home) = dirs::home_dir() {
+        if let Ok(relative) = p.strip_prefix(home) {
+            return std::path::Path::new("~").join(relative).display().to_string();
+        }
     }
+    p.display().to_string()
 }
 
 /// The first export's explanation: the tracks are added to the library (and where the files

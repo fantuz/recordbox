@@ -47,7 +47,7 @@ fn checked_dir(path: &Path) -> Result<PathBuf, String> {
         crate::rbimport::default_library_dir(),
         dirs::home_dir().map(|h| h.join("Music/rekordbox")),
         dirs::home_dir().map(|h| h.join("Library/Pioneer")),
-        Some(crate::db::data_dir().join("stems")),
+        Some(crate::db::data_dir_for_inspection().join("stems")),
         Some(crate::db::shared_data_dir_for_inspection().join("stems")),
     ];
     let allowed = |p: &Path| {
@@ -178,26 +178,7 @@ fn encoder_lead(plan: &Plan, target: &Path, cancel: &AtomicBool) -> Result<usize
     })?;
     let back = crate::audio::decode_bounded(&file.path().to_string_lossy(), 3, || cancel.load(Ordering::Relaxed))
         .map_err(|e| e.to_string())?;
-    let win_energy: f64 = wave.iter().map(|&x| f64::from(x).powi(2)).sum();
-    let mut best = (0, 0.0);
-    for lag in 0..=6000 {
-        let Some(window) = back.samples.get((start + lag) * 2..(start + lag + wave.len()) * 2) else {
-            break;
-        };
-        if lag % 256 == 0 {
-            check(cancel)?;
-        }
-        let (mut dot, mut energy) = (0.0, 0.0);
-        for (frame, &x) in window.chunks_exact(2).zip(&wave) {
-            let val = f64::from(frame[0]);
-            dot += f64::from(x) * val;
-            energy += val * val;
-        }
-        let score = dot / (energy * win_energy).sqrt().max(1e-12);
-        if score > best.1 {
-            best = (lag, score);
-        }
-    }
+    let best = measure_lead(&wave, &back.samples, start, cancel)?;
     if best.1 < 0.45 {
         return Err(
             "Could not measure the encoder delay. Choose FLAC, WAV or AIFF to preserve the cue timeline.".into(),
@@ -206,8 +187,47 @@ fn encoder_lead(plan: &Plan, target: &Path, cancel: &AtomicBool) -> Result<usize
     Ok(best.0)
 }
 
+/// Find where an actual encoded signal appears on the selected decoder clock.
+fn measure_lead(wave: &[i16], decoded: &[f32], start: usize, cancel: &AtomicBool) -> Result<(usize, f64, f64), String> {
+    let win_energy: f64 = wave.iter().map(|&x| f64::from(x).powi(2)).sum();
+    if win_energy == 0.0 {
+        return Ok((0, 0.0, 0.0));
+    }
+    let mut scores = Vec::with_capacity(6001);
+    let mut best = (0, 0.0);
+    for lag in 0..=6000 {
+        let Some(window) = decoded.get((start + lag) * 2..(start + lag + wave.len()) * 2) else {
+            break;
+        };
+        if lag % 256 == 0 {
+            check(cancel)?;
+        }
+        let (mut dot, mut energy) = (0.0, 0.0);
+        for (frame, &x) in window.chunks_exact(2).zip(wave) {
+            let val = f64::from(frame[0]);
+            dot += f64::from(x) * val;
+            energy += val * val;
+        }
+        let score = dot / (energy * win_energy).sqrt().max(1e-12);
+        scores.push(score);
+        if score > best.1 {
+            best = (lag, score);
+        }
+    }
+    let competitor = scores
+        .iter()
+        .enumerate()
+        .filter(|(lag, _)| lag.abs_diff(best.0) > 16)
+        .map(|(_, &s)| s)
+        .fold(0.0f64, f64::max);
+    Ok((best.0, best.1, best.1 - competitor))
+}
+
 pub(super) fn stage(w: Work, cancel: &AtomicBool) -> Result<Staged, String> {
     check(cancel)?;
+    if w.setting == 4 && !Path::new("/usr/bin/afconvert").is_file() {
+        return Err("AAC export requires macOS's afconvert. Choose FLAC, WAV, AIFF or MP3 in Preferences.".into());
+    }
     let source = SourceStamp::read(&w.path)?;
     let dir = checked_dir(&w.dir)?;
     // Check the cache before decoding a possibly large off-deck source.
@@ -239,7 +259,13 @@ pub(super) fn stage(w: Work, cancel: &AtomicBool) -> Result<Staged, String> {
     if frames == 0 {
         return Err("The track is too short to export.".into());
     }
-    let lead = encoder_lead(&plan, &target, cancel)?;
+    let mut lead = encoder_lead(&plan, &target, cancel)?;
+    let head_frames = if plan.lossy() {
+        frames.min(plan.rate as usize * 2)
+    } else {
+        0
+    };
+    let mut reference = Vec::with_capacity(head_frames);
     // Preserve even a quiet or silent lead-in: it can contain an independently audible
     // vocal part, and the deck's cues refer to the original timeline.
     let mut at = 0usize;
@@ -280,6 +306,9 @@ pub(super) fn stage(w: Work, cancel: &AtomicBool) -> Result<Staged, String> {
                     output[0] = sample(part[0]);
                     output[1] = sample(part[1]);
                 }
+                if at < head_frames {
+                    reference.push(output[0] as i16);
+                }
                 at += 1;
             }
         }
@@ -292,6 +321,25 @@ pub(super) fn stage(w: Work, cancel: &AtomicBool) -> Result<Staged, String> {
     let verify = probe_source(&file.path().to_string_lossy(), 0).ok_or("The encoded file cannot be read.")?;
     if verify.rate != plan.rate || verify.ch != plan.ch {
         return Err("The encoded file has unexpected audio properties.".into());
+    }
+    if !plan.lossy() && verify.frames.is_some_and(|reported| reported != frames as u64) {
+        return Err("The lossless container reports a different frame count from the original.".into());
+    }
+    // Two short windows from the real output can confirm or refine the calibration. Silent
+    // intros and repetitive passages may offer no unique measurement: retain the probe then.
+    if reference.len() >= 2048 {
+        let decoded = crate::audio::decode_prefix(&file.path().to_string_lossy(), 3).map_err(|e| e.to_string())?;
+        let last = reference.len() - 1024;
+        let mut confirmed = None;
+        for at in [last / 3, 2 * last / 3] {
+            let (lag, correlation, margin) = measure_lead(&reference[at..at + 1024], &decoded.samples, at, cancel)?;
+            if correlation > 0.7 && margin > 0.08 {
+                if confirmed == Some(lag) {
+                    lead = lag;
+                }
+                confirmed = Some(lag);
+            }
+        }
     }
     let shift = lead as f64 / f64::from(plan.rate);
     Ok(Staged {

@@ -36,7 +36,7 @@ impl Default for StemExportPrefs {
     }
 }
 
-pub const FORMAT_NAMES: [&str; 6] = ["Same as the original", "WAV", "FLAC", "AIFF", "M4A (AAC)", "MP3"];
+pub const FORMAT_NAMES: [&str; 6] = ["Same as the original", "WAV", "FLAC", "AIFF", "M4A (AAC, macOS)", "MP3"];
 
 /// recordbox's own folder for exported stems, beside the Edit renders (`ui_edit::render_dir`).
 /// A test run with PREPDECK_DATA keeps it inside that folder ("Stem Exports", since the data
@@ -127,6 +127,7 @@ impl Kind {
 #[derive(Clone, Debug, PartialEq)]
 pub struct SourceInfo {
     pub kind: Kind,
+    pub frames: Option<u64>,
     pub rate: u32,
     pub ch: u16,
     /// Bits per sample of a lossless original (0: not known).
@@ -331,6 +332,7 @@ pub fn probe_source(path: &str, kbps: u32) -> Option<SourceInfo> {
     }
     Some(SourceInfo {
         kind,
+        frames: t.codec_params.n_frames,
         rate,
         ch,
         bits,
