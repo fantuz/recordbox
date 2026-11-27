@@ -464,8 +464,8 @@ pub fn separate_with_device(m: &ModelSpec, samples: &[f32], sr: u32, progress: &
 /// A preview uses the same weighted segment results as the final cached output.
 /// All callers without a preview keep the completed-output path.
 pub fn separate_with_live(m: &ModelSpec, samples: &[f32], sr: u32, progress: &mut dyn FnMut(f32) -> bool, execution: SeparationDevice, live: Option<&Live>) -> Result<Stems> {
-    anyhow::ensure!(sr > 0 && !samples.is_empty() && samples.len() % 2 == 0, "expected nonempty interleaved stereo and a positive sample rate");
     if !progress(0.0) { anyhow::bail!("stopped"); }
+    anyhow::ensure!(sr > 0 && !samples.is_empty() && samples.len() % 2 == 0, "expected nonempty interleaved stereo and a positive sample rate");
     let device = execution.device()?;
     let _job = execution.reserve_gpu(progress)?;
     let (planar, len) = planar_44k(samples, sr);

@@ -3312,6 +3312,7 @@ impl App {
                     Some(audio) => audio,
                     None => Arc::new(crate::audio::decode_until(&t.path, cancelled)?),
                 };
+                if cancelled() { anyhow::bail!("stopped"); }
                 let preview = preview_hw.and_then(|hw| crate::stems::Live::for_job(&hw, m, execution, dec.frames(), dec.sr));
                 if let Some(preview) = &preview {
                     if cancelled() { anyhow::bail!("stopped"); }
