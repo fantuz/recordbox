@@ -323,6 +323,41 @@ mod tests {
     }
 
     #[test]
+    fn pipeline_publishes_only_irrevocable_windows_with_the_original_weight_order() {
+        let len = 41_000;
+        let segment = 11_091;
+        let offsets: Vec<usize> = (0..len).step_by(6027).collect();
+        let weight: Vec<_> = (0..segment)
+            .map(|i| ((i + 1).min(segment - i) as f32) / segment as f32)
+            .collect();
+        let live = Live::with_len(len).unwrap();
+        let publish = Publication {
+            live: &live,
+            previous: &[],
+        };
+        let mut output = vec![0.0; PLANES * len];
+        let mut sums = vec![0.0; len];
+        for (k, &start) in offsets.iter().enumerate() {
+            let count = (len - start).min(segment);
+            for i in 0..count {
+                sums[start + i] += weight[i];
+                for plane in 0..PLANES {
+                    let sample = (plane * 31 + k * 17 + i % 13) as f32;
+                    output[plane * len + start + i] += sample * weight[i];
+                }
+            }
+            let next = offsets.get(k + 1).copied().unwrap_or(len);
+            publish.advance_segments(&output, next, &offsets, &weight);
+            assert!(live.ready_frames() <= next);
+        }
+        for (plane, values) in output.chunks_exact(len).enumerate() {
+            for frame in 0..len {
+                assert_eq!(live.sample(plane, frame), Some(values[frame] / sums[frame]));
+            }
+        }
+    }
+
+    #[test]
     fn a_long_track_stops_publishing_at_the_limit_and_preserves_plane_stride() {
         let len = 4 * BLOCK;
         let cap = 2 * BLOCK + 7;
