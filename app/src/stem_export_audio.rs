@@ -223,6 +223,55 @@ fn measure_lead(wave: &[i16], decoded: &[f32], start: usize, cancel: &AtomicBool
     Ok((best.0, best.1, best.1 - competitor))
 }
 
+/// Validate recordbox's fixed-layout uncompressed AIFF output independently of the
+/// demuxer's duration estimate. Symphonia 0.5.5 includes both 32-bit SSND control
+/// fields in that estimate even after consuming them.
+pub(super) fn written_aiff_frames(path: &Path) -> Result<u64, String> {
+    let mut f = File::open(path).map_err(|e| e.to_string())?;
+    let mut header = [0u8; 54];
+    f.read_exact(&mut header)
+        .map_err(|e| format!("Incomplete AIFF header: {e}"))?;
+    let word = |i| u32::from_be_bytes(header[i..i + 4].try_into().unwrap());
+    let short = |i| u16::from_be_bytes(header[i..i + 2].try_into().unwrap());
+    if &header[..4] != b"FORM"
+        || &header[8..16] != b"AIFFCOMM"
+        || word(16) != 18
+        || &header[38..42] != b"SSND"
+        || word(46) != 0
+        || word(50) != 0
+    {
+        return Err("The written AIFF has an unexpected chunk layout.".into());
+    }
+    let channels = short(20);
+    let bits = short(26);
+    if !matches!(channels, 1 | 2) || !matches!(bits, 16 | 24) {
+        return Err("Invalid AIFF PCM format.".into());
+    }
+    let frames = u64::from(word(22));
+    let payload = u64::from(word(42).checked_sub(8).ok_or("Invalid AIFF SSND size.")?);
+    let expected = frames * u64::from(channels) * u64::from(bits / 8);
+    if payload != expected {
+        return Err(format!(
+            "AIFF COMM declares {frames} frames ({expected} PCM bytes), but SSND contains {payload} PCM bytes."
+        ));
+    }
+    let pad = payload % 2;
+    let len = f.metadata().map_err(|e| e.to_string())?.len();
+    if len != 54 + payload + pad || u64::from(word(4)) + 8 != len {
+        return Err("AIFF FORM size or file length differs from the PCM payload and its word padding.".into());
+    }
+    if pad != 0 {
+        let mut trailing = [0];
+        f.seek(SeekFrom::End(-1))
+            .and_then(|_| f.read_exact(&mut trailing))
+            .map_err(|e| e.to_string())?;
+        if trailing[0] != 0 {
+            return Err("Invalid AIFF word padding.".into());
+        }
+    }
+    Ok(frames)
+}
+
 pub(super) fn stage(w: Work, cancel: &AtomicBool) -> Result<Staged, String> {
     check(cancel)?;
     if w.setting == 4 && !Path::new("/usr/bin/afconvert").is_file() {
@@ -243,17 +292,26 @@ pub(super) fn stage(w: Work, cancel: &AtomicBool) -> Result<Staged, String> {
         return Err("The complete original audio is required for a timeline-aligned export.".into());
     }
     let src = probe_source(&w.path, w.kbps).ok_or("Cannot determine the original audio format.")?;
+    let legacy_tail = src.legacy_aiff_tail;
     let plan = plan(w.setting, &SourceInfo { rate: audio.sr, ..src });
     let target = dir.join(format!("stem.{}", plan.ext));
     let src_len = audio.frames();
     let len = vocals.len();
     let stem_rate = crate::stems::htdemucs::SAMPLE_RATE;
     let expected = (src_len as f64 * f64::from(stem_rate) / f64::from(audio.sr)).round() as usize;
-    if len == 0 || len.abs_diff(expected) > 1 {
+    // Older AIFF caches may include a few frames from a trailing chunk. Consume only
+    // the real source duration; do not accept an arbitrary length mismatch.
+    let legacy_expected =
+        ((src_len + usize::from(legacy_tail)) as f64 * f64::from(stem_rate) / f64::from(audio.sr)).round() as usize;
+    if len == 0 || (len.abs_diff(expected) > 1 && len != legacy_expected) {
         return Err(
             "The saved parts and the original have different durations. Separate this version of the track again."
                 .into(),
         );
+    }
+    let len = len.min(expected);
+    if len == 0 {
+        return Err("Track too short for separated audio.".into());
     }
     let frames = (src_len as f64 * f64::from(plan.rate) / f64::from(audio.sr)).round() as usize;
     if frames == 0 {
@@ -322,8 +380,20 @@ pub(super) fn stage(w: Work, cancel: &AtomicBool) -> Result<Staged, String> {
     if verify.rate != plan.rate || verify.ch != plan.ch {
         return Err("The encoded file has unexpected audio properties.".into());
     }
-    if !plan.lossy() && verify.frames.is_some_and(|reported| reported != frames as u64) {
-        return Err("The lossless container reports a different frame count from the original.".into());
+    if !plan.lossy() {
+        let reported = if verify.kind == Kind::Aiff {
+            written_aiff_frames(file.path())?
+        } else {
+            verify
+                .frames
+                .ok_or_else(|| format!("The {} output does not declare its frame count.", plan.name))?
+        };
+        if reported != frames as u64 {
+            return Err(format!(
+                "The {} output declares {reported} frames; expected {frames}.",
+                plan.name
+            ));
+        }
     }
     // Two short windows from the real output can confirm or refine the calibration. Silent
     // intros and repetitive passages may offer no unique measurement: retain the probe then.

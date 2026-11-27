@@ -128,6 +128,7 @@ impl Kind {
 pub struct SourceInfo {
     pub kind: Kind,
     pub frames: Option<u64>,
+    pub legacy_aiff_tail: u8,
     pub rate: u32,
     pub ch: u16,
     /// Bits per sample of a lossless original (0: not known).
@@ -278,7 +279,8 @@ pub fn probe_source(path: &str, kbps: u32) -> Option<SourceInfo> {
     use symphonia::core::io::MediaSourceStream;
     use symphonia::core::meta::MetadataOptions;
     use symphonia::core::probe::Hint;
-    let file = std::fs::File::open(path).ok()?;
+    let mut file = std::fs::File::open(path).ok()?;
+    let aiff = crate::audio::aiff::frame_bounds(&mut file).ok()?;
     let mss = MediaSourceStream::new(Box::new(file), Default::default());
     let mut hint = Hint::new();
     let ext = Path::new(path)
@@ -309,7 +311,7 @@ pub fn probe_source(path: &str, kbps: u32) -> Option<SourceInfo> {
         Kind::OtherLossy
     } else if matches!(ext.as_str(), "wav" | "wave") {
         Kind::Wav
-    } else if matches!(ext.as_str(), "aif" | "aiff" | "aifc") {
+    } else if aiff.is_some() || matches!(ext.as_str(), "aif" | "aiff" | "aifc") {
         Kind::Aiff
     } else {
         Kind::OtherLossless
@@ -332,7 +334,8 @@ pub fn probe_source(path: &str, kbps: u32) -> Option<SourceInfo> {
     }
     Some(SourceInfo {
         kind,
-        frames: t.codec_params.n_frames,
+        frames: aiff.map(|b| b.frames as u64).or(t.codec_params.n_frames),
+        legacy_aiff_tail: aiff.map_or(0, |b| b.legacy_tail),
         rate,
         ch,
         bits,
@@ -1060,6 +1063,31 @@ mod tests {
     }
 
     #[test]
+    fn aiff_validation_rejects_inconsistent_comm_ssnd_sizes_and_padding() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("odd.aiff");
+        let mut bytes = Vec::new();
+        render::write_pcm(&mut bytes, 2, 5, 44100, 1, 24, 0, |dst| {
+            dst.fill(1);
+            Ok(())
+        })
+        .unwrap();
+        std::fs::write(&path, &bytes).unwrap();
+        assert_eq!(audio_export::written_aiff_frames(&path).unwrap(), 5);
+        for offset in [7usize, 25, 45, 49, 53, bytes.len() - 1] {
+            let mut broken = bytes.clone();
+            broken[offset] ^= 1;
+            std::fs::write(&path, broken).unwrap();
+            assert!(
+                audio_export::written_aiff_frames(&path).is_err(),
+                "accepted corrupt byte {offset}"
+            );
+        }
+        std::fs::write(&path, &bytes[..bytes.len() - 1]).unwrap();
+        assert!(audio_export::written_aiff_frames(&path).is_err());
+    }
+
+    #[test]
     fn lossless_outputs_keep_mono_24_bit_and_odd_frame_counts() {
         let dir = tempfile::tempdir().unwrap();
         let (path, stems) = source(dir.path(), 9001, 1, 24);
@@ -1082,6 +1110,40 @@ mod tests {
             }
         }
         assert_eq!(std::fs::read(path).unwrap(), original);
+    }
+
+    #[test]
+    fn legacy_aiff_cache_with_metadata_tail_exports_only_real_audio() {
+        let d = tempfile::tempdir().unwrap();
+        let path = d.path().join("Metadata.aiff");
+        let frames = 9001;
+        let mut bytes = Vec::new();
+        render::write_pcm(&mut bytes, 2, frames, 44100, 1, 24, 0, |dst| {
+            dst.fill(0);
+            Ok(())
+        })
+        .unwrap();
+        bytes.extend(b"ANNO\x00\x00\x00\x04abcd");
+        let size = (bytes.len() - 8) as u32;
+        bytes[4..8].copy_from_slice(&size.to_be_bytes());
+        std::fs::write(&path, bytes).unwrap();
+        let path = path.to_str().unwrap();
+        let make = |tail| {
+            let len = frames + tail;
+            let mut data = vec![0.0; len * 8];
+            for c in [6, 7] {
+                let channel = &mut data[c * len..(c + 1) * len];
+                channel[frames - 1] = 0.25;
+                channel[frames..].fill(1.0);
+            }
+            Arc::new(crate::stems::Stems { len, data })
+        };
+        let staged =
+            audio_export::stage(work(path, make(2), d.path(), 1, Part::Vocals), &AtomicBool::new(false)).unwrap();
+        let decoded = crate::audio::decode_file(&staged.file.path().to_string_lossy()).unwrap();
+        assert_eq!(decoded.frames(), frames);
+        assert_eq!(decoded.samples[2 * (frames - 1)], 0.25);
+        assert!(audio_export::stage(work(path, make(3), d.path(), 1, Part::Vocals), &AtomicBool::new(false)).is_err());
     }
 
     fn check_lossy_timeline(setting: u8) {

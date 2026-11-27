@@ -1,5 +1,7 @@
 //! Audio decoding (symphonia) and the preview player (cpal).
 
+pub(crate) mod aiff;
+
 use anyhow::{anyhow, Result};
 use parking_lot::Mutex;
 use std::sync::atomic::AtomicU64;
@@ -219,7 +221,8 @@ impl DecodeLimit {
 
 fn decode_with_budget(path: &str, timeline: Mp3Timeline, cancelled: impl Fn() -> bool, limit: DecodeLimit) -> Result<Decoded> {
     if cancelled() { anyhow::bail!("stopped"); }
-    let file = std::fs::File::open(path)?;
+    let mut file = std::fs::File::open(path)?;
+    let aiff = aiff::frame_bounds(&mut file)?;
     let mss = MediaSourceStream::new(Box::new(file), Default::default());
     let mut hint = Hint::new();
     if let Some(ext) = std::path::Path::new(path).extension().and_then(|e| e.to_str()) {
@@ -227,13 +230,13 @@ fn decode_with_budget(path: &str, timeline: Mp3Timeline, cancelled: impl Fn() ->
     }
     // Earlier recordbox collections used an encoder-name heuristic. The optional
     // Rekordbox clock keeps decoder delay and counts a matching leading Info frame.
-    let (gapless, trim_untagged, lead) = match timeline {
+    let (gapless, trim_untagged, lead) = if aiff.is_some() { (false, false, 0) } else { match timeline {
         Mp3Timeline::Legacy => {
             let class = mp3_timing_class(path);
             (class == Mp3Timing::Ffmpeg, class == Mp3Timing::Untagged, 0)
         }
         Mp3Timeline::Rekordbox => (false, false, crate::analysis::mp3_timebase::lead_frames(path)),
-    };
+    }};
     let probed = symphonia::default::get_probe().format(&hint, mss, &FormatOptions { enable_gapless: gapless, ..Default::default() }, &MetadataOptions::default())?;
     let mut format = probed.format;
     let track = format
@@ -245,7 +248,7 @@ fn decode_with_budget(path: &str, timeline: Mp3Timeline, cancelled: impl Fn() ->
     let track_id = track.id;
     let mut sr = track.codec_params.sample_rate.unwrap_or(44100);
     let mut out = vec![0.0; lead * 2];
-    let declared_frames = track.codec_params.n_frames;
+    let declared_frames = aiff.map(|b| b.frames as u64).or(track.codec_params.n_frames);
     let time_base = track.codec_params.time_base;
     let trim = if trim_untagged { MP3_UNTAGGED_SKIP } else { 0 };
     if let DecodeLimit::Optional(seconds) | DecodeLimit::Prefix(seconds) = limit {
@@ -264,6 +267,8 @@ fn decode_with_budget(path: &str, timeline: Mp3Timeline, cancelled: impl Fn() ->
     loop {
         if cancelled() { anyhow::bail!("stopped"); }
         if matches!(limit, DecodeLimit::Prefix(_)) && out.len() / 2 >= limit.frames(sr, trim) { break; }
+        let audio_remaining = aiff.map_or(usize::MAX, |b| b.frames.saturating_sub(out.len()/2));
+        if audio_remaining == 0 { break; }
         let packet = match format.next_packet() {
             Ok(p) => p,
             Err(symphonia::core::errors::Error::IoError(_)) => break,
@@ -278,7 +283,7 @@ fn decode_with_budget(path: &str, timeline: Mp3Timeline, cancelled: impl Fn() ->
             Err(symphonia::core::errors::Error::DecodeError(_)) => {
                 // Silence for the packet's length, so everything after stays where it belongs.
                 damaged += 1;
-                let n = (packet.dur as usize).min(1 << 20);
+                let n = (packet.dur as usize).min(1 << 20).min(audio_remaining);
                 let n = limit.packet(&mut out, sr, trim, n)?;
                 out.resize(out.len() + n * 2, 0.0);
                 continue;
@@ -291,7 +296,7 @@ fn decode_with_budget(path: &str, timeline: Mp3Timeline, cancelled: impl Fn() ->
         if !matches!(limit, DecodeLimit::Whole) {
             anyhow::ensure!(ch != 0 && decoded.capacity().saturating_mul(ch) <= 8 * 1024 * 1024, "audio packet exceeds the decode limit");
         }
-        let frames = limit.packet(&mut out, sr, trim, decoded.frames())?;
+        let frames = limit.packet(&mut out, sr, trim, decoded.frames().min(audio_remaining))?;
         if sbuf.as_ref().map(|b| b.capacity() < decoded.capacity() * ch).unwrap_or(true) {
             sbuf = Some(SampleBuffer::<f32>::new(decoded.capacity() as u64, spec));
         }
