@@ -1632,9 +1632,11 @@ fn device_list(app: &mut App, ui: &mut Ui, root: &str, node: Option<u32>, histor
         body.add_space(30.0);
         let catalog = dev.catalog_label();
         let blocker = dev.write_blocker.clone();
+        let inspect_one = matches!(dev.layout, Some(crate::export::usb::DeviceLayout::OneLibrary | crate::export::usb::DeviceLayout::Mixed));
         body.vertical_centered(|ui| {
             ui.strong(catalog);
             ui.label(RichText::new(root).size(11.0).color(DIM));
+            if inspect_one { app.device_ui.one_inspector.button(ui, root); }
             if let Some(reason) = blocker {
                 ui.label(RichText::new(reason).color(CAUTION_TX));
                 return;

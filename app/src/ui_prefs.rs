@@ -1388,7 +1388,7 @@ pub(crate) fn page_dj_system(app: &mut App, ui: &mut Ui, tab: usize) {
                 kit::line(ui, "Drive formats: FAT32, exFAT (some players), HFS+ (USB only).");
                 kit::line(ui, "Files: MP3, AAC/M4A, WAV, AIFF, FLAC.");
                 note(ui, "Classic Device Library uses export.pdb and exportExt.pdb, analysis files (DAT, EXT and 2EX), and music in /Contents.");
-                note(ui, "OneLibrary (Device Library Plus) is detected. On drives with both catalogs, recordbox browses and updates the classic catalog and preserves existing shared files.");
+                note(ui, "On a mixed drive, recordbox updates the classic catalog and preserves existing shared files. Right-click the drive and choose Inspect OneLibrary playlists to view the other catalog with the optional reader.");
             });
         }
     }

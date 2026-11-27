@@ -83,7 +83,7 @@ Desktop sync reads the original audio files without modifying them. Use the sync
   Close AlphaTheta Rekordbox and its agent before applying changes. **Back up and apply** checks for conflicts and saves a verified recovery copy before updating the original database and any affected analysis files. For newly created or retimed cues, use collection XML export. [Supported edits, limits and recovery](docs/LIBRARY-SYNC.md) · [ANLZ import compatibility](docs/ANLZ-IMPORT-INTEGRITY.md)
 
 For **USB export**, use **Device Sync Manager**. It writes the classic Device Library catalog, music and analysis files to the selected drive.
-On a drive with both catalogs, recordbox updates the classic library. To update OneLibrary (formerly Device Library Plus), use AlphaTheta Rekordbox.
+On a drive with both catalogs, recordbox updates the classic library. To inspect OneLibrary playlists, right-click the device and choose **Inspect OneLibrary playlists…**. The optional reader can compare the two catalogs’ track order. Use AlphaTheta Rekordbox to update OneLibrary. [Reader setup](docs/USB-COMPATIBILITY.md#inspect-onelibrary-playlists)
 Check the player model and firmware when choosing a format. [USB formats and player compatibility](docs/USB-COMPATIBILITY.md)
 
 ## Review missing tracks and duplicates
