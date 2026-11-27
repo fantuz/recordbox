@@ -5,7 +5,6 @@ use crate::groove::{Engine, GcClip};
 
 const DEVICE: &str = "DDJ-GRV6";
 const FIXTURE: &[u8] = include_bytes!("../../../docs/studies/DDJ-GRV6-groove-check.csv");
-const SWAPS: [&str; 4] = ["DrumSwap1", "DrumSwap2", "DrumSwap3", "DrumSwap4"];
 
 struct Replay {
     hub: Arc<Hub>,
@@ -15,8 +14,13 @@ struct Replay {
 
 impl Replay {
     fn new() -> Self {
+        Self::with_decks(std::array::from_fn(|_| {
+            Arc::new(Mutex::new(PlayState::default()))
+        }))
+    }
+
+    fn with_decks(decks: [Arc<Mutex<PlayState>>; 4]) -> Self {
         let tmp = tempfile::tempdir().unwrap();
-        let decks = std::array::from_fn(|_| Arc::new(Mutex::new(PlayState::default())));
         let (mut hub, events) = Hub::new(decks, tmp.path().into(), true);
         let setup = Arc::get_mut(&mut hub).unwrap();
         setup.factory_dirs.clear();
@@ -56,11 +60,17 @@ impl Replay {
         val
     }
 
-    fn check_light(&self, name: &str, deck: u8, state: Led, expected: [u8; 3]) {
-        self.device.set_led(registry().tag(name), deck, state);
+    fn feedback(&self, app: &mut App) -> Vec<[u8; 3]> {
+        apply_pending(app, &self.hub);
+        leds(app, &self.hub);
         let mut port = self.device.out.lock();
-        assert_eq!(port.queue.pop(), Some(expected), "{name} on deck {deck}");
-        assert_eq!(port.queue.pop(), None);
+        std::iter::from_fn(|| port.queue.pop()).collect()
+    }
+
+    fn click(&self, app: &mut App, channel: u8, note: u8) -> Vec<[u8; 3]> {
+        self.send([0x90 | channel, note, 127]);
+        self.send([0x90 | channel, note, 0]);
+        self.feedback(app)
     }
 }
 
@@ -128,8 +138,61 @@ fn gain_joins_the_two_published_ccs_independently_on_all_four_channels() {
 }
 
 #[test]
-fn slot_and_capture_states_encode_the_published_led_notes_on_each_deck() {
-    let replay = Replay::new();
+fn groove_packets_update_app_gain_slots_capture_and_led_feedback() {
+    // A fresh process isolates the library, engine globals and settings from other tests.
+    const TEST: &str =
+        "midi::grv6_groove_tests::groove_packets_update_app_gain_slots_capture_and_led_feedback";
+    const CHILD: &str = "RECORDBOX_GRV6_TEST_PROFILE";
+    let Some(profile) = std::env::var_os(CHILD) else {
+        let tmp = tempfile::tempdir().unwrap();
+        let child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", TEST, "--nocapture"])
+            .env(CHILD, tmp.path())
+            .env("PREPDECK_DATA", tmp.path())
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&child.stdout);
+        assert!(
+            child.status.success() && stdout.contains("1 passed"),
+            "{stdout}\n{}",
+            String::from_utf8_lossy(&child.stderr)
+        );
+        return;
+    };
+    assert_eq!(std::env::var_os("PREPDECK_DATA"), Some(profile.clone()));
+    let mut app = App::open_library(
+        &Default::default(),
+        None,
+        crate::DeckOptions {
+            disable_play: true,
+            disable_load: false,
+        },
+    );
+    // The Player was constructed without opening an audio stream. Enable the UI commands
+    // without starting the player, MIDI scanner, UI poll loop or model-download services.
+    app.deck_options.disable_play = false;
+    app.prefs.app_mode = 1;
+    app.prefs.perf_four = true;
+    app.prefs.show_stems = true;
+    app.prefs.groove.enable = true;
+    app.prefs.groove.panel = true;
+    app.prefs.groove.auto_import = false;
+    app.prefs.groove.capture_dir = Path::new(&profile)
+        .join("captures")
+        .to_string_lossy()
+        .into_owned();
+
+    let replay = Replay::with_decks(app.player.decks.clone());
+    replay.hub.devices.lock().push(replay.device.clone());
+    app.midi.rx = Some(replay.events.clone());
+    let startup = replay.feedback(&mut app);
+    assert_eq!(startup.len(), 4 * 5);
+    assert!(startup.iter().all(|msg| msg[2] == 0));
+    for (n, engine) in crate::groove::ENGINES.iter().enumerate() {
+        *engine.lock() = Some(Box::new(Engine::new(n)));
+    }
+    app.groove_poll();
+
     let clip = GcClip {
         audio: Arc::new(crate::audio::Decoded {
             sr: 44100,
@@ -142,38 +205,81 @@ fn slot_and_capture_states_encode_the_published_led_notes_on_each_deck() {
         gain: 1.0,
         first_beat: 0.0,
     };
-    assert_eq!(replay.device.out_keys().len(), 4 * 5);
-    for channel in 0..4 {
-        let deck = channel + 1;
-        let mut engine = Engine::new(usize::from(channel));
-        let bank = channel % 2;
-        for (row, name) in SWAPS.iter().enumerate() {
-            engine.set_clip(row, usize::from(bank), Some(clip.clone()));
-            assert!(engine.launch(row, usize::from(bank)));
-            let slot_lights = drum_slot_lights(Some(&engine), bank);
-            assert_eq!(slot_lights.iter().filter(|&&s| s == Led::On).count(), 1);
-            assert_eq!(drum_slot_lights(Some(&engine), 1 - bank), [Led::Off; 4]);
-            let note = [0x00, 0x01, 0x02, 0x03][row];
-            replay.check_light(name, deck, slot_lights[row], [0x90 | channel, note, 127]);
-            engine.stop(row);
-            replay.check_light(
-                name,
-                deck,
-                drum_slot_lights(Some(&engine), bank)[row],
-                [0x90 | channel, note, 0],
+    for channel in 0..4u8 {
+        let n = usize::from(channel);
+        let bank = n % 2;
+        app.gc.set.decks[n].bank = bank as u8;
+        {
+            let mut engine = crate::groove::ENGINES[n].lock();
+            for row in 0..4 {
+                engine
+                    .as_mut()
+                    .unwrap()
+                    .set_clip(row, bank, Some(clip.clone()));
+                app.gc.wave[n][4 * bank + row] = Some(vec![0; 16]);
+            }
+        }
+        for (msb, lsb, percent) in [
+            (0, 0, 0.0),
+            (64, 0, 50.0),
+            (40, 19, 50.0 * 5139.0 / 8192.0),
+            (127, 127, 100.0),
+        ] {
+            let old = app.gc.gain;
+            replay.send([0xb0 | channel, 0x12, msb]);
+            assert!(replay.feedback(&mut app).is_empty());
+            assert_eq!(app.gc.gain, old);
+            replay.send([0xb0 | channel, 0x32, lsb]);
+            assert!(replay.feedback(&mut app).is_empty());
+            let mut wanted = old;
+            wanted[n] = percent;
+            assert_eq!(app.gc.gain, wanted);
+            app.groove_poll();
+            assert_eq!(
+                crate::groove::ENGINES[n].lock().as_ref().unwrap().gain,
+                crate::groove::knob_gain(percent)
             );
         }
-        let armed = drum_capture_light(Some(channel), channel);
-        replay.check_light("DrumSwapCapture", deck, armed, [0x90 | channel, 0x08, 127]);
-        let other_deck_armed = drum_capture_light(Some((channel + 1) % 4), channel);
-        replay.check_light(
-            "DrumSwapCapture",
-            deck,
-            other_deck_armed,
-            [0x90 | channel, 0x08, 0],
-        );
-        assert_eq!(drum_capture_light(None, channel), Led::Off);
+        for note in 0..4u8 {
+            let slot = bank * 4 + usize::from(note);
+            assert_eq!(
+                replay.click(&mut app, channel, note),
+                [[0x90 | channel, note, 127]]
+            );
+            assert!(app.groove_is_played(n, slot));
+            assert!(!app.groove_is_played(n, (slot + 4) % 8));
+            assert_eq!(
+                replay.click(&mut app, channel, 0x08),
+                [[0x90 | channel, 0x08, 127]]
+            );
+            assert_eq!(app.gc.capture_on, Some(channel));
+            // A rejected capture (no source track) must not toggle the running drum loop.
+            assert!(replay.click(&mut app, channel, note).is_empty());
+            assert!(app.groove_is_played(n, slot));
+            assert_eq!(
+                replay.click(&mut app, channel, 0x08),
+                [[0x90 | channel, 0x08, 0]]
+            );
+            assert_eq!(app.gc.capture_on, None);
+            assert_eq!(
+                replay.click(&mut app, channel, note),
+                [[0x90 | channel, note, 0]]
+            );
+            assert!(!app.groove_is_played(n, slot));
+        }
     }
+    assert_eq!(replay.click(&mut app, 3, 0x08), [[0x93, 0x08, 127]]);
+    app.prefs.perf_four = false;
+    app.groove_poll();
+    assert_eq!(app.gc.capture_on, None);
+    assert_eq!(replay.feedback(&mut app), [[0x93, 0x08, 0]]);
+    app.deck_options.disable_load = true;
+    assert!(replay.click(&mut app, 0, 0x08).is_empty());
+    assert_eq!(app.gc.capture_on, None);
+    app.deck_options.disable_play = true;
+    assert!(replay.click(&mut app, 0, 0x00).is_empty());
+    assert!(!app.groove_is_played(0, 0));
+    assert!(!Path::new(&app.prefs.groove.capture_dir).exists());
 }
 
 #[test]

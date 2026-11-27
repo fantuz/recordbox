@@ -312,10 +312,6 @@ impl Engine {
         Engine { rows: std::array::from_fn(|_| Row::new()), deck: deck.min(DECKS - 1), gain: 1.0, single: true, hold_drums: true, release: None, bpm: 120.0, silent: false, mix: vec![0.0; 16384], bus: vec![0.0; 16384], dry: vec![0.0; 16384], rfx: None, wet: 0.0, cut: false, sounding: false, was_playing: false }
     }
 
-    fn set_deck_gain(&mut self, percent: f32) {
-        self.gain = knob_gain(percent);
-    }
-
     /// Make the release FX unit (not on the audio thread: it allocates).
     pub fn prepare_fx(&mut self) {
         if self.rfx.is_some() {
@@ -1312,13 +1308,8 @@ impl App {
     /// Overall volume of this deck's four Drum Swap rows in either bank.
     pub fn groove_set_deck_gain(&mut self, deck: usize, percent: f32) {
         let Some(value) = self.gc.gain.get_mut(deck) else { return };
-        if !percent.is_finite() {
-            return;
-        }
-        let percent = percent.clamp(0.0, 100.0).round();
-        if *value != percent {
-            *value = percent;
-            with_engine(deck, |e| e.set_deck_gain(percent));
+        if percent.is_finite() {
+            *value = percent.clamp(0.0, 100.0);
         }
     }
 
@@ -1634,6 +1625,9 @@ impl App {
         }
         // A layout change can hide a deck while its lever is down. Its engine
         // still exists, but the visible-deck loop below will no longer update it.
+        if self.gc.capture_on.is_some_and(|deck| usize::from(deck) >= count) {
+            self.gc.capture_on = None;
+        }
         for d in count..self.gc.visible_decks {
             self.gc.rfx_held[d] = false;
             self.midi.drum_release[d] = false;
@@ -1670,7 +1664,6 @@ impl App {
             let mut g = ENGINES[d].lock();
             if g.is_none() {
                 let mut e = Box::new(Engine::new(d));
-                e.set_deck_gain(self.gc.gain[d]);
                 e.prepare_fx();
                 *g = Some(e);
             }
@@ -1722,8 +1715,10 @@ impl App {
             let (single, kind, beat) = (!set.multi, set.fx_type.min(2), set.fx_beats[set.fx_type.min(2) as usize]);
             let bpm = self.groove_deck_bpm(d);
             let held = self.groove_release_held(d);
+            let gain = knob_gain(self.gc.gain[d]);
             let mut peaks = [0.0f32; ROWS];
             let launched = with_engine(d, |e| {
+                e.gain = gain;
                 e.single = single;
                 e.release = if held { Some((kind, beat.0 as f32 / beat.1.max(1) as f32)) } else { None };
                 if bpm > 0.0 {
@@ -2192,7 +2187,7 @@ mod tests {
         let mut pos = 0.0;
         let mut volume = |e: &mut Engine| *run(e, &[], &mut pos, 1.0, 1024, false).last().unwrap();
         assert!((volume(&mut engine) - 0.25 * 0.25).abs() < 1e-5);
-        engine.set_deck_gain(75.0);
+        engine.gain = knob_gain(75.0);
         assert!((volume(&mut engine) - 0.25 * 0.25 * knob_gain(75.0)).abs() < 1e-5);
 
         let mut later = drum_loop(120.0, 1, 44100);
@@ -2200,8 +2195,15 @@ mod tests {
         engine.set_clip(1, 1, Some(later));
         assert!(engine.launch(1, 1));
         assert!((volume(&mut engine) - 0.25 * knob_gain(75.0)).abs() < 1e-5);
-        engine.set_deck_gain(50.0);
-        assert!((volume(&mut engine) - 0.25 * knob_gain(50.0)).abs() < 1e-5);
+        engine.gain = knob_gain(50.0);
+        let center = volume(&mut engine);
+        assert!((center - 0.25 * knob_gain(50.0)).abs() < 1e-5);
+        // One 14-bit MIDI step above center must produce a distinct output.
+        let next_step = 50.0 + 50.0 / 8191.0;
+        engine.gain = knob_gain(next_step);
+        let next = volume(&mut engine);
+        assert!(next > center);
+        assert!((next - 0.25 * knob_gain(next_step)).abs() < 1e-6);
         assert_eq!(engine.clip_mut(0, 0).unwrap().gain, 0.25);
         assert_eq!(engine.clip_mut(1, 1).unwrap().gain, 0.75);
     }

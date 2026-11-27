@@ -1752,7 +1752,7 @@ impl App {
         std::mem::swap(&mut self.drag, &mut self.detached_player_drag);
     }
 
-    fn open_library(ctx: &egui::Context, screenshot: Option<String>, deck_options: crate::DeckOptions) -> App {
+    pub(crate) fn open_library(ctx: &egui::Context, screenshot: Option<String>, deck_options: crate::DeckOptions) -> App {
         crate::theme::apply(ctx);
         // SVG images (the recordbox logo).
         egui_extras::install_image_loaders(ctx);
