@@ -117,7 +117,6 @@ pub fn player_panel(app: &mut App, ui: &mut Ui) {
     let main = Rect::from_min_max(pos2(left.max.x, full.min.y), pos2(full.max.x - 212.0, full.max.y));
     p.rect_filled(left, 0.0, BG2);
 
-    app.poll_stem_wave();
     let pos = app.pos();
     let playing = app.playing();
     let loaded = app.deck.track.is_some();
@@ -450,17 +449,25 @@ fn prepare_overview(wave: &Waveform, width: usize, mode: u8, native: Option<&[[u
     }).collect()
 }
 
-fn overview_bars(columns: &[OverviewColumn], r: Rect, base: f32, duration: f64, pos: f64) -> crate::ui_kit::Bars {
+fn overview_bars(columns: &[OverviewColumn], r: Rect, base: f32, duration: f64, pos: f64, scale: f32) -> crate::ui_kit::Bars {
     let mut bars = crate::ui_kit::Bars::new();
     for (i, column) in columns.iter().enumerate() {
         let x = r.min.x + i as f32 + 0.5;
         let played = (i as f64 / columns.len() as f64) * duration < pos;
         for (index, (height, color)) in column.bars.into_iter().enumerate() {
             let color = if played { column.played_colors[index] } else { color };
-            bars.column(x, base, base - height, color);
+            bars.column(x, base, base - height * scale, color);
         }
     }
     bars
+}
+
+pub(crate) fn paint_deck_overview(app: &mut App, painter: &egui::Painter, area: Rect, duration: f64, pos: f64) -> bool {
+    let Some(wave) = app.deck.wave.as_ref() else { return false };
+    let width = area.width().max(1.0) as usize;
+    let columns = app.deck.x.overview_cache.prepared(app.deck.track, wave, width, app.prefs.wave_color, app.deck.rb_wave.as_ref());
+    overview_bars(columns, area, area.max.y, duration, pos, area.height() / 24.0).paint(painter);
+    true
 }
 
 #[cfg(test)]
@@ -544,7 +551,7 @@ mod waveform_cache_tests {
                         for (x, y, duration, pos) in [(0.0, 0.0, 180.0, -1.0), (10.25, 4.5, 180.0, 0.0), (-3.5, 8.75, 180.0, 90.0), (0.0, 2.0, 180.0, 181.0)] {
                             let r = Rect::from_min_size(pos2(x, y), vec2(width as f32 + 0.75, 33.0));
                             let expected = original_overview(&wave, width, mode, values, r, duration, pos);
-                            assert_eq!(overview_bars(&prepared, r, y + 30.0, duration, pos).into_mesh(), expected, "len={len} width={width} mode={mode}");
+                            assert_eq!(overview_bars(&prepared, r, y + 30.0, duration, pos, 1.0).into_mesh(), expected, "len={len} width={width} mode={mode}");
                         }
                     }
                 }
@@ -601,11 +608,11 @@ mod waveform_cache_tests {
         let mut same_buffer = wave;
         deck.overview_cache.prepared(Some(1), &same_buffer, 10, 2, None);
         let r = Rect::from_min_size(pos2(0.0, 0.0), vec2(10.0, 33.0));
-        let old = overview_bars(&deck.overview_cache.columns, r, 30.0, 1.0, 0.0).into_mesh();
+        let old = overview_bars(&deck.overview_cache.columns, r, 30.0, 1.0, 0.0, 1.0).into_mesh();
         same_buffer.frames.fill([0; 8]);
         deck.overview_cache.clear();
         let new = deck.overview_cache.prepared(Some(1), &same_buffer, 10, 2, None);
-        assert_ne!(overview_bars(new, r, 30.0, 1.0, 0.0).into_mesh(), old);
+        assert_ne!(overview_bars(new, r, 30.0, 1.0, 0.0, 1.0).into_mesh(), old);
         assert_eq!(deck.overview_cache.rebuilds, 1);
     }
 
@@ -633,11 +640,11 @@ mod waveform_cache_tests {
             let duration = seconds as f64;
             let mut cache = OverviewCache::default();
             for pos in [0.0, duration / 3.0, duration] {
-                assert_eq!(overview_bars(cache.prepared(Some(1), &wave, width, mode, native), r, 51.0, duration, pos).into_mesh(), original_overview(&wave, width, mode, values, r, duration, pos));
+                assert_eq!(overview_bars(cache.prepared(Some(1), &wave, width, mode, native), r, 51.0, duration, pos, 1.0).into_mesh(), original_overview(&wave, width, mode, values, r, duration, pos));
             }
             let legacy = measure(|i| { std::hint::black_box(original_overview(&wave, width, mode, values, r, duration, i as f64 / 300.0 * duration)); });
-            let cold = measure(|i| { cache.clear(); std::hint::black_box(overview_bars(cache.prepared(Some(1), &wave, width, mode, native), r, 51.0, duration, i as f64 / 300.0 * duration).into_mesh()); });
-            let warm = measure(|i| { std::hint::black_box(overview_bars(cache.prepared(Some(1), &wave, width, mode, native), r, 51.0, duration, i as f64 / 300.0 * duration).into_mesh()); });
+            let cold = measure(|i| { cache.clear(); std::hint::black_box(overview_bars(cache.prepared(Some(1), &wave, width, mode, native), r, 51.0, duration, i as f64 / 300.0 * duration, 1.0).into_mesh()); });
+            let warm = measure(|i| { std::hint::black_box(overview_bars(cache.prepared(Some(1), &wave, width, mode, native), r, 51.0, duration, i as f64 / 300.0 * duration, 1.0).into_mesh()); });
             eprintln!("cpu_overview_cost seconds={seconds} width={width} mode={mode} native={has_native} frames=300 median_of=5 legacy_full_mesh_ms={legacy:.3} cold_full_mesh_ms={cold:.3} warm_full_mesh_ms={warm:.3}");
         }
     }
@@ -652,18 +659,15 @@ pub(crate) fn draw_overview(app: &mut App, ui: &mut Ui, r: Rect, pos: f64) {
     let base = r.min.y + 30.0;
     // The overview always shows the whole mix, as in rekordbox: only the enlarged waveform
     // follows the parts that sound.
-    if let Some(w) = app.deck.wave.as_ref() {
-        let n = r.width().max(1.0) as usize;
-        let columns = app.deck.x.overview_cache.prepared(app.deck.track, w, n, app.prefs.wave_color, app.deck.rb_wave.as_ref());
-        overview_bars(columns, r, base, dur, pos).paint(&p);
-    } else if app.deck.track.is_some() {
+    let area = Rect::from_min_max(pos2(r.min.x, base - 24.0), pos2(r.max.x, base));
+    if !paint_deck_overview(app, &p, area, dur, pos) && app.deck.track.is_some() {
         p.text(r.center(), Align2::CENTER_CENTER, "Analyzing…", FontId::proportional(11.0), DIM);
     }
-    // Separation progress: rekordbox's thin blue line under the overview, from the start of
-    // the track to where the parts are ready.
+    // Show overall separation progress underneath the overview. The parts become playable
+    // together once the completed separation has been loaded.
     if let (Some((sid, pr)), Some(tid)) = (app.stem.separating, app.deck.track) {
         if sid == tid && pr > 0.0 {
-            p.rect_filled(Rect::from_min_max(pos2(r.min.x, base + 1.5), pos2(r.min.x + r.width() * pr.clamp(0.0, 1.0), base + 2.5)), 0.0, hex(0x077DE1));
+            p.rect_filled(Rect::from_min_max(pos2(r.min.x, base + 1.5), pos2(r.min.x + r.width() * pr, base + 2.5)), 0.0, hex(0x077DE1));
         }
     }
     // Vocal positions (rekordbox's vocal detection): a band along the top, brighter where the
@@ -743,6 +747,10 @@ pub(crate) fn draw_overview(app: &mut App, ui: &mut Ui, r: Rect, pos: f64) {
     let resp = ui.interact(r.expand2(vec2(0.0, 4.0)), ui.id().with("overview"), Sense::click_and_drag());
     if (resp.clicked() || resp.dragged()) && app.deck.audio.is_some() {
         if let Some(pp) = resp.interact_pointer_pos() {
+            // Performance: needle search by rekordbox's rules (Needle Lock, 400 steps).
+            if app.needle_search(((pp.x - r.min.x) / r.width()) as f64) {
+                return;
+            }
             let t = ((pp.x - r.min.x) / r.width()).clamp(0.0, 1.0) as f64 * dur;
             app.seek(t);
             if !app.playing() {
@@ -787,7 +795,7 @@ pub(crate) fn draw_detail_at(app: &mut App, ui: &mut Ui, r: Rect, pos: f64, cx_o
         DetailMode::HalfDown => Rect::from_min_max(r.min - vec2(0.0, 0.5), r.max + vec2(0.0, 27.0)),
         _ => Rect::from_min_max(r.min - vec2(0.0, 20.0), r.max + vec2(0.0, 6.0)),
     });
-    let span = ZOOMS[app.prefs.zoom.min(ZOOMS.len() - 1)];
+    let span = crate::ui_perf_layouts::span(app).unwrap_or(ZOOMS[app.prefs.zoom.min(ZOOMS.len() - 1)]);
     let px_per_s = r.width() as f64 / span;
     let cx = r.center().x + cx_off;
     let t_of = |x: f32| pos + (x - cx) as f64 / px_per_s;

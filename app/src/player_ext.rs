@@ -60,6 +60,8 @@ pub struct DeckExt {
     /// Performance: how many steps the platter's tempo range is past its default of ±10
     /// (0 = ±10, 1 = ±16, 2 = WIDE, 3 = ±6).
     pub tempo_range: u8,
+    /// The deck engine's state for the interface (`deck.rs`): reverse, jog, sync rate.
+    pub dk: crate::deck::DeckUi,
 }
 
 impl DeckExt {
@@ -71,7 +73,7 @@ impl DeckExt {
     }
 
     pub fn carried(&self) -> DeckExt {
-        DeckExt { master_tempo: self.master_tempo, beat_sync: self.beat_sync, key_sync: self.key_sync, eq_kill: self.eq_kill, tempo_range: self.tempo_range, slip: self.slip, pad_page: self.pad_page, ..Default::default() }
+        DeckExt { master_tempo: self.master_tempo, beat_sync: self.beat_sync, key_sync: self.key_sync, eq_kill: self.eq_kill, tempo_range: self.tempo_range, slip: self.slip, pad_page: self.pad_page, dk: crate::deck::DeckUi { again: self.dk.again, ..Default::default() }, ..Default::default() }
     }
 }
 
@@ -422,6 +424,7 @@ impl App {
 
     /// EXPORT (0) or PERFORMANCE (1).
     pub fn set_app_mode(&mut self, mode: u8) {
+        if crate::ui_edit::intercept_mode(self, mode) { return; }
         self.prefs.app_mode = mode.min(1);
         self.poll_decks();
         self.save_prefs();
@@ -452,10 +455,9 @@ impl App {
     /// (225 pt, 21 pt more with the stem part buttons) and the mixer's bottom row (43 pt).
     /// rekordbox 7.2.19: 368 + 43 (+ 21).
     pub fn performance_height(&self) -> f32 {
-        // 4Deck Horizontal: 576 + 43, and the per-deck rows count twice (two rows of decks).
-        let rows = if self.prefs.perf_four { 2.0 } else { 1.0 };
-        let base = if self.prefs.perf_four { 576.0 } else { 368.0 };
-        base + 43.0 + if self.prefs.perf_sampler { crate::ui_sampler::SAMPLER_H } else { 0.0 } + if self.prefs.perf_fx { crate::ui_fx::FX_H } else { 0.0 } + rows * (if self.prefs.show_stems { 21.0 } else { 0.0 } + if self.prefs.show_phrase_bar { crate::ui_perf::PHRASE_ROW } else { 0.0 })
+        // (Every Performance layout's height: ui_perf_layouts.rs.) The GROOVE CIRCUIT rows
+        // come on top (ui_groove.rs).
+        crate::ui_perf_layouts::height(self) + crate::ui_perf_layouts::groove_row(self) * if self.deck_count() == 4 { 2.0 } else { 1.0 } + crate::ui_perf_layouts::mpl_extra(self)
     }
 
     /// How many decks exist in the layout showing: 4 (Performance, 4Deck), 2 or 1.
@@ -519,9 +521,10 @@ impl App {
     /// Instant Doubles (Preferences > Controller > Deck > Load): the track just loaded is also
     /// on the other deck, so this deck takes over its position, tempo and play state.
     pub fn instant_double(&mut self) {
-        if !(self.performance() && self.prefs.instant_doubles) || self.deck.track.is_none() {
+        if !(self.performance() && (self.prefs.instant_doubles || self.deck.x.dk.double_pending)) || self.deck.track.is_none() {
             return;
         }
+        self.deck.x.dk.double_pending = false;
         // The first other deck (1, 2, 3, 4 in that order) that has the same track.
         let Some(src) = (0..self.deck_count()).find(|n| *n != self.px.active && self.deck_of(*n).track == self.deck.track) else { return };
         let (pos, playing, rate) = {
@@ -547,6 +550,9 @@ impl App {
 
     /// SLIP on / off for the active deck.
     pub fn toggle_slip(&mut self) {
+        if self.slip_refused_by_slicer() {
+            return;
+        }
         self.deck.x.slip = !self.deck.x.slip;
         self.push_deck_controls();
     }
@@ -655,6 +661,7 @@ impl App {
             o.volume = v;
             o.muted = self.px.muted;
         }
+        self.master_handover();
         self.push_deck_controls();
         crate::ui_fx::sync(self);
     }
@@ -771,6 +778,10 @@ impl App {
                 s.grid = g;
             }
         }
+        // The deck engine's own rules on top: sync rate and range, vinyl ramps, crossfader
+        // curve and assign, Headroom, EQ type.
+        self.push_deck_engine(infos.map(|i| i.1), master_bpm);
+        crate::midi::after_push(self);
     }
 
     // ------------------------------------------------------------------ tempo, sync and key
@@ -804,8 +815,14 @@ impl App {
     /// RST: back to the track's own tempo.
     pub fn tempo_reset(&mut self) {
         if self.sync_follower() {
-            self.toast_err("Invalid operation. In Sync mode, Tempo Reset is only available for Master Deck.");
-            return;
+            // Performance, as rekordbox's `requestTempoReset`: a follower leaves SYNC and
+            // goes back to its own tempo.
+            if !self.performance() {
+                self.toast_err("Invalid operation. In Sync mode, Tempo Reset is only available for Master Deck.");
+                return;
+            }
+            self.deck.x.beat_sync = false;
+            self.prefs.deck.player_sync[(self.px.active as usize).min(3)] = false;
         }
         self.deck.x.tempo_adj = 0.0;
         self.push_deck_controls();
@@ -875,6 +892,11 @@ impl App {
             }
         }
         self.deck.x.beat_sync = on;
+        // (A new SYNC starts on rekordbox's own rate and on the beat again.)
+        self.deck.x.dk.sync_rate = None;
+        self.deck.x.dk.beat_lost = false;
+        self.deck.x.dk.out_of_range = false;
+        self.prefs.deck.player_sync[(self.px.active as usize).min(3)] = on;
         self.push_deck_controls();
         if on {
             self.sync_align();
@@ -1004,6 +1026,15 @@ impl App {
         }
         let s = self.player.state.lock();
         s.stems.is_some() && !s.stem_on.iter().all(|x| *x) && !self.deck.x.stem_wave.as_ref().map(|w| w.0 == s.stem_on).unwrap_or(false)
+    }
+
+    /// The stem waveform of every deck, each frame and in every mode. (It used to be polled
+    /// from the Export player's panel only, so a Performance deck whose part was muted waited
+    /// for a waveform that was never started and showed an empty lane.)
+    pub fn poll_stem_waves(&mut self) {
+        for n in 0..self.deck_count() {
+            self.with_deck(n, |app| app.poll_stem_wave());
+        }
     }
 
     /// Keep the active deck's stem waveform in step with its part switches: worked out on a
@@ -1267,7 +1298,8 @@ impl App {
         if self.deck.audio.is_none() {
             return;
         }
-        let cue = Cue { id: 0, track_id: tid, kind: CueKind::Hot, slot, start, end, color: hotcue_default_color(slot, end.is_some()), comment: String::new(), active_loop: false };
+        let cue = Cue { id: 0, track_id: tid, kind: CueKind::Hot, slot, start, end,
+            color: crate::pads::hot_cue_set_color(self.prefs.pads.hot_cue_color, slot, end.is_some()), comment: String::new(), active_loop: false };
         self.edit_hot_cue(slot, Some(&cue));
     }
 
@@ -1329,7 +1361,10 @@ impl App {
         let (Some((a, b)), Some(audio)) = (self.defined_loop(), self.deck.audio.clone()) else {
             return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "no loop is set"));
         };
-        write_wav16(path, audio.sr, 2, loop_samples(&audio.samples, audio.sr, a, b))
+        // (Advanced > Others > Export Loop As WAV > Sample Rate: 48 kHz or 44.1 kHz.)
+        let rate = if matches!(self.prefs.rb.loop_wav_rate, 44100 | 48000) { self.prefs.rb.loop_wav_rate } else { audio.sr };
+        let s = crate::prefs_bridge::resample_stereo(loop_samples(&audio.samples, audio.sr, a, b), audio.sr, rate);
+        write_wav16(path, rate, 2, &s)
     }
 
     // ------------------------------------------------------------------ loop buttons
@@ -1619,7 +1654,7 @@ fn shot_flags() -> Vec<String> {
 
 impl App {
     /// Wait for the active deck's audio (screenshot runs only).
-    fn shot_wait_load(&mut self) {
+    pub(crate) fn shot_wait_load(&mut self) {
         if let Some(rx) = self.deck.loading.take() {
             if let Ok(msg) = rx.recv_timeout(std::time::Duration::from_secs(20)) {
                 let (tx2, rx2) = crossbeam_channel::bounded(1);

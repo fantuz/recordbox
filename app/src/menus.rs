@@ -1,6 +1,11 @@
-//! Native macOS menu bar, laid out as rekordbox's EXPORT mode: File / View / Track / Playlist /
-//! Help (plus the macOS app menu and Edit). Items are enabled and ticked from the app's state
-//! every frame (`sync`), and their accelerators follow Preferences > Keyboard.
+//! Native macOS menu bar, laid out as rekordbox 7.2.19 builds it for the current mode
+//! (`MainComponent::getMenuBarNames` 0x1009643d8 and `getMenuForIndex` 0x100964638; notes in
+//! `checks/re-7.2.19/shell-menus-traffic.md`): File / View / Track / Playlist / Help in EXPORT
+//! and PERFORMANCE, File / Edit / View / Help in EDIT. recordbox's own commands, which rekordbox
+//! has no item for, come after a separator at the end of the menu they belong to; the macOS app
+//! menu and an Edit menu (Undo, Redo and the clipboard commands) are recordbox's too.
+//! Items are enabled and ticked from the app's state every frame (`sync`), and their
+//! accelerators follow Preferences > Keyboard.
 
 use crate::app::*;
 use crate::model::*;
@@ -18,18 +23,33 @@ enum Entry {
 #[derive(Default)]
 struct Handles {
     items: HashMap<&'static str, Entry>,
+    subs: HashMap<&'static str, Submenu>,
+    /// The macOS app menu (always first).
+    app_menu: Option<Submenu>,
     /// What each item was last set to: (enabled, ticked).
     shown: HashMap<&'static str, (bool, bool)>,
+    /// What each submenu was last set to.
+    subs_shown: HashMap<&'static str, bool>,
     /// The keymap the accelerators were last built from.
     keys: String,
+    /// The mode the menus were last laid out for (`MODE_NONE` before the first time).
+    mode: u8,
+    /// Signatures of what the filled-in submenus were last built from.
+    playlists_sig: u64,
+    devices_sig: u64,
+    /// Text of "Remove from Collection" / "Remove from Playlist".
+    remove_label: &'static str,
 }
+
+const MODE_NONE: u8 = 255;
 
 thread_local! {
-    static HANDLES: RefCell<Handles> = RefCell::new(Handles::default());
+    static HANDLES: RefCell<Handles> = RefCell::new(Handles { mode: MODE_NONE, ..Handles::default() });
 }
 
-/// Every menu command: (id, label, ticked item). The order here is not the menu order.
-pub const COMMANDS: [(&str, &str, bool); 66] = [
+/// Every menu command: (id, label, ticked item). The order here is not the menu order. Some
+/// commands are in no menu (they are reached from Preferences > Keyboard or a context menu).
+pub const COMMANDS: [(&str, &str, bool); 92] = [
     ("edit_cut", "Cut", false),
     ("edit_copy", "Copy", false),
     ("edit_paste", "Paste", false),
@@ -43,6 +63,13 @@ pub const COMMANDS: [(&str, &str, bool); 66] = [
     ("restore", "Restore Library", false),
     ("missing", "Display All Missing Files", false),
     ("collection_cleanup", "Review collection cleanup…", false),
+    ("dupes", "Display All Duplicated Files", false),
+    ("device_backup_mgmt", "Backed up device library management", false),
+    ("import_v5", "Import your library from ver. 5 (or earlier)", false),
+    ("pack_sample_dl", "Download", false),
+    ("pack_sample_import", "Import", false),
+    ("pack_gc_dl", "Download", false),
+    ("pack_gc_import", "Import", false),
     ("export_xml", "Export Collection in xml format", false),
     ("export_playlists_info", "Export Playlists Information", false),
     ("sync_rekordbox", "Review desktop library sync…", false),
@@ -52,24 +79,40 @@ pub const COMMANDS: [(&str, &str, bool); 66] = [
     ("undo", "Undo", false),
     ("redo", "Redo", false),
     ("fullscreen", "Full screen", true),
+    ("appearance_dark", "Dark", true),
+    ("appearance_light", "Light", true),
     ("layout_player", "1 Player", true),
     ("layout_2players", "2 Players", true),
     ("layout_dual", "Dual Player", true),
     ("layout_simple", "Simple Player", true),
     ("layout_browser", "Full Browser", true),
+    ("perf_2h", "2 Deck Horizontal", true),
+    ("perf_2v", "2 Deck Vertical", true),
+    ("perf_4h", "4 Deck Horizontal", true),
+    ("perf_4v", "4 Deck Vertical", true),
+    ("perf_browse", "Browse", true),
+    ("pad_platter", "Show / Hide Pad and Platter", false),
+    ("split_screen", "Show Split Screen", true),
     ("mytag_window", "My Tag Configuration Window", true),
-    ("related_window", "Related Track List Window", true),
+    ("related_subpanel", "\"Related tracks\" on Subpanel", true),
+    ("suggest_subpanel", "\"Track Suggestion\" on Subpanel", true),
     ("info_window", "Information Window", true),
-    ("sub_browser", "Sub-Browser Window", true),
+    ("sub_browser", "Vertical sub-browser", true),
+    ("sub_browser_h", "Horizontal sub-browser", true),
+    ("automix", "Automix", true),
+    ("related_window", "Related Track List Window", true),
     ("filter", "Filter", true),
     ("wave_blue", "Waveform: BLUE", true),
     ("wave_rgb", "Waveform: RGB", true),
     ("wave_3band", "Waveform: 3Band", true),
     ("t_import_track", "Import Track", false),
+    ("import_to_collection", "Import To Collection", false),
     ("analyze", "Analyze Track", false),
     ("analyze_missing", "Analyze Missing Data", false),
     ("analyze_key", "Analyze Key", false),
     ("analysis_lock", "Analysis Lock", true),
+    ("lock_on", "On", false),
+    ("lock_off", "Off", false),
     ("auto_on", "Enable", true),
     ("auto_off", "Disable", true),
     ("stop_analysis", "Stop Analyzing", false),
@@ -92,11 +135,138 @@ pub const COMMANDS: [(&str, &str, bool); 66] = [
     ("sort_items", "Sort Items", false),
     ("renumber", "Renumber Track Order", false),
     ("save_playlist_info", "Save Playlist Info", false),
+    ("save_info_txt", "Export a playlist to a file (*.txt)", false),
+    ("save_info_m3u8", "Export a playlist to a file for music apps (*.m3u8)", false),
     ("export_device", "Export to USB Device…", false),
-    ("manual", "Online Manual", false),
+    ("manual", "User's Manual", false),
     ("shortcuts", "Keyboard Shortcuts", false),
     ("h_about", "About recordbox", false),
+    ("copy_to_playlists", "Copy to Playlists", false),
 ];
+
+/// One entry of a menu's layout: a command, a separator or a submenu (by key).
+#[derive(Clone, Copy)]
+enum It {
+    C(&'static str),
+    Sep,
+    Sub(&'static str),
+}
+use It::{Sep, Sub, C};
+
+/// Submenus: (key, title). "add_to_playlist", "export_track" and "export_playlist" are filled
+/// in from the playlist tree and the connected devices (`fill_playlists`, `fill_devices`).
+const SUBMENUS: [(&str, &str); 16] = [
+    ("file", "File"),
+    ("import", "Import"),
+    ("additional", "Additional contents"),
+    ("sample_pack", "Sample Pack"),
+    ("gc_pack", "GROOVE CIRCUIT FACTORY SAMPLES PACK"),
+    ("library", "Library"),
+    ("edit", "Edit"),
+    ("view", "View"),
+    ("appearance", "Appearance"),
+    ("track", "Track"),
+    ("analysis_lock", "Analysis Lock"),
+    ("add_to_playlist", "Add To Playlist"),
+    ("export_track", "Export Track"),
+    ("playlist", "Playlist"),
+    ("export_playlist", "Export Playlist"),
+    ("save_info", "Save Playlist Info"),
+];
+const HELP: (&str, &str) = ("help", "Help");
+
+/// The menu-bar mode for an application mode: 0 EXPORT, 1 PERFORMANCE, 2 EDIT.
+fn menu_mode(app: &App) -> u8 {
+    app.prefs.app_mode.min(2)
+}
+
+/// Top-level menus of a mode, in order (rekordbox's `getMenuBarNames`; "edit" outside EDIT
+/// mode is recordbox's own).
+fn top_level(mode: u8) -> &'static [&'static str] {
+    match mode {
+        2 => &["file", "edit", "view", "help"],
+        _ => &["file", "edit", "view", "track", "playlist", "help"],
+    }
+}
+
+/// What each menu and submenu holds in a mode, as rekordbox's `getMenuForIndex` builds it.
+/// Items that depend on a plan, an account, a streaming service or the cloud are left out
+/// (Cloud Library Sync, Mobile Library Sync, Liked Songs, Collaborative playlists, Show in
+/// Spotify, the lighting settings in Library).
+fn layout(mode: u8) -> Vec<(&'static str, Vec<It>)> {
+    let perf = mode == 1;
+    let mut file = vec![Sub("import")];
+    if perf {
+        file.extend([Sep, Sub("additional")]);
+    }
+    file.extend([Sep, C("missing"), C("dupes"), Sep, Sub("library"), Sep, C("export_xml"), C("export_playlists_info")]);
+    // recordbox's own.
+    file.extend([Sep, C("collection_cleanup"), C("sync_rekordbox"), C("import_xml"), C("relocate_missing"), C("library_folder")]);
+
+    let mut view = vec![C("fullscreen"), Sep, Sub("appearance"), Sep];
+    match mode {
+        0 => view.extend([C("layout_player"), C("layout_2players"), C("layout_dual"), C("layout_simple"), C("layout_browser"), Sep, C("split_screen"), Sep]),
+        1 => view.extend([C("perf_2h"), C("perf_2v"), C("perf_4h"), C("perf_4v"), C("perf_browse"), Sep, C("pad_platter"), Sep, C("split_screen"), Sep]),
+        _ => view.extend([C("split_screen"), Sep]),
+    }
+    view.extend([C("mytag_window"), C("related_subpanel"), C("suggest_subpanel"), C("info_window"), C("sub_browser"), C("sub_browser_h")]);
+    if perf {
+        view.push(C("automix"));
+    }
+
+    let track = vec![
+        C("import_to_collection"),
+        C("analyze"),
+        Sub("analysis_lock"),
+        Sep,
+        Sub("add_to_playlist"),
+        C("reload_tags"),
+        Sub("export_track"),
+        Sep,
+        C("remove_collection"),
+        Sep,
+        C("show_finder"),
+        C("auto_relocate"),
+        C("relocate"),
+        // recordbox's own.
+        Sep,
+        C("trash"),
+    ];
+    let playlist = vec![
+        Sub("export_playlist"),
+        C("p_import_playlist"),
+        C("copy_to_playlists"),
+        Sep,
+        C("new_playlist"),
+        C("new_smart"),
+        C("new_folder"),
+        Sep,
+        C("delete_playlist"),
+        Sep,
+        C("sort_items"),
+        C("renumber"),
+        Sub("save_info"),
+        // recordbox's own.
+        Sep,
+        C("export_device"),
+    ];
+    vec![
+        ("file", file),
+        ("import", vec![C("import_track"), C("import_folder"), C("import_playlist")]),
+        ("additional", vec![Sub("sample_pack"), Sub("gc_pack")]),
+        ("sample_pack", vec![C("pack_sample_dl"), C("pack_sample_import")]),
+        ("gc_pack", vec![C("pack_gc_dl"), C("pack_gc_import")]),
+        ("library", vec![C("backup"), C("restore"), C("device_backup_mgmt"), C("import_v5")]),
+        ("edit", vec![C("undo"), C("redo"), Sep, C("edit_cut"), C("edit_copy"), C("edit_paste"), C("edit_select_all")]),
+        ("view", view),
+        ("appearance", vec![C("appearance_dark"), C("appearance_light")]),
+        ("track", track),
+        ("analysis_lock", vec![C("lock_on"), C("lock_off")]),
+        ("playlist", playlist),
+        ("save_info", vec![C("save_info_txt"), C("save_info_m3u8")]),
+        ("help", vec![C("manual"), C("shortcuts"), Sep, C("h_about")]),
+    ]
+}
 
 fn it<'a>(h: &'a Handles, id: &str) -> &'a dyn IsMenuItem {
     match h.items.get(id).unwrap_or_else(|| panic!("menu item {id}")) {
@@ -111,7 +281,9 @@ fn fixed_accelerator(id: &str) -> Option<Accelerator> {
     let (m, c) = match id {
         "new_playlist" => (cmd, Code::KeyN),
         "export_device" => (cmd, Code::KeyE),
-        "property" => (cmd, Code::KeyI),
+        // rekordbox: Information Window is Cmd+I, Show in Finder Cmd+R.
+        "info_window" => (cmd, Code::KeyI),
+        "show_finder" => (cmd, Code::KeyR),
         // Edit commands carry their own shortcuts and are passed on to the focused text field
         // or the track list (the system's predefined items never reach the egui view).
         "edit_cut" => (cmd, Code::KeyX),
@@ -139,103 +311,102 @@ pub fn wake_on_menu(ctx: &eframe::egui::Context) {
     }));
 }
 
+fn clear(sub: &Submenu) {
+    while sub.remove_at(0).is_some() {}
+}
+
+/// Lay the menus out for a mode: the top-level menus and what each one holds.
+fn fill(menu: &Menu, h: &Handles, mode: u8) {
+    while menu.items().len() > 1 {
+        if menu.remove_at(1).is_none() {
+            break;
+        }
+    }
+    for (key, items) in layout(mode) {
+        let Some(sub) = h.subs.get(key) else { continue };
+        clear(sub);
+        for i in items {
+            let _ = match i {
+                C(id) => sub.append(it(h, id)),
+                Sep => sub.append(&PredefinedMenuItem::separator()),
+                Sub(k) => match h.subs.get(k) {
+                    Some(s) => sub.append(s),
+                    None => Ok(()),
+                },
+            };
+        }
+    }
+    for key in top_level(mode) {
+        if let Some(s) = h.subs.get(key) {
+            let _ = menu.append(s);
+        }
+    }
+}
+
 pub fn build() -> Option<Menu> {
-    let mut h = Handles::default();
+    let mut h = Handles { mode: MODE_NONE, remove_label: "Remove from Collection", ..Handles::default() };
     for (id, label, check) in COMMANDS {
-        let e = if check { Entry::Check(CheckMenuItem::with_id(id, label, true, false, None)) } else { Entry::Plain(MenuItem::with_id(id, label, true, fixed_accelerator(id))) };
+        let e = if check { Entry::Check(CheckMenuItem::with_id(id, label, true, false, fixed_accelerator(id))) } else { Entry::Plain(MenuItem::with_id(id, label, true, fixed_accelerator(id))) };
         h.items.insert(id, e);
+    }
+    for (key, title) in SUBMENUS.iter().chain(std::iter::once(&HELP)) {
+        h.subs.insert(key, Submenu::new(title, true));
     }
     let sep = PredefinedMenuItem::separator;
     let menu = Menu::new();
-    {
-        let app_menu = Submenu::new("recordbox", true);
-        app_menu
-            .append_items(&[it(&h, "about"), &sep(), it(&h, "prefs"), &sep(), &PredefinedMenuItem::hide(None), &PredefinedMenuItem::hide_others(None), &PredefinedMenuItem::show_all(None), &sep(), &PredefinedMenuItem::quit(None)])
-            .ok()?;
-        let import = Submenu::new("Import", true);
-        import.append_items(&[it(&h, "import_track"), it(&h, "import_folder"), it(&h, "import_playlist")]).ok()?;
-        let library = Submenu::new("Library", true);
-        library.append_items(&[it(&h, "backup"), it(&h, "restore")]).ok()?;
-        let file = Submenu::new("File", true);
-        file.append_items(&[&import, &library, &sep(), it(&h, "missing"), it(&h, "collection_cleanup"), &sep(), it(&h, "export_xml"), it(&h, "export_playlists_info"), &sep(), it(&h, "sync_rekordbox"), it(&h, "import_xml"), it(&h, "relocate_missing"), it(&h, "library_folder")]).ok()?;
-        let edit = Submenu::new("Edit", true);
-        edit.append_items(&[it(&h, "undo"), it(&h, "redo"), &sep(), it(&h, "edit_cut"), it(&h, "edit_copy"), it(&h, "edit_paste"), it(&h, "edit_select_all")]).ok()?;
-        let view = Submenu::new("View", true);
-        view.append_items(&[
-            it(&h, "fullscreen"),
-            &sep(),
-            it(&h, "layout_player"),
-            it(&h, "layout_2players"),
-            it(&h, "layout_dual"),
-            it(&h, "layout_simple"),
-            it(&h, "layout_browser"),
-            &sep(),
-            it(&h, "mytag_window"),
-            it(&h, "related_window"),
-            it(&h, "info_window"),
-            it(&h, "sub_browser"),
-            &sep(),
-            it(&h, "filter"),
-            it(&h, "wave_blue"),
-            it(&h, "wave_rgb"),
-            it(&h, "wave_3band"),
-        ])
+    let app_menu = Submenu::new("recordbox", true);
+    app_menu
+        .append_items(&[it(&h, "about"), &sep(), it(&h, "prefs"), &sep(), &PredefinedMenuItem::hide(None), &PredefinedMenuItem::hide_others(None), &PredefinedMenuItem::show_all(None), &sep(), &PredefinedMenuItem::quit(None)])
         .ok()?;
-        let auto = Submenu::new("Auto Analysis", true);
-        auto.append_items(&[it(&h, "auto_on"), it(&h, "auto_off")]).ok()?;
-        let relocate = Submenu::new("Relocate", true);
-        relocate.append_items(&[it(&h, "relocate"), it(&h, "auto_relocate")]).ok()?;
-        let track = Submenu::new("Track", true);
-        track
-            .append_items(&[
-                it(&h, "t_import_track"),
-                &sep(),
-                it(&h, "analyze"),
-                it(&h, "analyze_missing"),
-                it(&h, "analyze_key"),
-                it(&h, "analysis_lock"),
-                &auto,
-                it(&h, "stop_analysis"),
-                &sep(),
-                it(&h, "export_tracks"),
-                it(&h, "reload_tags"),
-                &relocate,
-                it(&h, "show_finder"),
-                it(&h, "remove_collection"),
-                &sep(),
-                it(&h, "property"),
-                &sep(),
-                it(&h, "load"),
-                it(&h, "trash"),
-            ])
-            .ok()?;
-        let playlist = Submenu::new("Playlist", true);
-        playlist
-            .append_items(&[
-                it(&h, "p_import_playlist"),
-                &sep(),
-                it(&h, "new_playlist"),
-                it(&h, "new_smart"),
-                it(&h, "new_folder"),
-                it(&h, "delete_playlist"),
-                it(&h, "rename_playlist"),
-                &sep(),
-                it(&h, "export_playlist"),
-                it(&h, "sort_items"),
-                it(&h, "renumber"),
-                it(&h, "save_playlist_info"),
-                &sep(),
-                it(&h, "export_device"),
-            ])
-            .ok()?;
-        let help = Submenu::new("Help", true);
-        help.append_items(&[it(&h, "manual"), it(&h, "shortcuts"), &sep(), it(&h, "h_about")]).ok()?;
-        menu.append_items(&[&app_menu, &file, &edit, &view, &track, &playlist, &help]).ok()?;
-    }
+    menu.append(&app_menu).ok()?;
+    fill(&menu, &h, 0);
+    h.mode = 0;
+    h.app_menu = Some(app_menu);
     #[cfg(target_os = "macos")]
     menu.init_for_nsapp();
     HANDLES.with(|x| *x.borrow_mut() = h);
     Some(menu)
+}
+
+/// "Add To Playlist": the playlist tree with its folders (intelligent playlists left out).
+fn fill_playlists(h: &Handles, app: &App) {
+    fn level(sub: &Submenu, app: &App, parent: i64, depth: usize) {
+        if depth > 32 {
+            return;
+        }
+        for n in app.nodes.iter().filter(|n| n.parent == parent && n.kind != NodeKind::Smart) {
+            if n.kind == NodeKind::Folder {
+                let s = Submenu::new(&n.name, true);
+                level(&s, app, n.id, depth + 1);
+                let _ = sub.append(&s);
+            } else {
+                let _ = sub.append(&MenuItem::with_id(format!("addpl:{}", n.id), &n.name, true, None));
+            }
+        }
+    }
+    if let Some(sub) = h.subs.get("add_to_playlist") {
+        clear(sub);
+        level(sub, app, 0, 0);
+    }
+}
+
+/// "Export Track" and "Export Playlist": one item per connected device.
+fn fill_devices(h: &Handles, app: &App) {
+    for (key, prefix) in [("export_track", "exptrk"), ("export_playlist", "exppl")] {
+        if let Some(sub) = h.subs.get(key) {
+            clear(sub);
+            for (i, d) in app.devices.iter().enumerate() {
+                let _ = sub.append(&MenuItem::with_id(format!("{prefix}:{i}"), &d.name, true, None));
+            }
+        }
+    }
+}
+
+fn sig<T: std::hash::Hash>(v: &T) -> u64 {
+    use std::hash::Hasher;
+    let mut s = std::collections::hash_map::DefaultHasher::new();
+    v.hash(&mut s);
+    s.finish() | 1
 }
 
 pub fn poll(app: &mut App) {
@@ -283,6 +454,12 @@ fn fullscreen_viewport(ctx: &egui::Context) -> Option<(egui::ViewportId, bool)> 
     })
 }
 
+/// The list shows collection tracks gathered by something other than a playlist (a history,
+/// the Tag List, related tracks ...), which "Copy to Playlists category" can turn into one.
+fn copyable_list(app: &App) -> bool {
+    matches!(app.view, View::History(_) | View::TagList | View::Related | View::Matching | View::Suggest(_) | View::Category { .. }) && !app.list.is_empty()
+}
+
 /// (enabled, ticked) of every command for the app's present state.
 pub fn state(app: &App) -> HashMap<&'static str, (bool, bool)> {
     let sel = selected(app);
@@ -293,41 +470,67 @@ pub fn state(app: &App) -> HashMap<&'static str, (bool, bool)> {
     let busy = app.dialogs.ext.backup_job.is_some();
     let layout = app.player_layout();
     let locked = has_sel && sel.iter().all(|id| app.track(*id).map(|t| t.grid_locked).unwrap_or(false));
+    let unlocked = has_sel && sel.iter().all(|id| app.track(*id).map(|t| !t.grid_locked).unwrap_or(false));
     let any_missing = app.tracks.iter().any(|t| t.missing);
+    let panel = crate::ui_browser_ext::right_panel(app);
+    let perf = app.performance();
+    let device_sel = matches!(app.view, View::Device { .. }) && !app.device_ui.sel.is_empty();
     let mut m = HashMap::new();
     for (id, _, _) in COMMANDS {
         let v = match id {
             "backup" => (!busy, false),
             "restore" => (!busy && app.dialogs.library_sync_review.is_none() && app.rb_job.is_none(), false),
             "relocate_missing" | "auto_relocate" => (any_missing, false),
+            "dupes" => (app.tracks.len() > 1 && !app.dupes.open, false),
+            // Not in recordbox: backups of device libraries made by rekordbox, a rekordbox 5
+            // library to bring over, and AlphaTheta's download servers.
+            "device_backup_mgmt" | "import_v5" | "pack_sample_dl" | "pack_gc_dl" => (false, false),
+            "pack_sample_import" | "pack_gc_import" => (perf && crate::app_hooks::pack_import_available(id), false),
             "export_xml" => (!app.tracks.is_empty(), false),
             "export_playlists_info" => (app.nodes.iter().any(|n| n.kind != NodeKind::Folder), false),
             "sync_rekordbox" => (app.can_review_library_sync(), false),
             "undo" => (!app.undo.is_empty(), false),
             "redo" => (!app.redo.is_empty(), false),
             "fullscreen" => (true, fullscreen_viewport(&app.ctx).is_some_and(|(_, fullscreen)| fullscreen)),
+            // The Light appearance does not exist in recordbox (Preferences > View says why).
+            "appearance_dark" => (true, true),
+            "appearance_light" => (false, false),
             "layout_player" => (true, layout == 0),
             "layout_2players" => (true, layout == 1),
             "layout_dual" => (true, layout == 2),
             "layout_simple" => (true, layout == 3),
             "layout_browser" => (app.library_window.is_none(), layout == 4),
-            "mytag_window" => (true, app.prefs.show_mytag),
+            "perf_2h" | "perf_2v" | "perf_4h" | "perf_4v" | "perf_browse" => {
+                let k = ["perf_2h", "perf_2v", "perf_4h", "perf_4v", "perf_browse"].iter().position(|x| *x == id).unwrap_or(0) as u8;
+                (perf && crate::app_hooks::perf_layout_available(k), perf && crate::app_hooks::perf_layout(app) == k)
+            }
+            "pad_platter" => (perf && crate::app_hooks::pad_platter_available(app), false),
+            "split_screen" => (true, app.library_window.is_some()),
+            "mytag_window" => (true, panel == 1),
+            "related_subpanel" => (true, panel == 2),
+            "suggest_subpanel" => (true, panel == 3),
+            "info_window" => (true, panel == 4),
+            "sub_browser" => (true, panel == 5),
+            "sub_browser_h" => (true, app.prefs.bx.sub_horizontal),
+            "automix" => (perf && crate::app_hooks::automix_available(), perf && crate::app_hooks::automix_shown(app)),
             "related_window" => (true, app.view == View::Related),
-            "info_window" => (layout != 3, layout != 3 && app.deck.panel_tab == 2),
-            "sub_browser" => (true, app.prefs.sub_browser),
             "filter" => (true, app.filter_open),
             "wave_blue" => (true, app.prefs.wave_color == 0),
             "wave_rgb" => (true, app.prefs.wave_color == 1),
             "wave_3band" => (true, app.prefs.wave_color == 2),
+            "import_to_collection" => (device_sel, false),
             "analyze" | "analyze_missing" | "analyze_key" | "export_tracks" | "reload_tags" | "remove_collection" => (has_sel, false),
             "analysis_lock" => (has_sel, locked),
+            "lock_on" => (has_sel && !locked, false),
+            "lock_off" => (has_sel && !unlocked, false),
             "auto_on" => (true, app.prefs.auto_analysis),
             "auto_off" => (true, !app.prefs.auto_analysis),
             "stop_analysis" => (app.analysis_total > app.analysis_done, false),
             "load" => (one && !app.deck_options.disable_load, false),
             "relocate" | "show_finder" | "property" => (one, false),
             "delete_playlist" | "rename_playlist" => (node.is_some(), false),
-            "export_playlist" | "save_playlist_info" => (node.map(|n| n.kind != NodeKind::Folder).unwrap_or(false), false),
+            "export_playlist" | "save_playlist_info" | "save_info_txt" | "save_info_m3u8" => (node.map(|n| n.kind != NodeKind::Folder).unwrap_or(false), false),
+            "copy_to_playlists" => (copyable_list(app), false),
             "sort_items" => (!app.nodes.is_empty(), false),
             "renumber" => (manual, false),
             _ => (true, false),
@@ -335,6 +538,14 @@ pub fn state(app: &App) -> HashMap<&'static str, (bool, bool)> {
         m.insert(id, v);
     }
     m
+}
+
+/// Whether a submenu can be opened in the app's present state.
+fn sub_state(app: &App) -> [(&'static str, bool); 4] {
+    let has_sel = app.list.iter().any(|t| app.selected.contains(t));
+    let node = current_node(app).map(|n| n.kind != NodeKind::Folder).unwrap_or(false);
+    let playlists = app.nodes.iter().any(|n| n.kind == NodeKind::Playlist);
+    [("analysis_lock", has_sel), ("add_to_playlist", has_sel && playlists), ("export_track", has_sel && !app.devices.is_empty()), ("export_playlist", node && !app.devices.is_empty())]
 }
 
 /// Bring the menu bar in line with the app: enabled, ticks and accelerators. Cheap when
@@ -348,6 +559,41 @@ pub fn sync(app: &App) {
     HANDLES.with(|h| {
         let mut h = h.borrow_mut();
         let h = &mut *h;
+        // The menus of the mode (rekordbox rebuilds its menu bar when the mode changes).
+        let mode = menu_mode(app);
+        if h.mode != mode {
+            if let Some(menu) = &app.menu {
+                fill(menu, h, mode);
+            }
+            crate::ui_edit::refill_menu(app, mode == 2);
+            h.mode = mode;
+        }
+        let ps = sig(&app.nodes.iter().map(|n| (n.id, n.parent, n.name.clone(), n.kind == NodeKind::Folder, n.kind == NodeKind::Smart)).collect::<Vec<_>>());
+        if h.playlists_sig != ps {
+            fill_playlists(h, app);
+            h.playlists_sig = ps;
+        }
+        let ds = sig(&app.devices.iter().map(|d| (d.root.clone(), d.name.clone())).collect::<Vec<_>>());
+        if h.devices_sig != ds {
+            fill_devices(h, app);
+            h.devices_sig = ds;
+        }
+        for (key, en) in sub_state(app) {
+            if h.subs_shown.get(key) != Some(&en) {
+                if let Some(s) = h.subs.get(key) {
+                    s.set_enabled(en);
+                }
+                h.subs_shown.insert(key, en);
+            }
+        }
+        // "Remove from Collection" in the collection, "Remove from Playlist" in a playlist.
+        let label = if app.is_manual_playlist().is_some() { "Remove from Playlist" } else { "Remove from Collection" };
+        if h.remove_label != label {
+            if let Some(Entry::Plain(i)) = h.items.get("remove_collection") {
+                i.set_text(label);
+            }
+            h.remove_label = label;
+        }
         for (id, (en, on)) in &want {
             if h.shown.get(id) == Some(&(*en, *on)) {
                 continue;
@@ -394,8 +640,98 @@ pub fn handle(app: &mut App, id: &str) {
     if app.ext.cleanup.is_some() && !matches!(id, "edit_cut" | "edit_copy" | "edit_paste" | "edit_select_all") {
         return;
     }
+    if crate::ui_edit::menu_command(app, id) { return; }
     let sel = selected(app);
+    // Items of the filled-in submenus: "addpl:<playlist>", "exptrk:<device>", "exppl:<device>".
+    if let Some((kind, n)) = id.split_once(':') {
+        let Ok(n) = n.parse::<i64>() else { return };
+        match kind {
+            "addpl" => {
+                if !sel.is_empty() {
+                    app.add_to_playlist(n, &sel);
+                }
+            }
+            "exptrk" | "exppl" => {
+                let Some(root) = app.devices.get(n as usize).map(|d| d.root.clone()) else { return };
+                if kind == "exptrk" {
+                    crate::ui_browser::open_export(app, vec![], sel);
+                } else if let Some(node) = current_node(app).cloned() {
+                    crate::ui_browser::open_export(app, vec![node.id], vec![]);
+                } else {
+                    return;
+                }
+                app.dialogs.export_root = Some(root);
+            }
+            _ => {}
+        }
+        return;
+    }
     match id {
+        "dupes" => app.dupes_search(),
+        "pack_sample_import" | "pack_gc_import" => crate::app_hooks::pack_import(app, id),
+        "perf_2h" | "perf_2v" | "perf_4h" | "perf_4v" | "perf_browse" => {
+            let k = ["perf_2h", "perf_2v", "perf_4h", "perf_4v", "perf_browse"].iter().position(|x| *x == id).unwrap_or(0) as u8;
+            crate::app_hooks::set_perf_layout(app, k);
+        }
+        "pad_platter" => crate::app_hooks::toggle_pad_platter(app),
+        "split_screen" => app.toggle_library_window = true,
+        "automix" => crate::app_hooks::toggle_automix(app),
+        "related_subpanel" | "suggest_subpanel" => {
+            let k = if id == "related_subpanel" { 2 } else { 3 };
+            let now = crate::ui_browser_ext::right_panel(app);
+            crate::ui_browser_ext::set_right_panel(app, if now == k { 0 } else { k });
+        }
+        "sub_browser_h" => {
+            let on = !app.prefs.bx.sub_horizontal;
+            if on {
+                crate::ui_browser_ext::set_right_panel(app, 0);
+            }
+            app.prefs.bx.sub_horizontal = on;
+            app.save_prefs();
+        }
+        "import_to_collection" => {
+            if let View::Device { root, .. } = app.view.clone() {
+                let ids: Vec<u32> = app.device_ui.sel.iter().copied().collect();
+                if !ids.is_empty() {
+                    app.import_from_device(&root, &ids, vec![]);
+                }
+            }
+        }
+        "lock_on" | "lock_off" => {
+            for t in &sel {
+                if let Some(tr) = app.track_mut(*t) {
+                    tr.grid_locked = id == "lock_on";
+                }
+                app.save_track(*t);
+            }
+        }
+        "save_info_txt" | "save_info_m3u8" => {
+            if let Some(n) = current_node(app).cloned() {
+                let (ext, kind) = if id == "save_info_txt" { ("txt", "Text") } else { ("m3u8", "M3U8 playlist") };
+                if let Some(f) = rfd::FileDialog::new().set_title("Save Playlist Info").set_file_name(format!("{}.{ext}", n.name)).add_filter(kind, &[ext]).save_file() {
+                    app.export_playlist_file(n.id, &f);
+                }
+            }
+        }
+        "copy_to_playlists" => {
+            if copyable_list(app) {
+                if app.list_dirty {
+                    app.rebuild_list();
+                }
+                let ids = app.list.clone();
+                let name = crate::ui_browser::view_title(app);
+                let name = name.split(" (").next().unwrap_or("Playlist").trim().to_string();
+                match app.db.create_node(0, if name.is_empty() { "Playlist" } else { &name }, NodeKind::Playlist, None) {
+                    Ok(pl) => {
+                        let _ = app.db.set_playlist_tracks(pl, &ids);
+                        app.reload_playlists();
+                        app.side = SideMode::Playlists;
+                        app.set_view(View::Playlist(pl));
+                    }
+                    Err(e) => app.toast_err(format!("The playlist could not be created: {e}")),
+                }
+            }
+        }
         "about" | "h_about" => app.dialogs.about = true,
         "edit_cut" => app.edit_events.push(egui::Event::Cut),
         "edit_copy" => app.edit_events.push(egui::Event::Copy),
@@ -507,8 +843,7 @@ pub fn handle(app: &mut App, id: &str) {
                 app.toast_err("The active library has no folder to show.");
                 return;
             };
-            let opener = if cfg!(windows) { "explorer.exe" } else if cfg!(target_os = "macos") { "/usr/bin/open" } else { "xdg-open" };
-            if let Err(e) = std::process::Command::new(opener).arg(folder).spawn() {
+            if let Err(e) = crate::ui_browser::open_directory(folder) {
                 app.toast_err(format!("Could not show the library folder: {e}"));
             }
         }
@@ -522,9 +857,14 @@ pub fn handle(app: &mut App, id: &str) {
         "layout_dual" => app.set_player_layout(2),
         "layout_simple" => app.set_player_layout(3),
         "layout_browser" => app.set_player_layout(4),
-        "mytag_window" => {
-            app.prefs.show_mytag = !app.prefs.show_mytag;
-            app.save_prefs();
+        "mytag_window" | "info_window" | "sub_browser" => {
+            let k = match id {
+                "mytag_window" => 1,
+                "info_window" => 4,
+                _ => 5,
+            };
+            let now = crate::ui_browser_ext::right_panel(app);
+            crate::ui_browser_ext::set_right_panel(app, if now == k { 0 } else { k });
         }
         "related_window" => {
             if app.view == View::Related {
@@ -534,13 +874,6 @@ pub fn handle(app: &mut App, id: &str) {
                 app.side = SideMode::Related;
                 app.set_view(View::Related);
             }
-        }
-        "info_window" => {
-            app.deck.panel_tab = if app.deck.panel_tab == 2 { 0 } else { 2 };
-        }
-        "sub_browser" => {
-            app.prefs.sub_browser = !app.prefs.sub_browser;
-            app.save_prefs();
         }
         "filter" => {
             app.filter_open = !app.filter_open;
@@ -555,8 +888,15 @@ pub fn handle(app: &mut App, id: &str) {
             app.save_prefs();
         }
         "load" => {
+            // rekordbox (`ListViewer::returnKeyPressed`): player A, or player B with Shift held
+            // in the layouts that have two players.
             if let Some(t) = sel.first() {
-                app.load_track(*t);
+                let shift = app.ctx.input(|i| i.modifiers.shift);
+                if !app.performance() && app.two_players() && shift {
+                    app.load_track_to(1, *t);
+                } else {
+                    app.load_track(*t);
+                }
             }
         }
         "analyze" => app.reanalyze(&sel),
@@ -587,11 +927,16 @@ pub fn handle(app: &mut App, id: &str) {
         "reload_tags" => app.reload_tags_from_files(&sel),
         "show_finder" => {
             if let Some(t) = sel.first().and_then(|t| app.track(*t)) {
-                let _ = std::process::Command::new("/usr/bin/open").arg("-R").arg(&t.path).spawn();
+                if let Err(e) = crate::ui_browser::reveal_path(std::path::Path::new(&t.path)) {
+                    app.toast_err(format!("Could not show the selected file: {e}"));
+                }
             }
         }
         "remove_collection" => {
-            if !sel.is_empty() {
+            if let Some(pl) = app.is_manual_playlist().filter(|_| !sel.is_empty()) {
+                let s: std::collections::HashSet<i64> = sel.iter().copied().collect();
+                app.remove_from_playlist(pl, &s);
+            } else if !sel.is_empty() {
                 app.dialogs.confirm_remove = Some(sel);
             }
         }
@@ -611,11 +956,17 @@ pub fn handle(app: &mut App, id: &str) {
             });
         }
         "delete_playlist" => {
+            if crate::prefs_bridge::library_protected(app) {
+                return;
+            }
             if let Some(n) = current_node(app).cloned() {
                 app.dialogs.confirm_delete_node = Some((n.id, n.name.clone(), n.kind == NodeKind::Folder));
             }
         }
         "rename_playlist" => {
+            if crate::prefs_bridge::library_protected(app) {
+                return;
+            }
             if let Some(n) = current_node(app).cloned() {
                 app.side = SideMode::Playlists;
                 app.dialogs.rename = Some((n.id, n.name));
@@ -800,6 +1151,46 @@ mod tests {
     }
 
     #[test]
+    fn every_mode_lays_out_known_commands_and_submenus() {
+        let cmds: std::collections::HashSet<&str> = COMMANDS.iter().map(|c| c.0).collect();
+        let subs: std::collections::HashSet<&str> = SUBMENUS.iter().map(|s| s.0).chain(["help"]).collect();
+        for mode in 0..3u8 {
+            let lay = layout(mode);
+            let filled: std::collections::HashSet<&str> = lay.iter().map(|l| l.0).collect();
+            for (key, items) in &lay {
+                assert!(subs.contains(key), "{key}");
+                let mut seen = std::collections::HashSet::new();
+                for i in items {
+                    match i {
+                        C(id) => {
+                            assert!(cmds.contains(id), "{key}: {id}");
+                            assert!(seen.insert(*id), "{key}: {id} twice");
+                        }
+                        Sub(k) => assert!(subs.contains(k), "{key}: submenu {k}"),
+                        Sep => {}
+                    }
+                }
+                assert!(!matches!(items.first(), Some(Sep)) && !matches!(items.last(), Some(Sep)), "{key} starts or ends with a separator");
+            }
+            for top in top_level(mode) {
+                assert!(filled.contains(top), "{top} has no layout");
+            }
+        }
+        // rekordbox's menu bar: Track and Playlist are not in EDIT mode; Performance adds its
+        // layouts, Split Screen, Automix and the sample packs.
+        assert_eq!(top_level(2), ["file", "edit", "view", "help"]);
+        let has = |mode: u8, menu: &str, id: &str| layout(mode).iter().any(|(k, items)| *k == menu && items.iter().any(|i| matches!(i, C(x) if *x == id)));
+        assert!(has(0, "view", "layout_dual") && !has(1, "view", "layout_dual"));
+        assert!(has(1, "view", "perf_4v") && has(1, "view", "split_screen") && has(1, "view", "automix") && !has(0, "view", "automix"));
+        for mode in 0..3 {
+            assert!(has(mode, "view", "split_screen"));
+            for action in ["collection_cleanup", "sync_rekordbox", "export_playlists_info", "dupes"] {
+                assert!(has(mode, "file", action), "mode {mode} is missing {action}");
+            }
+        }
+    }
+
+    #[test]
     fn commands_are_unique_and_keyboard_actions_reach_them() {
         let mut ids = std::collections::HashSet::new();
         for (id, label, _) in COMMANDS {
@@ -816,7 +1207,7 @@ mod tests {
             }
         }
         // The menu's own fixed accelerators do not collide with default keyboard shortcuts.
-        for fixed in ["Cmd+N", "Cmd+E", "Cmd+I"] {
+        for fixed in ["Cmd+N", "Cmd+E", "Cmd+I", "Cmd+R"] {
             assert!(!crate::prefs_ext::ACTIONS.iter().any(|a| a.2 == fixed), "{fixed}");
         }
     }

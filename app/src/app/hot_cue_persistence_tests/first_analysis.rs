@@ -23,6 +23,7 @@ fn complete_first_analysis(app: &mut App, id: i64) -> Result<Vec<Cue>> {
         wave: Waveform { frames: vec![[0; 8]; 1_200] },
         gain_db: 0.0,
         peak: 0.5,
+        vocal: None,
     };
     app.apply_analysis(id, Ok(result));
     assert!(app.db.wave(id).is_some());

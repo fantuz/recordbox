@@ -13,7 +13,7 @@ impl App {
         if !std::env::var("PREPDECK_SHOT_PLAYER").map(|v| v.split(',').any(|x| x.trim() == "perftest")).unwrap_or(false) {
             return;
         }
-        let fxh = if self.prefs.perf_fx { crate::ui_fx::FX_H } else { 0.0 };
+        let fxh = if self.prefs.perf_fx { crate::ui_fx::fx_h(self) } else { 0.0 };
         let t = 28.0 + fxh;
         let extra = if self.prefs.show_stems { 21.0 } else { 0.0 } + if self.prefs.show_phrase_bar { crate::ui_perf::PHRASE_ROW } else { 0.0 };
         let ly = t + 143.0 + 99.5 + extra;
@@ -51,7 +51,52 @@ impl App {
             // Quick clicks: press and release in the same frame (found by hand: sliders missed them).
             ("quick click on channel fader 2, half way", pos2(782.0, my + 194.5), pos2(782.0, my + 194.5)),
             ("quick click on the crossfader, a quarter in", pos2(733.5, by + 21.5), pos2(733.5, by + 21.5)),
-            ("quick click on master volume, half way", pos2(1512.0 - 87.5, 14.0), pos2(1512.0 - 87.5, 14.0)),
+            ("quick click on master volume, half way", pos2(1512.0 - 223.25, 13.75), pos2(1512.0 - 223.25, 13.75)),
+            // The deck engine (`deck.rs`): the platter dragged a quarter turn (a scratch), then
+            // its rules called as a controller would, on the playing deck 1.
+            ("platter drag scratch held", o + egui::vec2(105.0 + 49.0, 65.0), o + egui::vec2(105.0, 65.0 + 49.0)),
+            ("DECK:reverse|reverse on", o, o),
+            ("DECK:reverse|reverse off", o, o),
+            ("DECK:slipreverse|slip reverse on", o, o),
+            ("DECK:reverseoff|slip reverse off (back to where the track would be)", o, o),
+            ("DECK:syncrate|sync rate button", o, o),
+            ("DECK:loop4|4-beat loop", o, o),
+            ("DECK:loopmove|loop move forward", o, o),
+            ("DECK:loophalve|loop halve", o, o),
+            ("DECK:loopexit|loop exit", o, o),
+            ("DECK:scan|FF held", o, o),
+            ("DECK:scanoff|FF released", o, o),
+            ("DECK:needle|needle search at 50 % while playing (Needle Lock)", o, o),
+            ("DECK:touch|platter touched", o, o),
+            ("DECK:release|platter let go", o, o),
+            ("DECK:cup|CUP (back to the cue and play)", o, o),
+            ("DECK:cuedown|CUE on the playing deck (back to the cue, standby)", o, o),
+            ("DECK:cuedown|CUE held at the cue (cue sampler)", o, o),
+            ("DECK:play|PLAY while CUE is held (back-cue: plays on)", o, o),
+            ("DECK:cueup|CUE let go (still playing)", o, o),
+            // The rules and controls added by the perfrest track (deck.rs, ui_perf.rs,
+            // ui_perf_layouts.rs, pads_ext.rs), on the playing deck 1.
+            ("DECK:limited|limited sync rate on (as a DDJ-REV7 would)", o, o),
+            ("DECK:limited|limited sync rate off", o, o),
+            ("DECK:loopin|LOOP IN with Q (SNAP point)", o, o),
+            ("DECK:loopout|LOOP OUT with Q (next LOOP-lattice point)", o, o),
+            ("DECK:loopexit|loop exit", o, o),
+            ("DECK:autoloop14|1/4-beat auto loop with Q", o, o),
+            ("DECK:loopexit|loop exit", o, o),
+            ("DECK:eqiso|EQ / ISOLATOR switched (3.3 ms out, 3.3 ms in)", o, o),
+            ("DECK:eqiso|EQ / ISOLATOR back", o, o),
+            ("DECK:eqnxs|EQ type DJM-900NXS (filter steps)", o, o),
+            ("DECK:eqnxs|EQ type back", o, o),
+            ("DECK:timemode|time mode of deck 1 toggled", o, o),
+            ("DECK:userbpm|USER pad BPM + MEDIUM (+0.50 %)", o, o),
+            ("BPM drag up 25 pt on the platter's BPM", o + egui::vec2(100.0, 52.5), o + egui::vec2(100.0, 27.5)),
+            ("DECK:slicer|pad mode SLICER (SLIP was on: switched off with the message)", o, o),
+            ("DECK:slip|SLIP while the slicer is on (refused)", o, o),
+            ("DECK:hotcue|pad mode HOT CUE", o, o),
+            ("GRID tab of deck 1", pos2(14.0, ly + 94.0), pos2(14.0, ly + 94.0)),
+            ("GRID: beat grid right (1 ms)", pos2(28.0 - 45.0 + 295.0, ly + 34.5), pos2(28.0 - 45.0 + 295.0, ly + 34.5)),
+            ("GRID: undo", pos2(28.0 - 45.0 + 381.0 + 12.0, ly + 34.5), pos2(28.0 - 45.0 + 381.0 + 12.0, ly + 34.5)),
+            ("PAD tab of deck 1", pos2(14.0, ly + 30.0), pos2(14.0, ly + 30.0)),
             ("PLAY/PAUSE deck 1 (pause)", o + egui::vec2(20.0, 102.0), o + egui::vec2(20.0, 102.0)),
         ];
         let _ = d2;
@@ -171,6 +216,13 @@ impl App {
                 ("4D channel fader 4 down", pos2(661.0 + 162.5, y1 + 224.5), pos2(661.0 + 162.5, y1 + 284.0)),
                 st("quick click on CUE of channel 3", p(661.0 + 30.0, y1 + 198.0)),
                 st("4D BEAT SYNC deck 2", p(1512.0 - 76.0 + 20.0, y1 + 14.0)),
+                // (perfrest track) Deck 3's GRID tab and a GRID button; its pad mode pull-down,
+                // which opens upwards over the pads on the lower decks.
+                st("4D GRID tab deck 3", p(14.0, ly3 + 84.0)),
+                st("4D GRID beat grid right deck 3", p(28.0 - 45.0 + 295.0, ly3 + 33.0)),
+                st("4D PAD tab deck 3", p(14.0, ly3 + 28.0)),
+                st("4D pad mode pull-down deck 3 (opens upwards)", p(70.0, ly3 + 96.0)),
+                st("4D pad mode pull-down deck 3 (closes)", p(70.0, ly3 + 96.0)),
                 st("4D PLAY deck 4 (pause)", p(855.0 + 10.0 + 20.0, ly3 + 84.0)),
             ]
         } else {
@@ -180,29 +232,7 @@ impl App {
         // and snapshot, back to multi mode, CFX multi mode.
         let fxt = std::env::var("PREPDECK_SHOT_VIEW").map(|v| v.split(',').any(|x| x.trim() == "perffx2")).unwrap_or(false);
         let steps = if fxt {
-            let (y1, y2, cy) = (28.0 + 14.0, 28.0 + 37.5, 28.0 + 66.0);
-            let p = |x: f32, y: f32| (pos2(x, y), pos2(x, y));
-            let st = |n: &'static str, (a, b): (egui::Pos2, egui::Pos2)| (n, a, b);
-            vec![
-                st("FX1 assign deck 1", p(85.0, y1)),
-                st("FX1 single mode", p(169.0, y2)),
-                st("FX1 single effect on (DELAY)", p(233.0, y1)),
-                ("FX1 single knob 1 up", pos2(318.0, y2), pos2(318.0, y2 - 30.0)),
-                st("FX1 single button 1 (LOW CUT)", p(471.0, y1)),
-                st("FX1 single beat up", p(285.0, y2)),
-                st("FX1 snapshot", p(516.0, y1)),
-                st("FX1 multi mode", p(169.0, y1 + 4.0)),
-                st("FX1 slot 3 (SPIRAL) on", p(193.0 + 222.0 + 40.0, y1)),
-                st("FX1 slot 3 beat down", p(454.0, y2)),
-                st("FX2 single mode", p(756.0 + 169.0, y2)),
-                st("CFX multi mode", p(92.0, cy)),
-                st("CFX multi: deck 1's effect off", p(660.0, cy)),
-                st("CFX multi: deck 1's effect on", p(660.0, cy)),
-                ("CFX multi: deck 1's COLOR to the right", pos2(748.0, cy), pos2(748.0, cy - 40.0)),
-                st("CFX single mode", p(116.0, cy)),
-                st("CFX multi mode again (deck 1 keeps its COLOR)", p(92.0, cy)),
-                st("FX1 single mode again (snapshot kept)", p(169.0, y2)),
-            ]
+            crate::ui_fx::selftest_steps(self)
         } else {
             steps
         };
@@ -275,6 +305,21 @@ impl App {
             }
             return;
         }
+        if let Some(rest) = name.strip_prefix("DECK:") {
+            let what = rest.split('|').next().unwrap_or("");
+            // (A held FF button is sent every frame, as the on-screen one does.)
+            if f == 3 || (what == "scan" && (3..=30).contains(&f)) {
+                self.with_deck(0, |a| crate::deck::selftest_call(a, what));
+            }
+            if f == 30 {
+                eprintln!("perftest: {name}: {}", crate::deck::state_line(self, 0));
+            }
+            return;
+        }
+        if name.starts_with("FXCALL:") {
+            crate::ui_fx::selftest_call(self, name, f, raw);
+            return;
+        }
         if name.starts_with("CALL:seqload") {
             if f == 3 && !name.contains("check") {
                 self.sampler_sequence_load(1);
@@ -312,8 +357,9 @@ impl App {
                 raw.events.push(button(a, true));
                 raw.events.push(button(a, false));
             }
+            10 if fxt && name.contains("held") => eprintln!("perftest: {name} (while held): {}", crate::ui_fx::selftest_state(self)),
             10 if smp && name.contains("held") => eprintln!("perftest: {name} (while held): {}", self.perf_state_sampler()),
-            10 if name.contains("held") => eprintln!("perftest: {name} (while held): {}", self.perf_state()),
+            10 if name.contains("held") => eprintln!("perftest: {name} (while held): {} | {}", self.perf_state(), crate::deck::state_line(self, 0)),
             4..=11 => {
                 if a != b {
                     let k = (f - 3) as f32 / 8.0;
@@ -325,11 +371,11 @@ impl App {
                     raw.events.push(button(b, false));
                 }
             }
-            30 if fxt => eprintln!("perftest: {name}: {}", self.perf_state_fx()),
+            30 if fxt => eprintln!("perftest: {name}: {} || {}", self.perf_state_fx(), crate::ui_fx::selftest_state(self)),
             // The loop is left running for a while before its state is read.
             30 if smp => eprintln!("perftest: {name}: {}", self.perf_state_sampler()),
-            30 if four => eprintln!("perftest: {name}: {}", self.perf_state4()),
-            30 => eprintln!("perftest: {name}: {}", self.perf_state()),
+            30 if four => eprintln!("perftest: {name}: {} | {}", self.perf_state4(), crate::deck::state_line(self, 2)),
+            30 => eprintln!("perftest: {name}: {} | {}", self.perf_state(), crate::deck::state_line(self, 0)),
             _ => {}
         }
     }

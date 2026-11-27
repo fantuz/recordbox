@@ -15,11 +15,26 @@ use crate::fx::{self, Kind, UnitParams};
 use crate::theme::*;
 use crate::ui_player::{lighten, tip};
 use eframe::egui;
-use egui::{pos2, vec2, Align2, Rect, Sense, Stroke, Ui};
+use egui::{pos2, vec2, Align2, FontId, Rect, Sense, Stroke, Ui};
 use serde::{Deserialize, Serialize};
 
 /// Height of the FX panel: the Beat FX row (52 pt) and the CFX row (26 pt).
 pub const FX_H: f32 = 78.0;
+/// MERGE FX's row under the CFX row (rekordbox shows it as a further row; its own height was
+/// not traced, so it takes the CFX row's 24 pt and the 3 pt gap above it).
+pub const MFX_ROW_H: f32 = 27.0;
+
+/// The FX panel's height as laid out now: with MERGE FX enabled its row is added.
+pub fn fx_h(app: &App) -> f32 {
+    // (View > Layout > Effect Panel chooses the rows; MERGE FX hangs under the CFX row.)
+    let (beat, color) = app.prefs.rb.fx_rows();
+    let base = match (beat, color) {
+        (true, true) => FX_H,
+        (true, false) => FX_H - 27.0,
+        _ => FX_H - 53.0,
+    };
+    if app.prefs.fx.mfx.enabled && color { base + MFX_ROW_H } else { base }
+}
 const BEAT_H: f32 = 52.0;
 
 /// A single-mode snapshot: knob 1, knob 2, button 1, button 2.
@@ -183,6 +198,25 @@ impl Default for CfxSaved {
 pub struct FxSaved {
     pub units: [UnitSaved; 2],
     pub cfx: CfxSaved,
+    /// The PAD FX pads, the MERGE FX settings and Preferences > Controller > Effect.
+    pub padfx: crate::ui_padfx::PadFxPrefs,
+    pub mfx: crate::mfx::MfxPrefs,
+    pub effect: EffectPrefs,
+}
+
+/// Preferences > Controller > Effect > RELEASE FX (rekordbox's `ReleaseFxUnitNum`, default 2,
+/// and `ReleaseFxOnCfx`, default off).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct EffectPrefs {
+    pub release_units: u8,
+    pub release_on_cfx: bool,
+}
+
+impl Default for EffectPrefs {
+    fn default() -> Self {
+        EffectPrefs { release_units: 2, release_on_cfx: false }
+    }
 }
 
 /// The FX panel's state outside the two units.
@@ -197,11 +231,14 @@ pub struct FxExtra {
     pub cfx_multi_on: [bool; 6],
     /// PARAM of each CFX effect.
     pub cfx_params: [f32; 9],
+    /// PAD FX as it is being played, and MERGE FX.
+    pub pad: crate::ui_padfx::PadFxState,
+    pub mfx: crate::mfx::MfxState,
 }
 
 impl Default for FxExtra {
     fn default() -> Self {
-        FxExtra { loaded: false, pending: None, cfx_multi: false, cfx_multi_kind: [0; 6], cfx_multi_on: [true; 6], cfx_params: [0.5; 9] }
+        FxExtra { loaded: false, pending: None, cfx_multi: false, cfx_multi_kind: [0; 6], cfx_multi_on: [true; 6], cfx_params: [0.5; 9], pad: Default::default(), mfx: Default::default() }
     }
 }
 
@@ -212,7 +249,7 @@ fn cfx_ok(k: u8) -> u8 {
 /// The kept choices as they stand now.
 pub fn snapshot(app: &App) -> FxSaved {
     let x = &app.px.fxx;
-    FxSaved { units: [app.px.fx[0].saved(), app.px.fx[1].saved()], cfx: CfxSaved { multi_shown: x.cfx_multi, user: app.px.cfx_user, user_fx: app.px.cfx_kind, params: x.cfx_params, multi_fx: x.cfx_multi_kind } }
+    FxSaved { units: [app.px.fx[0].saved(), app.px.fx[1].saved()], cfx: CfxSaved { multi_shown: x.cfx_multi, user: app.px.cfx_user, user_fx: app.px.cfx_kind, params: x.cfx_params, multi_fx: x.cfx_multi_kind }, padfx: app.prefs.fx.padfx.clone(), mfx: app.prefs.fx.mfx.clone(), effect: app.prefs.fx.effect.clone() }
 }
 
 /// Put kept choices in place.
@@ -234,7 +271,11 @@ pub fn restore(app: &mut App, s: &FxSaved) {
 /// out of the path while its button is off.
 pub fn cfx_for(app: &App, ch: usize) -> (u8, f32, f32) {
     let x = &app.px.fxx;
-    let color = if ch == fx::SAMPLER { app.px.sampler.cfx_color } else { app.px.cfx_color[ch.min(4)] };
+    let mut color = if ch == fx::SAMPLER { app.px.sampler.cfx_color } else { app.px.cfx_color[ch.min(4)] };
+    // "Apply RELEASE FX on CFX": a held RELEASE FX switches the channel's CFX off too.
+    if app.prefs.fx.effect.release_on_cfx && app.px.fx.iter().any(|f| f.params.release.is_some() && f.params.assign[ch.min(5)]) {
+        color = 0.5;
+    }
     if x.cfx_multi {
         let k = x.cfx_multi_kind[ch.min(5)];
         (k, if x.cfx_multi_on[ch.min(5)] { color } else { 0.5 }, x.cfx_params[k as usize % 9])
@@ -250,6 +291,22 @@ pub fn sync(app: &mut App) {
         app.px.fxx.loaded = true;
         let s = app.prefs.fx.clone();
         restore(app, &s);
+        // Screenshot switches (PREPDECK_SHOT_FX=single,cfxmulti,mfx,padfx,user).
+        if let Ok(v) = std::env::var("PREPDECK_SHOT_FX") {
+            for w in v.split(',') {
+                match w.trim() {
+                    "single" => app.px.fx.iter_mut().for_each(|f| f.params.single = true),
+                    "cfxmulti" => app.px.fxx.cfx_multi = true,
+                    "user" => app.px.cfx_user = true,
+                    "mfx" => {
+                        app.prefs.fx.mfx.enabled = true;
+                        app.px.fxx.mfx.show = true;
+                    }
+                    "padfx" => app.px.pad_mode = [crate::ui_padfx::PAD_FX; 4],
+                    _ => {}
+                }
+            }
+        }
     }
     // Keep the choices: written within half a second of a change.
     let now = snapshot(app);
@@ -262,8 +319,28 @@ pub fn sync(app: &mut App) {
         app.px.fxx.pending = None;
         app.save_prefs();
     }
-    let on = app.performance() && app.prefs.perf_fx;
-    if !on {
+    let perf = app.performance();
+    let on = perf && app.prefs.perf_fx;
+    // A deck that left PAD FX (or Performance mode) lets go of everything its pads held.
+    for d in 0..4usize {
+        let p = &app.px.fxx.pad.decks[d];
+        // (A USER pad holding a PAD FX pad is PAD FX too: pads_ext.rs.)
+        let user_fx = matches!(app.pads.deck[d].user_held, Some(crate::pads_ext::UserHeld::PadFx(_)));
+        if (!perf || app.px.pad_mode[d] != crate::ui_padfx::PAD_FX) && !user_fx && (!p.held.is_empty() || p.release.is_some() || p.slip.is_some() || p.edit) {
+            app.px.fxx.pad.decks[d].edit = false;
+            if (d as u8) < app.deck_count() {
+                app.with_deck(d as u8, |a| crate::ui_padfx::stop_deck(a, d));
+            } else {
+                app.px.fxx.pad.decks[d].stop();
+            }
+        }
+    }
+    // PAD FX and MERGE FX work with the FX panel hidden too; outside Performance mode
+    // nothing does.
+    let pad_wanted = app.px.fxx.pad.wanted();
+    let pad_sets = if perf { app.px.fxx.pad.sets(&app.prefs.fx.padfx) } else { [fx::PadSet::NONE; 4] };
+    let merge = perf && app.prefs.fx.mfx.enabled;
+    if !on && !merge && !pad_wanted.iter().any(|w| *w) {
         if let Some(mut g) = fx::RACK.try_lock() {
             if let Some(r) = g.as_mut() {
                 r.enabled = false;
@@ -287,18 +364,85 @@ pub fn sync(app: &mut App) {
     quantize[fx::MASTER] = quantize[m];
     bpm[fx::SAMPLER] = app.prefs.sampler.bpm.clamp(40.0, 499.0);
     let master_cfx = cfx_for(app, fx::MASTER);
-    let mut g = fx::RACK.lock();
-    let rack = g.get_or_insert_with(|| Box::new(fx::Rack::new()));
-    rack.enabled = true;
-    rack.master_cfx_set = master_cfx;
-    for (u, ui) in rack.units.iter_mut().zip(app.px.fx.iter()) {
-        let mut p = ui.params;
-        p.bpm = if ui.auto { bpm } else { [ui.tap_bpm; fx::CHANNELS] };
-        p.quantize = quantize;
-        u.prepare(&p.assign);
-        u.params = p;
+    // With RELEASE FX > Unit Number 1 the one RELEASE FX is the master's (FX1's panel).
+    let master_release = app.prefs.fx.effect.release_units == 1;
+    let stop = {
+        let mut g = fx::RACK.lock();
+        let rack = g.get_or_insert_with(|| Box::new(fx::Rack::new()));
+        rack.enabled = on;
+        rack.master_cfx_set = master_cfx;
+        for (u, ui) in rack.units.iter_mut().zip(app.px.fx.iter()) {
+            let mut p = ui.params;
+            p.bpm = if ui.auto { bpm } else { [ui.tap_bpm; fx::CHANNELS] };
+            p.quantize = quantize;
+            if master_release {
+                p.release = None;
+            }
+            u.prepare(&p.assign);
+            u.params = p;
+        }
+        if master_release && on {
+            rack.prepare_master_release();
+        }
+        rack.master_release = if master_release && on { app.px.fx[0].params.release } else { None };
+        rack.master_bpm = if app.px.fx[0].auto { bpm[fx::MASTER] } else { app.px.fx[0].tap_bpm };
+        for d in 0..4 {
+            if pad_wanted[d] {
+                rack.prepare_pad(d);
+            }
+            rack.pad_bpm[d] = bpm[d];
+            rack.pad_quantize[d] = quantize[d];
+        }
+        rack.pad_set = pad_sets;
+        if merge || rack.merge.is_some() {
+            crate::mfx::sync(app, rack, &bpm)
+        } else {
+            Vec::new()
+        }
+    };
+    // MERGE FX has dropped: "Stop playing the operating deck after MERGE FX finishes".
+    for d in stop {
+        if (d as u8) < app.deck_count() {
+            app.with_deck(d as u8, |a| {
+                if a.player.state.lock().playing {
+                    a.play_pause();
+                }
+            });
+        }
     }
 }
+
+/// rekordbox lays the FX panel out in design units, 1280 across (`EffectPanelLayout`,
+/// `SimpleMultiFxUnitLayout`, `SimpleSingleFxUnitLayout`, `SimpleReleaseFxLayout`,
+/// `SimpleBPMController`, `SingleCFXDefaultSimple`, `MultiCFXSimple`, `MultiCfxControlSimple`):
+/// x and width are scaled with the panel's width, y and height are not.
+#[derive(Clone, Copy)]
+struct Lay {
+    x0: f32,
+    y0: f32,
+    k: f32,
+}
+
+impl Lay {
+    /// A control's rectangle, as rekordbox's `resized` functions round it: the left edge down
+    /// and the right edge up to whole points.
+    fn r(&self, x: f32, y: f32, w: f32, h: f32) -> Rect {
+        Rect::from_min_max(pos2(self.x0 + (x * self.k).floor(), self.y0 + y), pos2(self.x0 + ((x + w) * self.k).ceil(), self.y0 + y + h))
+    }
+
+    /// A panel inside this one (`x`, `w` in this panel's units): its own controls are scaled
+    /// by its rounded width over its design width.
+    fn sub(&self, x: f32, w: f32) -> Lay {
+        let r = self.r(x, 0.0, w, 0.0);
+        Lay { x0: r.min.x, y0: self.y0, k: r.width() / w }
+    }
+}
+
+/// The colour of the panel's `<` `>` arrows (measured on reference performance/06).
+const ARROW: egui::Color32 = hex(0x888888);
+const ARROW_OFF: egui::Color32 = hex(0x464646);
+/// The outline of the buttons that are not lit (RELEASE FX, TAP, USER).
+const OUTLINE: egui::Color32 = hex(0x646464);
 
 fn small(ui: &mut Ui, r: Rect, id: impl std::hash::Hash, label: &str, lit: bool, enabled: bool) -> egui::Response {
     let resp = ui.interact(r, ui.id().with(id), Sense::click());
@@ -308,13 +452,26 @@ fn small(ui: &mut Ui, r: Rect, id: impl std::hash::Hash, label: &str, lit: bool,
     resp
 }
 
+/// A button with an outline when it is not the chosen one (AUTO / TAP, DEFAULT / USER).
+fn choice(ui: &mut Ui, r: Rect, id: impl std::hash::Hash, label: &str, lit: bool) -> egui::Response {
+    let resp = ui.interact(r, ui.id().with(id), Sense::click());
+    let p = ui.painter();
+    p.rect_filled(r, 2.0, if lit { BLUE } else if resp.hovered() { lighten(BTN) } else { hex(0x1E1E1E) });
+    if !lit {
+        p.rect_stroke(r, 2.0, Stroke::new(1.0_f32, OUTLINE), egui::StrokeKind::Inside);
+    }
+    p.text(r.center(), Align2::CENTER_CENTER, label, caps(9.0), WHITE);
+    resp
+}
+
 /// The FX panel's knob, as rekordbox draws it (measured on reference performance/06): a ring
-/// 17.5 pt across, open at the bottom, blue from its start to the value (`bipolar`: from the
-/// centre to the value), and a white mark at the value. Drag up or down to turn (a full sweep
-/// over 150 pt), double click for `reset`. Returns the new value when it changed.
-fn fx_knob(ui: &mut Ui, c: egui::Pos2, id: impl std::hash::Hash, value: f32, reset: f32, bipolar: bool) -> Option<f32> {
+/// 17.5 pt across (`rad` 7.6), open at the bottom, blue from its start to the value
+/// (`bipolar`: from the centre to the value), and a white mark at the value. Drag up or down
+/// to turn (a full sweep over 150 pt), double click for `reset`. Returns the new value when
+/// it changed.
+fn fx_knob_r(ui: &mut Ui, c: egui::Pos2, rad: f32, id: impl std::hash::Hash, value: f32, reset: f32, bipolar: bool) -> (Option<f32>, bool) {
     let p = ui.painter().clone();
-    let resp = ui.interact(Rect::from_center_size(c, vec2(22.0, 22.0)), ui.id().with(id), Sense::click_and_drag());
+    let resp = ui.interact(Rect::from_center_size(c, vec2(rad * 2.0 + 7.0, rad * 2.0 + 7.0)), ui.id().with(id), Sense::click_and_drag());
     let mut out = None;
     if resp.double_clicked() {
         out = Some(reset);
@@ -326,15 +483,20 @@ fn fx_knob(ui: &mut Ui, c: egui::Pos2, id: impl std::hash::Hash, value: f32, res
     }
     let v = out.unwrap_or(value);
     let ang = |x: f32| (-225.0 + 270.0 * x).to_radians();
-    let arc = |a: f32, b: f32| -> Vec<egui::Pos2> { (0..=32).map(|i| { let t = ang(a + (b - a) * i as f32 / 32.0); c + vec2(t.cos(), t.sin()) * 7.6 }).collect() };
-    p.add(egui::Shape::line(arc(0.0, 1.0), Stroke::new(2.4_f32, if resp.hovered() || resp.dragged() { hex(0x464646) } else { hex(0x323232) })));
+    let arc = |a: f32, b: f32| -> Vec<egui::Pos2> { (0..=32).map(|i| { let t = ang(a + (b - a) * i as f32 / 32.0); c + vec2(t.cos(), t.sin()) * rad }).collect() };
+    let active = resp.hovered() || resp.dragged();
+    p.add(egui::Shape::line(arc(0.0, 1.0), Stroke::new(2.4_f32, if active { hex(0x464646) } else { hex(0x323232) })));
     let from = if bipolar { 0.5 } else { 0.0 };
     if (v - from).abs() > 0.012 {
         p.add(egui::Shape::line(arc(from, v), Stroke::new(2.4_f32, BLUE)));
     }
     let a = ang(v);
-    p.line_segment([c + vec2(a.cos(), a.sin()) * 5.2, c + vec2(a.cos(), a.sin()) * 9.6], Stroke::new(2.0_f32, WHITE));
-    out
+    p.line_segment([c + vec2(a.cos(), a.sin()) * (rad - 2.4), c + vec2(a.cos(), a.sin()) * (rad + 2.0)], Stroke::new(2.0_f32, WHITE));
+    (out, active)
+}
+
+fn fx_knob(ui: &mut Ui, c: egui::Pos2, id: impl std::hash::Hash, value: f32, reset: f32, bipolar: bool) -> Option<f32> {
+    fx_knob_r(ui, c, 7.6, id, value, reset, bipolar).0
 }
 
 /// A mode button: three dots (multi) or one (single), lit for the mode in use.
@@ -369,24 +531,27 @@ pub fn knob_text(label: &str, v: f32) -> String {
 }
 
 /// The effect's name (on/off), its list, LEVEL/DEPTH and `<` value `>`: a multi slot
-/// (`s` 0..2) or single mode's effect (`s` 3), drawn at `sx` in the unit.
-fn slot(app: &mut App, ui: &mut Ui, u: usize, s: usize, o: egui::Pos2, sx: f32) {
+/// (`s` 0..2, `dx` its offset in design units) or single mode's effect (`s` 3).
+fn slot(app: &mut App, ui: &mut Ui, u: usize, s: usize, l: Lay, dx: f32) {
     let p = ui.painter().clone();
-    let at = |x: f32, y: f32, w: f32, h: f32| Rect::from_min_size(pos2(o.x + x, o.y + y), vec2(w, h));
+    // (The slots are laid out inside the unit's effect panel, 283 wide from 157.)
+    let l = l.sub(157.0, 283.0);
+    let l = Lay { x0: l.x0 - 157.0 * l.k, ..l };
     let single = s == 3;
     let sp = if single { app.px.fx[u].params.one } else { app.px.fx[u].params.slots[s] };
-    let name_r = at(sx, 5.0, 81.5, 18.0);
+    let mut name_r = l.r(163.0 + dx, 2.0, 70.0, 18.0);
+    name_r.max.x -= 2.0;
     let nresp = ui.interact(name_r, ui.id().with(("fxname", u, s)), Sense::click());
     p.rect_filled(name_r, 2.0, if sp.on { BLUE } else if nresp.hovered() { lighten(BTN) } else { BTN });
-    p.text(name_r.center(), Align2::CENTER_CENTER, fx::name(sp.kind), caps(9.5), WHITE);
+    p.text(name_r.center(), Align2::CENTER_CENTER, fx::name(sp.kind), caps(8.75), WHITE);
     if tip(nresp, app, "Turns the effect on/off.").clicked() {
         let f = &mut app.px.fx[u].params;
         if single { f.one.on = !sp.on } else { f.slots[s].on = !sp.on }
     }
-    let list_r = at(sx + 82.0, 5.0, 20.0, 18.0);
+    let list_r = l.r(233.0 + dx, 2.0, 16.0, 18.0);
     let lresp = ui.interact(list_r, ui.id().with(("fxlist", u, s)), Sense::click());
     p.rect_filled(list_r, 2.0, if lresp.hovered() { lighten(BTN) } else { BTN });
-    crate::icons_player::chevron_down(&p, list_r.center() + vec2(0.0, 0.5), 1.0, WHITE);
+    crate::icons_player::chevron_down(&p, list_r.center() + vec2(0.0, 0.0), 0.85, WHITE);
     crate::ui_browser::dropdown(ui, &lresp, &format!("fxpop{u}{s}"), |ui| {
         egui::ScrollArea::vertical().max_height(420.0).show(ui, |ui| {
             // (rekordbox draws a line before the last nine, its "FX+ pack".)
@@ -403,54 +568,58 @@ fn slot(app: &mut App, ui: &mut Ui, u: usize, s: usize, o: egui::Pos2, sx: f32) 
         });
     });
     // LEVEL/DEPTH, then `<` value `>`.
-    let kc = pos2(o.x + sx + 15.5, o.y + 37.5);
-    if let Some(v) = fx_knob(ui, kc, ("fxlevel", u, s), sp.level, 0.5, false) {
+    if let Some(v) = fx_knob(ui, l.r(167.0 + dx, 25.0, 20.0, 20.0).center(), ("fxlevel", u, s), sp.level, 0.5, false) {
         let f = &mut app.px.fx[u].params;
         if single { f.one.level = v } else { f.slots[s].level = v }
     }
     let table = fx::beat_table(sp.kind).0;
     let idx = if single { app.px.fx[u].one_idx } else { app.px.fx[u].idx[s] }.min(table.len().saturating_sub(1));
     let (can_down, can_up) = (idx > 0, idx + 1 < table.len());
-    let down = ui.interact(at(sx + 31.0, 28.0, 16.0, 17.0), ui.id().with(("fxdown", u, s)), Sense::click());
-    crate::icons_player::chevron_left(&p, down.rect.center(), 1.0, if can_down { WHITE } else { OFF });
+    let down = ui.interact(l.r(190.0 + dx, 29.0, 15.0, 16.0), ui.id().with(("fxdown", u, s)), Sense::click());
+    crate::icons_player::chevron_left(&p, pos2(down.rect.min.x + 8.5, down.rect.center().y), 1.15, if can_down { ARROW } else { ARROW_OFF });
     if down.clicked() && can_down {
         app.px.fx[u].set_index(s, idx - 1);
     }
-    p.text(pos2(o.x + sx + 66.0, o.y + 36.5), Align2::CENTER_CENTER, fx::value_text(sp.kind, sp.value), bold(9.0), if table.is_empty() { OFF } else { WHITE });
-    let up = ui.interact(at(sx + 84.0, 28.0, 16.0, 17.0), ui.id().with(("fxup", u, s)), Sense::click());
-    crate::icons_player::chevron_right(&p, up.rect.center(), 1.0, if can_up { WHITE } else { OFF });
+    p.text(l.r(192.0 + dx, 29.0, 56.0, 16.0).center(), Align2::CENTER_CENTER, fx::value_text(sp.kind, sp.value), bold(9.0), if table.is_empty() { OFF } else { WHITE });
+    let up = ui.interact(l.r(235.0 + dx, 29.0, 15.0, 16.0), ui.id().with(("fxup", u, s)), Sense::click());
+    crate::icons_player::chevron_right(&p, pos2(up.rect.min.x + 6.0, up.rect.center().y), 1.15, if can_up { ARROW } else { ARROW_OFF });
     if up.clicked() && can_up {
         app.px.fx[u].set_index(s, idx + 1);
     }
 }
 
-/// Single mode's own controls, right of the effect: knob 1, knob 2, button 1, button 2 and
-/// the snapshot button. (Laid out without a reference picture.)
-fn single_controls(app: &mut App, ui: &mut Ui, u: usize, o: egui::Pos2) {
+/// Single mode's own controls at rekordbox's places: for each of the two parameters a label,
+/// a small knob under it and its button beside the knob; the snapshot button at the right.
+/// While a knob is under the pointer its label shows the value.
+fn single_controls(app: &mut App, ui: &mut Ui, u: usize, l: Lay) {
     let p = ui.painter().clone();
+    let l = l.sub(157.0, 283.0);
+    let l = Lay { x0: l.x0 - 157.0 * l.k, ..l };
     let sp = app.px.fx[u].params.one;
     let labels = fx::info_of(sp.kind).labels;
     for k in 0..2usize {
-        let x = o.x + 193.0 + 112.0 + k as f32 * 68.0;
+        let dx = k as f32 * 88.0;
         let label = labels[k];
+        let kc = l.r(267.0 + dx, 29.0, 16.0, 16.0).center();
+        let lr = l.r(249.0 + dx, 14.0, 56.0, 11.0);
         if label.is_empty() {
-            p.circle_stroke(pos2(x + 13.0, o.y + 37.5), 7.6, Stroke::new(2.4_f32, hex(0x282828)));
-            continue;
+            p.circle_stroke(kc, 6.0, Stroke::new(2.4_f32, hex(0x282828)));
+        } else {
+            // (PITCH, FILTER and the like rest at their centre: the blue runs from there.)
+            let bipolar = matches!(label, "PITCH" | "FILTER" | "SWING" | "LR RATIO" | "LOW / HI CUT" | "SPEED" | "TIME");
+            let (v, active) = fx_knob_r(ui, kc, 6.0, ("fxknob", u, k), sp.knob[k], 0.5, bipolar);
+            if let Some(v) = v {
+                app.px.fx[u].params.one.knob[k] = v;
+            }
+            let shown = v.unwrap_or(sp.knob[k]);
+            p.text(lr.center(), Align2::CENTER_CENTER, if active { fx::single_knob_text(sp.kind, k, shown) } else { label.to_string() }, caps(8.0), WHITE);
         }
-        p.text(pos2(x + 30.0, o.y + 14.0), Align2::CENTER_CENTER, label, caps(8.0), WHITE);
-        // (PITCH, FILTER and the like rest at their centre: the blue runs from there.)
-        let bipolar = matches!(label, "PITCH" | "FILTER" | "SWING" | "LR RATIO" | "LOW / HI CUT" | "SPEED" | "TIME");
-        if let Some(v) = fx_knob(ui, pos2(x + 13.0, o.y + 37.5), ("fxknob", u, k), sp.knob[k], 0.5, bipolar) {
-            app.px.fx[u].params.one.knob[k] = v;
-        }
-        p.text(pos2(x + 44.0, o.y + 37.5), Align2::CENTER_CENTER, knob_text(label, sp.knob[k]), bold(9.0), WHITE);
-    }
-    for k in 0..2usize {
-        let r = Rect::from_min_size(pos2(o.x + 193.0 + 250.0, o.y + 5.0 + k as f32 * 21.0), vec2(56.0, 18.0));
         let label = labels[2 + k];
         if label.is_empty() {
             continue;
         }
+        let mut r = l.r(287.0 + dx + if k == 1 { 5.0 } else { 0.0 }, 28.0 - k as f32, 50.0, 18.0);
+        r.max.x -= 2.0;
         let resp = ui.interact(r, ui.id().with(("fxbtn", u, k)), Sense::click());
         p.rect_filled(r, 2.0, if sp.btn[k] { BLUE } else if resp.hovered() { lighten(BTN) } else { BTN });
         p.text(r.center(), Align2::CENTER_CENTER, label, caps(8.0), WHITE);
@@ -460,7 +629,7 @@ fn single_controls(app: &mut App, ui: &mut Ui, u: usize, o: egui::Pos2) {
     }
     // Snapshot: keeps the two knobs and the two buttons for this effect (LEVEL/DEPTH is not
     // kept, as in rekordbox). Lit while the controls are as saved.
-    let r = Rect::from_min_size(pos2(o.x + 193.0 + 311.0, o.y + 5.0), vec2(24.0, 18.0));
+    let r = l.r(415.0, 2.0, 20.0, 18.0);
     let now: Snap = (sp.knob[0], sp.knob[1], sp.btn[0], sp.btn[1]);
     let saved = app.px.fx[u].snaps[pos(sp.kind)] == Some(now);
     let resp = ui.interact(r, ui.id().with(("fxsnap", u)), Sense::click());
@@ -476,30 +645,47 @@ fn single_controls(app: &mut App, ui: &mut Ui, u: usize, o: egui::Pos2) {
     let _ = resp.on_hover_text("Snapshot: saves the positions of the knobs and buttons for this effect.");
 }
 
-/// The FX row: FX1 in the left half of `r`, FX2 in the right half.
+/// The FX row: FX1 in the left half of `r`, FX2 in the right half; under it the CFX row and,
+/// when MERGE FX is enabled (and `r` is `fx_h` tall), MERGE FX's row.
 pub fn panel(app: &mut App, ui: &mut Ui, r: Rect) {
     let p = ui.painter().clone();
     let full = r;
     // (rekordbox: 3 pt of black above the Beat FX row and between it and the CFX row.)
-    p.rect_filled(Rect::from_min_size(r.min, vec2(r.width(), BEAT_H + 3.0)), 0.0, egui::Color32::BLACK);
-    let r = Rect::from_min_max(pos2(r.min.x, r.min.y + 3.0), pos2(r.max.x, r.min.y + BEAT_H));
-    cfx_row(app, ui, Rect::from_min_max(pos2(full.min.x, full.min.y + BEAT_H + 3.0), full.max));
+    // (Measured on the reference: 1 pt of black, the 49 pt Beat FX row, 3 pt of black, the
+    // 24 pt CFX row at 53.)
+    p.rect_filled(full, 0.0, egui::Color32::BLACK);
+    let r = Rect::from_min_max(pos2(r.min.x, r.min.y + 1.0), pos2(r.max.x, r.min.y + 50.0));
+    // (View > Layout > Effect Panel: BEAT FX, SOUND COLOR FX or both rows.)
+    let (beat_row, color_row) = app.prefs.rb.fx_rows();
+    let top = if beat_row { 53.0 } else { 0.0 };
+    let bottom = Rect::from_min_max(pos2(full.min.x, full.min.y + top), pos2(full.max.x, full.min.y + top + 24.0));
+    if color_row {
+        cfx_row(app, ui, bottom);
+        if app.prefs.fx.mfx.enabled {
+            // MERGE FX's own row under the CFX row.
+            let mrow = Rect::from_min_max(pos2(full.min.x, bottom.max.y + 3.0), pos2(full.max.x, bottom.max.y + 3.0 + 24.0));
+            mfx_row(app, ui, mrow);
+        }
+    }
+    if !beat_row {
+        return;
+    }
     p.rect_filled(r, 0.0, hex(0x1E1E1E));
-    let r = Rect::from_min_size(full.min, vec2(full.width(), BEAT_H));
-    p.rect_filled(Rect::from_min_max(pos2(r.center().x - 0.5, r.min.y), pos2(r.center().x + 0.5, r.max.y)), 0.0, BG);
+    let whole = Lay { x0: full.min.x, y0: full.min.y + 1.0, k: full.width() / 1280.0 };
+    let k = whole.k;
+    p.rect_filled(Rect::from_min_max(pos2(whole.r(0.0, 0.0, 639.0, 0.0).max.x, full.min.y), pos2(whole.r(641.0, 0.0, 1.0, 0.0).min.x, full.min.y + 50.0)), 0.0, BG);
+    let master_release = app.prefs.fx.effect.release_units == 1;
     for u in 0..2usize {
-        let x0 = if u == 0 { r.min.x } else { r.center().x };
-        let y0 = r.min.y;
-        let o = pos2(x0, y0);
-        let at = |x: f32, y: f32, w: f32, h: f32| Rect::from_min_size(pos2(x0 + x, y0 + y), vec2(w, h));
-        p.text(pos2(x0 + 11.0, y0 + 14.0), Align2::LEFT_CENTER, format!("FX{}", u + 1), bold(11.5), hex(0x8C8C8C));
+        let l = whole.sub(if u == 0 { 0.0 } else { 641.0 }, 639.0);
+        let _ = k;
+        p.text(pos2(l.x0 + 10.5, l.y0 + 12.0), Align2::LEFT_CENTER, format!("FX{}", u + 1), bold(12.5), hex(0x8C8C8C));
         // Assign: decks, the sampler (S) and the master (M alone, as in rekordbox: lighting M
         // clears the others, lighting another clears M). Decks 3 and 4 exist in the 4-deck
         // layout.
         let four = app.deck_count() == 4;
         let labels = [("1", Some(0usize)), ("2", Some(1)), ("S", Some(fx::SAMPLER)), ("3", if four { Some(2) } else { None }), ("4", if four { Some(3) } else { None }), ("M", Some(fx::MASTER))];
         for (i, (label, ch)) in labels.iter().enumerate() {
-            let br = at(76.0 + (i % 3) as f32 * 21.0, 10.5 + (i / 3) as f32 * 18.5, 20.0, 17.5);
+            let br = l.r(65.0 + (i % 3) as f32 * 18.0, 8.0 + (i / 3) as f32 * 18.0, 17.0, 17.0);
             let lit = ch.map(|c| app.px.fx[u].params.assign[c]).unwrap_or(false);
             let resp = small(ui, br, ("fxassign", u, i), label, lit, ch.is_some());
             if let Some(c) = ch {
@@ -524,79 +710,78 @@ pub fn panel(app: &mut App, ui: &mut Ui, r: Rect) {
         }
         // Mode: multi (three effects) or single (one effect with five parameters).
         let single = app.px.fx[u].params.single;
-        if mode_button(ui, at(158.0, 8.0, 24.0, 20.0), ("fxmulti", u), 3, !single, "Beat FX multi-mode:\nThis mode allows to use up to three effects simultaneously.") {
+        if mode_button(ui, l.r(134.0, 5.0, 20.0, 20.0).shrink(0.75), ("fxmulti", u), 3, !single, "Beat FX multi-mode:\nThis mode allows to use up to three effects simultaneously.") {
             app.px.fx[u].params.single = false;
         }
-        if mode_button(ui, at(158.0, 28.7, 24.0, 19.0), ("fxsingle", u), 1, single, "Beat FX single-mode:\nThis mode allows to use one effect with five parameters.") {
+        if mode_button(ui, l.r(134.0, 25.0, 20.0, 20.0).shrink(0.75), ("fxsingle", u), 1, single, "Beat FX single-mode:\nThis mode allows to use one effect with five parameters.") {
             app.px.fx[u].params.single = true;
         }
         if single {
-            slot(app, ui, u, 3, o, 192.5);
-            single_controls(app, ui, u, o);
+            slot(app, ui, u, 3, l, 0.0);
+            single_controls(app, ui, u, l);
         } else {
-            for s in 0..3usize {
-                slot(app, ui, u, s, o, 192.5 + s as f32 * 111.0);
+            for (s, dx) in [0.0, 95.0, 188.0].into_iter().enumerate() {
+                slot(app, ui, u, s, l, dx);
             }
         }
 
-        // RELEASE FX: held while the name is pressed.
-        let rk = app.px.fx[u].release_kind.min(2) as usize;
-        let rel_r = at(538.0, 7.0, 78.0, 18.0);
-        let rresp = ui.interact(rel_r, ui.id().with(("fxrel", u)), Sense::click_and_drag());
-        let held = rresp.is_pointer_button_down_on();
-        p.rect_filled(rel_r, 2.0, hex(0x1E1E1E));
-        p.rect_stroke(rel_r, 2.0, Stroke::new(1.0_f32, if held { BLUE } else { hex(0x8C8C8C) }), egui::StrokeKind::Inside);
-        p.text(rel_r.center(), Align2::CENTER_CENTER, fx::RELEASE[rk].0, caps(9.0), if held { hex(0x3C8CFF) } else { WHITE });
-        let ridx = app.px.fx[u].release_idx[rk].min(fx::RELEASE_BEATS.len() - 1);
-        app.px.fx[u].params.release = if held { Some((rk as u8, fx::RELEASE_BEATS[ridx])) } else { None };
-        if held {
-            ui.ctx().request_repaint();
-        }
-        let _ = rresp.on_hover_text("RELEASE FX: on while the button is held.");
-        let rl = at(617.0, 7.0, 20.0, 18.0);
-        let rlresp = ui.interact(rl, ui.id().with(("fxrellist", u)), Sense::click());
-        p.rect_filled(rl, 2.0, if rlresp.hovered() { lighten(BTN) } else { BTN });
-        crate::icons_player::chevron_down(&p, rl.center() + vec2(0.0, 0.5), 1.0, WHITE);
-        crate::ui_browser::dropdown(ui, &rlresp, &format!("fxrelpop{u}"), |ui| {
-            for (i, (name, _)) in fx::RELEASE.iter().enumerate() {
-                if ui.selectable_label(rk == i, *name).clicked() {
-                    app.px.fx[u].release_kind = i as u8;
-                    ui.memory_mut(|m| m.close_popup());
-                }
+        // RELEASE FX: held while the name is pressed. With Unit Number 1 there is one, the
+        // master's, in FX1.
+        let rl = l.sub(441.0, 99.0);
+        if master_release && u == 1 {
+            app.px.fx[u].params.release = None;
+        } else {
+            let rk = app.px.fx[u].release_kind.min(2) as usize;
+            let rel_r = rl.r(15.0, 4.0, 66.0, 18.0).shrink2(vec2(0.5, 0.0));
+            let rresp = ui.interact(rel_r, ui.id().with(("fxrel", u)), Sense::click_and_drag());
+            let held = rresp.is_pointer_button_down_on();
+            p.rect_filled(rel_r, 2.0, hex(0x1E1E1E));
+            p.rect_stroke(rel_r, 2.0, Stroke::new(1.0_f32, if held { BLUE } else { OUTLINE }), egui::StrokeKind::Inside);
+            p.text(rel_r.center(), Align2::CENTER_CENTER, fx::RELEASE[rk].0, caps(8.75), if held { hex(0x3C8CFF) } else { WHITE });
+            let ridx = app.px.fx[u].release_idx[rk].min(fx::RELEASE_BEATS.len() - 1);
+            app.px.fx[u].params.release = if held { Some((rk as u8, fx::RELEASE_BEATS[ridx])) } else { None };
+            if held {
+                ui.ctx().request_repaint();
             }
-        });
-        let rd = ui.interact(at(544.0, 28.0, 16.0, 17.0), ui.id().with(("fxreldown", u)), Sense::click());
-        crate::icons_player::chevron_left(&p, rd.rect.center(), 1.0, if ridx > 0 { WHITE } else { OFF });
-        if rd.clicked() && ridx > 0 {
-            app.px.fx[u].release_idx[rk] = ridx - 1;
-        }
-        p.text(pos2(x0 + 580.0, y0 + 36.5), Align2::CENTER_CENTER, fx::beat_text(fx::RELEASE_BEATS[ridx], false), bold(9.0), WHITE);
-        let ru = ui.interact(at(595.0, 28.0, 16.0, 17.0), ui.id().with(("fxrelup", u)), Sense::click());
-        crate::icons_player::chevron_right(&p, ru.rect.center(), 1.0, if ridx + 1 < fx::RELEASE_BEATS.len() { WHITE } else { OFF });
-        if ru.clicked() && ridx + 1 < fx::RELEASE_BEATS.len() {
-            app.px.fx[u].release_idx[rk] = ridx + 1;
+            let _ = rresp.on_hover_text(if master_release { "MASTER RELEASE FX: on while the button is held." } else { "RELEASE FX: on while the button is held." });
+            let mut lr = rl.r(81.0, 4.0, 16.0, 18.0).shrink2(vec2(0.0, 0.5));
+            lr.min.x += 1.5;
+            let rlresp = ui.interact(lr, ui.id().with(("fxrellist", u)), Sense::click());
+            p.rect_filled(lr, 2.0, if rlresp.hovered() { lighten(BTN) } else { BTN });
+            crate::icons_player::chevron_down(&p, lr.center(), 0.85, WHITE);
+            crate::ui_browser::dropdown(ui, &rlresp, &format!("fxrelpop{u}"), |ui| {
+                for (i, (name, _)) in fx::RELEASE.iter().enumerate() {
+                    if ui.selectable_label(rk == i, *name).clicked() {
+                        app.px.fx[u].release_kind = i as u8;
+                        ui.memory_mut(|m| m.close_popup());
+                    }
+                }
+            });
+            let rd = ui.interact(rl.r(20.0, 26.0, 15.0, 16.0), ui.id().with(("fxreldown", u)), Sense::click());
+            crate::icons_player::chevron_left(&p, pos2(rd.rect.min.x + 8.5, rd.rect.center().y), 1.15, if ridx > 0 { ARROW } else { ARROW_OFF });
+            if rd.clicked() && ridx > 0 {
+                app.px.fx[u].release_idx[rk] = ridx - 1;
+            }
+            p.text(rl.r(22.0, 26.0, 56.0, 16.0).center() - vec2(0.0, 0.5), Align2::CENTER_CENTER, fx::beat_text(fx::RELEASE_BEATS[ridx], false), bold(8.5), WHITE);
+            let ru = ui.interact(rl.r(65.0, 26.0, 15.0, 16.0), ui.id().with(("fxrelup", u)), Sense::click());
+            crate::icons_player::chevron_right(&p, pos2(ru.rect.min.x + 6.0, ru.rect.center().y), 1.15, if ridx + 1 < fx::RELEASE_BEATS.len() { ARROW } else { ARROW_OFF });
+            if ru.clicked() && ridx + 1 < fx::RELEASE_BEATS.len() {
+                app.px.fx[u].release_idx[rk] = ridx + 1;
+            }
         }
 
         // FX tempo: AUTO (each channel's own tempo) or TAP.
+        let bl = l.sub(540.0, 99.0);
         let auto = app.px.fx[u].auto;
-        let ar = at(644.5, 6.5, 105.5, 18.5);
-        let aresp = ui.interact(ar, ui.id().with(("fxauto", u)), Sense::click());
-        p.rect_filled(ar, 2.0, if auto { BLUE } else if aresp.hovered() { lighten(BTN) } else { hex(0x1E1E1E) });
-        if !auto {
-            p.rect_stroke(ar, 2.0, Stroke::new(1.0_f32, hex(0x8C8C8C)), egui::StrokeKind::Inside);
-        }
-        p.text(ar.center(), Align2::CENTER_CENTER, "AUTO", caps(9.0), WHITE);
-        if aresp.clicked() {
+        let mut ar = bl.r(6.0, 3.5, 88.0, 18.0).shrink2(vec2(0.5, 1.0));
+        ar.max.x -= 0.75;
+        if choice(ui, ar, ("fxauto", u), "AUTO", auto).clicked() {
             app.px.fx[u].auto = true;
         }
-        let tr = at(645.0, 28.0, 105.0, 18.0);
-        let tresp = ui.interact(tr, ui.id().with(("fxtap", u)), Sense::click());
-        p.rect_filled(tr, 2.0, if !auto { BLUE } else if tresp.hovered() { lighten(BTN) } else { hex(0x1E1E1E) });
-        if auto {
-            p.rect_stroke(tr, 2.0, Stroke::new(1.0_f32, hex(0x8C8C8C)), egui::StrokeKind::Inside);
-        }
         let label = if auto { "TAP".to_string() } else { format!("TAP  {:.1}", app.px.fx[u].tap_bpm) };
-        p.text(tr.center(), Align2::CENTER_CENTER, label, caps(9.0), WHITE);
+        let mut tr = bl.r(6.0, 25.0, 88.0, 18.0).shrink2(vec2(0.5, 1.0));
+        tr.max.x -= 0.75;
+        let tresp = choice(ui, tr, ("fxtap", u), &label, !auto);
         if crate::ui_player::press_fired(ui, &tresp) {
             let now = ui.input(|i| i.time);
             let f = &mut app.px.fx[u];
@@ -623,98 +808,99 @@ fn color_knob(app: &mut App, ui: &mut Ui, kc: egui::Pos2, c: usize) {
     }
 }
 
-/// The CFX row. Single mode: DEFAULT / USER, the effect, PARAM, and a COLOR knob per channel
-/// in rekordbox's order S, 3, 1, 2, 4, M (measured on reference performance/06 at 1512 pt).
-/// Multi mode: per channel an effect (name = on/off, list) and its COLOR knob.
+/// The CFX row at rekordbox's places. Single mode: DEFAULT / USER, the effect, PARAM, and a
+/// COLOR knob per channel in the order S, 3, 1, 2, 4, M. Multi mode: PARAM, then per channel
+/// its label, its effect (name = on/off, list) and its COLOR knob.
 fn cfx_row(app: &mut App, ui: &mut Ui, r: Rect) {
     let p = ui.painter().clone();
     p.rect_filled(r, 0.0, hex(0x1E1E1E));
-    let (x0, cy) = (r.min.x, r.center().y);
-    let k = r.width() / 1512.0;
-    let at = |x: f32, w: f32, h: f32| Rect::from_center_size(pos2(x0 + x * k, cy), vec2(w, h));
-    p.text(pos2(x0 + 11.0, cy), Align2::LEFT_CENTER, "CFX", bold(11.5), hex(0x8C8C8C));
+    let l = Lay { x0: r.min.x, y0: r.center().y - 12.0, k: r.width() / 1280.0 };
+    let cy = r.center().y;
+    p.text(pos2(r.min.x + 10.5, cy - 0.5), Align2::LEFT_CENTER, "CFX", bold(12.5), hex(0x8C8C8C));
     let multi = app.px.fxx.cfx_multi;
-    if mode_button(ui, at(93.0, 22.0, 18.5), "cfxmulti", 3, multi, "CFX multi-mode: an effect for each channel.") {
+    // (rekordbox's multi layout has the two mode buttons 26 x 24 at 70 and 101; the single
+    // layout 18 x 18 at 70 and 90.)
+    let (m1, m2) = if multi { (l.r(70.0, 3.0, 26.0, 18.0), l.r(101.0, 3.0, 26.0, 18.0)) } else { (l.r(70.0, 3.0, 18.0, 18.0), l.r(90.0, 3.0, 18.0, 18.0)) };
+    if mode_button(ui, m1.shrink2(vec2(0.5, 0.0)), "cfxmulti", 3, multi, "CFX multi-mode: an effect for each channel.") {
         app.px.fxx.cfx_multi = true;
     }
-    if mode_button(ui, at(116.75, 22.5, 18.5), "cfxsingle", 1, !multi, "CFX single-mode: one effect for all channels.") {
+    if mode_button(ui, m2.shrink2(vec2(0.5, 0.0)), "cfxsingle", 1, !multi, "CFX single-mode: one effect for all channels.") {
         app.px.fxx.cfx_multi = false;
     }
     // S (the sampler deck) is live when "Apply CFX to Sampler" is ticked in Preferences >
     // Controller > Effect; decks 3 and 4 in the 4-deck layout.
     let four = app.deck_count() == 4;
     let smp = if app.prefs.sampler.cfx_on_sampler { Some(fx::SAMPLER) } else { None };
-    let channels = [("S", 647.0, smp), ("3", 742.0, if four { Some(2usize) } else { None }), ("1", 836.0, Some(0)), ("2", 929.0, Some(1)), ("4", 1024.0, if four { Some(3) } else { None }), ("M", 1119.0, Some(4))];
+    let channels = [("S", smp), ("3", if four { Some(2usize) } else { None }), ("1", Some(0)), ("2", Some(1)), ("4", if four { Some(3) } else { None }), ("M", Some(4))];
     if multi {
-        // Six cells across the row (laid out without a reference picture).
-        for (i, (label, _, ch)) in channels.into_iter().enumerate() {
-            let cx = 150.0 + i as f32 * 224.0;
-            p.text(pos2(x0 + (cx + 8.0) * k, cy), Align2::CENTER_CENTER, label, caps(10.0), if ch.is_some() { WHITE } else { OFF });
-            let kc = pos2(x0 + (cx + 150.0) * k, cy);
-            let Some(c) = ch else {
+        // PARAM is the shown effect's... each effect keeps its own; the knob here sets the
+        // one of the effect last touched (FILTER until then).
+        let pk = app.px.cfx_kind as usize % 9;
+        p.text(l.r(143.0, 1.0, 42.0, 22.0).center(), Align2::CENTER_CENTER, "PARAM", caps(9.0), WHITE);
+        if let Some(v) = fx_knob(ui, l.r(185.0, 1.0, 22.0, 22.0).center(), "cfxparam", app.px.fxx.cfx_params[pk], 0.5, false) {
+            app.px.fxx.cfx_params[pk] = v;
+        }
+        for (i, (label, ch)) in channels.into_iter().enumerate() {
+            let c = Lay { x0: l.x0 + [227.0, 366.0, 505.0, 644.0, 783.0, 922.0][i] * l.k, ..l };
+            p.text(c.r(0.0, 0.0, 20.0, 24.0).center(), Align2::CENTER_CENTER, label, caps(10.0), if ch.is_some() { WHITE } else { OFF });
+            let kc = c.r(110.0, 1.0, 22.0, 22.0).center();
+            let Some(ch) = ch else {
                 p.circle_stroke(kc, 7.6, Stroke::new(2.4_f32, hex(0x282828)));
                 continue;
             };
-            let kind = app.px.fxx.cfx_multi_kind[c];
-            let on = app.px.fxx.cfx_multi_on[c];
-            let er = at(cx + 62.0, 80.0, 18.0);
-            let eresp = ui.interact(er, ui.id().with(("cfxmname", c)), Sense::click());
+            let kind = app.px.fxx.cfx_multi_kind[ch];
+            let on = app.px.fxx.cfx_multi_on[ch];
+            let er = c.r(21.0, 3.0, 68.0, 18.0).shrink2(vec2(0.5, 0.0));
+            let eresp = ui.interact(er, ui.id().with(("cfxmname", ch)), Sense::click());
             p.rect_filled(er, 2.0, if on { BLUE } else if eresp.hovered() { lighten(BTN) } else { BTN });
             p.text(er.center(), Align2::CENTER_CENTER, crate::cfx::name(kind), caps(9.0), WHITE);
             if eresp.clicked() {
-                app.px.fxx.cfx_multi_on[c] = !on;
+                app.px.fxx.cfx_multi_on[ch] = !on;
+                app.px.cfx_kind = kind;
             }
             let _ = eresp.on_hover_text("Turns the effect on/off.");
-            let lr = at(cx + 114.0, 20.0, 18.0);
-            let lresp = ui.interact(lr, ui.id().with(("cfxmlist", c)), Sense::click());
+            let lr = c.r(89.0, 3.0, 18.0, 18.0).shrink2(vec2(0.5, 0.0));
+            let lresp = ui.interact(lr, ui.id().with(("cfxmlist", ch)), Sense::click());
             p.rect_filled(lr, 2.0, if lresp.hovered() { lighten(BTN) } else { BTN });
             crate::icons_player::chevron_down(&p, lr.center() + vec2(0.0, 0.5), 1.0, WHITE);
-            crate::ui_browser::dropdown(ui, &lresp, &format!("cfxmpop{c}"), |ui| {
+            crate::ui_browser::dropdown(ui, &lresp, &format!("cfxmpop{ch}"), |ui| {
                 for (name, kd) in crate::cfx::LIST {
                     let Some(kd) = kd else { continue };
                     if ui.selectable_label(kind == kd, name).clicked() {
-                        app.px.fxx.cfx_multi_kind[c] = kd;
+                        app.px.fxx.cfx_multi_kind[ch] = kd;
+                        app.px.cfx_kind = kd;
                         ui.memory_mut(|m| m.close_popup());
                     }
                 }
             });
-            color_knob(app, ui, kc, c);
+            color_knob(app, ui, kc, ch);
         }
         return;
     }
     // DEFAULT (the mixer's effects: FILTER without hardware) / USER (the chosen effect).
     let user = app.px.cfx_user;
-    let dr = at(218.25, 79.5, 18.5);
-    let dresp = ui.interact(dr, ui.id().with("cfxdefault"), Sense::click());
-    p.rect_filled(dr, 2.0, if !user { BLUE } else { hex(0x1E1E1E) });
-    if user {
-        p.rect_stroke(dr, 2.0, Stroke::new(1.0_f32, hex(0x8C8C8C)), egui::StrokeKind::Inside);
-    }
-    p.text(dr.center(), Align2::CENTER_CENTER, "DEFAULT", caps(9.0), WHITE);
-    if dresp.clicked() {
+    if choice(ui, l.r(152.0, 3.5, 66.0, 16.0).shrink2(vec2(0.5, 0.0)), "cfxdefault", "DEFAULT", !user).clicked() {
         app.px.cfx_user = false;
         app.px.cfx_param = app.px.fxx.cfx_params[crate::cfx::DEFAULT_LIST[0] as usize];
     }
-    let ur = at(298.5, 79.0, 18.5);
-    let uresp = ui.interact(ur, ui.id().with("cfxuser"), Sense::click());
-    p.rect_filled(ur, 2.0, if user { BLUE } else { hex(0x1E1E1E) });
-    if !user {
-        p.rect_stroke(ur, 2.0, Stroke::new(1.0_f32, hex(0x8C8C8C)), egui::StrokeKind::Inside);
-    }
-    p.text(ur.center(), Align2::CENTER_CENTER, "USER", caps(9.0), WHITE);
-    if uresp.clicked() {
+    if choice(ui, l.r(220.0, 3.5, 66.0, 16.0).shrink2(vec2(0.5, 0.0)), "cfxuser", "USER", user).clicked() {
         app.px.cfx_user = true;
         app.px.cfx_param = app.px.fxx.cfx_params[app.px.cfx_kind as usize % 9];
     }
     // The effect: FILTER in DEFAULT; in USER a click lists the nine types.
     let kind = if user { app.px.cfx_kind } else { crate::cfx::DEFAULT_LIST[0] };
-    let er = at(414.25, 67.5, 18.0);
+    let mut er = l.r(323.0, 4.0, 58.0, 16.0);
+    er.min.x += 1.0;
+    er.max.x -= 4.0;
     let eresp = ui.interact(er, ui.id().with("cfxeffect"), Sense::click());
     p.rect_filled(er, 2.0, hex(0x1E1E1E));
-    p.rect_stroke(er, 2.0, Stroke::new(1.0_f32, BLUE), egui::StrokeKind::Inside);
+    p.rect_stroke(er, 2.0, Stroke::new(0.75_f32, BLUE), egui::StrokeKind::Inside);
     p.text(er.center(), Align2::CENTER_CENTER, crate::cfx::name(kind), caps(9.0), WHITE);
     if user {
-        crate::ui_browser::dropdown(ui, &eresp, "cfxpop", |ui| {
+        crate::icons_player::chevron_down(&p, l.r(381.0, 4.0, 16.0, 16.0).center() + vec2(0.0, 0.5), 1.0, WHITE);
+        let aresp = ui.interact(l.r(381.0, 4.0, 16.0, 16.0), ui.id().with("cfxeffectlist"), Sense::click());
+        let resp = eresp.union(aresp);
+        crate::ui_browser::dropdown(ui, &resp, "cfxpop", |ui| {
             for (name, kd) in crate::cfx::LIST {
                 let Some(kd) = kd else { continue };
                 if ui.selectable_label(kind == kd, name).clicked() {
@@ -726,14 +912,14 @@ fn cfx_row(app: &mut App, ui: &mut Ui, r: Rect) {
             }
         });
     }
-    p.text(pos2(x0 + 543.0 * k, cy), Align2::CENTER_CENTER, "PARAM", caps(9.0), WHITE);
-    if let Some(v) = fx_knob(ui, pos2(x0 + 581.0 * k, cy), "cfxparam", app.px.cfx_param, 0.5, false) {
+    p.text(l.r(439.0, 1.0, 42.0, 22.0).center(), Align2::CENTER_CENTER, "PARAM", caps(9.0), WHITE);
+    if let Some(v) = fx_knob(ui, l.r(481.0, 1.0, 22.0, 22.0).center(), "cfxparam", app.px.cfx_param, 0.5, false) {
         app.px.cfx_param = v;
         app.px.fxx.cfx_params[kind as usize % 9] = v;
     }
-    for (label, x, ch) in channels {
-        p.text(pos2(x0 + x * k, cy), Align2::CENTER_CENTER, label, caps(10.0), if ch.is_some() { WHITE } else { OFF });
-        let kc = pos2(x0 + (x + 27.0) * k, cy);
+    for (i, (label, ch)) in channels.into_iter().enumerate() {
+        p.text(l.r([538.0, 618.0, 698.0, 777.0, 857.0, 937.0][i], 0.0, 21.0, 24.0).center(), Align2::CENTER_CENTER, label, caps(10.0), if ch.is_some() { WHITE } else { OFF });
+        let kc = l.r([560.0, 640.0, 720.0, 799.0, 879.0, 959.0][i], 1.0, 22.0, 22.0).center();
         match ch {
             Some(c) => color_knob(app, ui, kc, c),
             None => {
@@ -742,6 +928,300 @@ fn cfx_row(app: &mut App, ui: &mut Ui, r: Rect) {
         }
     }
 }
+
+/// MERGE FX's row: per unit (left for decks 1 / 3, right for decks 2 / 4) the deck buttons
+/// (18 x 18 at 64 and 84), the MERGE FX selector (86 wide at 120), ON and the knob; at the
+/// right end the sample volume and the settings. The first three are rekordbox's places
+/// (`MFXUnitPanel::resized`); where its ON button and knob sit was not read, and there is no
+/// capture of this panel.
+fn mfx_row(app: &mut App, ui: &mut Ui, r: Rect) {
+    use crate::mfx;
+    let p = ui.painter().clone();
+    p.rect_filled(r, 0.0, hex(0x1E1E1E));
+    let l = Lay { x0: r.min.x, y0: r.center().y - 12.0, k: r.width() / 1280.0 };
+    p.text(pos2(r.min.x + 10.5, r.center().y - 0.5), Align2::LEFT_CENTER, "MFX", bold(12.5), hex(0x8C8C8C));
+    let four = app.deck_count() == 4;
+    for u in 0..2usize {
+        let h = Lay { x0: l.x0 + u as f32 * 400.0 * l.k, ..l };
+        for (i, upper) in [false, true].into_iter().enumerate() {
+            let deck = u + if upper { 2 } else { 0 };
+            let lit = app.prefs.fx.mfx.upper[u] == upper;
+            let resp = small(ui, h.r(64.0 + i as f32 * 20.0, 3.0, 18.0, 18.0), ("mfxdeck", u, i), &format!("{}", deck + 1), lit, !upper || four);
+            if resp.clicked() && (!upper || four) && !lit && !app.px.fxx.mfx.units[u].on {
+                app.prefs.fx.mfx.upper[u] = upper;
+                app.save_prefs();
+            }
+        }
+        let sel = app.prefs.fx.mfx.select[u].min(3) as usize;
+        let sr = h.r(120.0, 3.0, 86.0, 18.0);
+        let sresp = ui.interact(sr, ui.id().with(("mfxsel", u)), Sense::click());
+        p.rect_filled(sr, 2.0, if sresp.hovered() { lighten(BTN) } else { BTN });
+        p.text(pos2(sr.min.x + 6.0, sr.center().y), Align2::LEFT_CENTER, format!("MERGE FX {}", sel + 1), caps(9.0), WHITE);
+        crate::icons_player::chevron_down(&p, pos2(sr.max.x - 8.0, sr.center().y + 0.5), 1.0, WHITE);
+        let names: Vec<String> = (0..4).map(|i| format!("MERGE FX {}   {}", i + 1, mfx::PRESETS[app.prefs.fx.mfx.preset[i].min(7) as usize].0)).collect();
+        crate::ui_browser::dropdown(ui, &sresp, &format!("mfxselpop{u}"), |ui| {
+            for (i, n) in names.iter().enumerate() {
+                if ui.selectable_label(sel == i, n).clicked() {
+                    app.prefs.fx.mfx.select[u] = i as u8;
+                    app.save_prefs();
+                    ui.memory_mut(|m| m.close_popup());
+                }
+            }
+        });
+        let on = app.px.fxx.mfx.units[u].on;
+        let or = h.r(212.0, 3.0, 44.0, 18.0);
+        let oresp = ui.interact(or, ui.id().with(("mfxon", u)), Sense::click());
+        let busy = app.px.fxx.mfx.units[u].phase_on && !on;
+        p.rect_filled(or, 2.0, if on { BLUE } else if busy { hex(0x1E468C) } else if oresp.hovered() { lighten(BTN) } else { BTN });
+        p.text(or.center(), Align2::CENTER_CENTER, "ON", caps(9.0), WHITE);
+        if oresp.on_hover_text("MERGE FX ON/OFF (Shift + click: cancel)").clicked() {
+            let shift = ui.input(|i| i.modifiers.shift);
+            mfx::toggle(app, u, shift);
+        }
+        let kv = app.px.fxx.mfx.units[u].knob;
+        if let Some(v) = fx_knob(ui, h.r(266.0, 1.0, 22.0, 22.0).center(), ("mfxknob", u), 0.5 + 0.5 * kv, 0.5, true) {
+            if on {
+                app.px.fxx.mfx.units[u].knob = (v - 0.5) * 2.0;
+            }
+        }
+        let comps = app.prefs.fx.mfx.comps[sel];
+        p.text(pos2(h.r(296.0, 0.0, 1.0, 24.0).min.x, r.center().y), Align2::LEFT_CENTER, format!("{} + {}", mfx::name(comps[0]), mfx::name(comps[1])), FontId::proportional(8.5), DIM2);
+    }
+    // Sample volume (-12 .. +12 dB) and the settings.
+    let vol = app.prefs.fx.mfx.volume;
+    p.text(l.r(1092.0, 0.0, 60.0, 24.0).center(), Align2::CENTER_CENTER, "SAMPLE VOL", caps(8.0), WHITE);
+    if let Some(v) = fx_knob(ui, l.r(1160.0, 1.0, 22.0, 22.0).center(), "mfxvol", (vol + 12.0) / 24.0, 0.5, true) {
+        app.prefs.fx.mfx.volume = ((v * 24.0 - 12.0) * 10.0).round() / 10.0;
+        app.px.fxx.pending.get_or_insert_with(std::time::Instant::now);
+    }
+    p.text(l.r(1186.0, 0.0, 48.0, 24.0).center(), Align2::CENTER_CENTER, format!("{vol:+.1}dB"), bold(8.5), WHITE);
+    let gr = l.r(1251.0, 3.0, 18.0, 18.0);
+    let gresp = ui.interact(gr, ui.id().with("mfxsettings"), Sense::click());
+    p.rect_filled(gr, 2.0, if gresp.hovered() { lighten(BTN) } else { BTN });
+    let c = gr.center();
+    p.circle_stroke(c, 3.2, Stroke::new(1.6_f32, WHITE));
+    for i in 0..6 {
+        let a = i as f32 * std::f32::consts::TAU / 6.0;
+        p.line_segment([c + vec2(a.cos(), a.sin()) * 4.0, c + vec2(a.cos(), a.sin()) * 5.6], Stroke::new(1.6_f32, WHITE));
+    }
+    crate::ui_browser::dropdown(ui, &gresp, "mfxsettingspop", |ui| {
+        // "MERGE FX Settings": for each of MERGE FX 1..4 a preset and its four parts.
+        ui.set_min_width(640.0);
+        ui.label(egui::RichText::new("MERGE FX Settings").strong());
+        egui::Grid::new("mfxgrid").num_columns(6).spacing([8.0, 4.0]).show(ui, |ui| {
+            ui.label("");
+            ui.label("PRESET");
+            for (title, _) in mfx::COLUMNS {
+                ui.label(title);
+            }
+            ui.end_row();
+            for i in 0..4usize {
+                ui.label(format!("MERGE FX {}", i + 1));
+                let cur = app.prefs.fx.mfx.preset[i].min(7) as usize;
+                let custom = app.prefs.fx.mfx.comps[i] != mfx::PRESETS[cur].1;
+                egui::ComboBox::from_id_salt(("mfxpreset", i)).width(110.0).selected_text(if custom { format!("{} *", mfx::PRESETS[cur].0) } else { mfx::PRESETS[cur].0.to_string() }).show_ui(ui, |ui| {
+                    for (k, (name, comps)) in mfx::PRESETS.iter().enumerate() {
+                        if ui.selectable_label(cur == k && !custom, *name).clicked() {
+                            app.prefs.fx.mfx.preset[i] = k as u8;
+                            app.prefs.fx.mfx.comps[i] = *comps;
+                            app.save_prefs();
+                        }
+                    }
+                });
+                for (col, (_, ids)) in mfx::COLUMNS.iter().enumerate() {
+                    let id = app.prefs.fx.mfx.comps[i][col];
+                    egui::ComboBox::from_id_salt(("mfxcomp", i, col)).width(120.0).selected_text(mfx::name(id)).show_ui(ui, |ui| {
+                        for k in ids.iter() {
+                            if ui.selectable_label(id == *k, mfx::name(*k)).clicked() {
+                                app.prefs.fx.mfx.comps[i][col] = *k;
+                                app.save_prefs();
+                            }
+                        }
+                    });
+                }
+                if ui.button("RESET").clicked() {
+                    app.prefs.fx.mfx.comps[i] = mfx::PRESETS[cur].1;
+                    app.save_prefs();
+                }
+                ui.end_row();
+            }
+        });
+    });
+}
+
+/// Preferences > Controller > Effect, after rekordbox 7.2.19 (reference preferences/09):
+/// RELEASE FX (Unit Number 1 / 2, Apply RELEASE FX on CFX) and MERGE FX (Enable MERGE FX,
+/// Stop playing the operating deck after MERGE FX finishes). The CFX card after them is the
+/// row rekordbox shows with hardware that has a MIC COLOR knob; recordbox has that knob on
+/// screen (S in the CFX row).
+pub fn prefs_effect_page(app: &mut App, ui: &mut Ui) {
+    use crate::ui_kit as kit;
+    let mut changed = false;
+    kit::card(ui, "RELEASE FX", |ui| {
+        kit::sub_help(ui, "Unit Number", Some("1: one RELEASE FX, applied to the master output (MASTER RELEASE FX).\n2: a RELEASE FX in each of FX1 and FX2, applied to the channels the unit is assigned to."));
+        for n in [1u8, 2] {
+            if kit::radio(ui, app.prefs.fx.effect.release_units == n, &n.to_string()) {
+                app.prefs.fx.effect.release_units = n;
+                changed = true;
+            }
+        }
+        kit::separator(ui);
+        // (This switch stays at the radios' indent, as in the reference.)
+        kit::indent(ui, 84.0);
+        changed |= kit::toggle(ui, &mut app.prefs.fx.effect.release_on_cfx, "Apply RELEASE FX on CFX");
+        // (Measured on the reference: this card is 196 pt high, the next one 140 pt.)
+        ui.add_space(-4.5);
+    });
+    kit::card(ui, "MERGE FX", |ui| {
+        changed |= kit::toggle(ui, &mut app.prefs.fx.mfx.enabled, "Enable MERGE FX");
+        kit::separator(ui);
+        changed |= kit::toggle(ui, &mut app.prefs.fx.mfx.stop_deck, "Stop playing the operating deck after MERGE FX finishes");
+        ui.add_space(-0.5);
+    });
+    kit::card(ui, "CFX", |ui| {
+        changed |= kit::toggle(ui, &mut app.prefs.sampler.cfx_on_sampler, "Apply CFX to Sampler using MIC COLOR control knob.");
+        kit::note(ui, "The S knob of the CFX row in the FX panel then acts on the sampler deck.");
+    });
+    if changed {
+        app.save_prefs();
+    }
+}
+
+/// The scripted run of the FX panel (`PREPDECK_SHOT_VIEW=perffx2` with
+/// `PREPDECK_SHOT_PLAYER=perftest`): single mode, CFX multi mode, MERGE FX and the PAD FX
+/// pads, with real pointer events at the places the controls are drawn (1512 pt wide).
+pub fn selftest_steps(app: &App) -> Vec<(&'static str, egui::Pos2, egui::Pos2)> {
+    let k = 1512.0 / 1280.0;
+    let top = 28.0 + 3.0;
+    let (y1, y2, ya, cy) = (top + 11.0, top + 37.0, top + 16.0, 28.0 + 66.0);
+    // (MERGE FX's row sits under the CFX row.)
+    let my = cy + MFX_ROW_H;
+    let p = |x: f32, y: f32| (pos2(x * k, y), pos2(x * k, y));
+    let st = |n: &'static str, (a, b): (egui::Pos2, egui::Pos2)| (n, a, b);
+    let pad = |i: usize| { let c = app.px.fxx.pad.rects[0][i].center(); (c, c) };
+    vec![
+        st("FX1 assign deck 1", p(73.0, ya)),
+        st("FX1 single mode", p(144.0, top + 35.0)),
+        st("FX1 single effect on (DELAY)", p(198.0, y1)),
+        ("FX1 single knob 1 up", pos2(275.0 * k, y2), pos2(275.0 * k, y2 - 30.0)),
+        st("FX1 single button 1 (LOW CUT)", p(312.0, y2)),
+        st("FX1 single beat up", p(242.5, y2)),
+        st("FX1 snapshot", p(425.0, y1)),
+        st("FX1 multi mode", p(144.0, top + 15.0)),
+        st("FX1 slot 3 (SPIRAL) on", p(163.0 + 188.0 + 35.0, y1)),
+        st("FX1 slot 3 beat down", p(190.0 + 188.0 + 7.5, y2)),
+        st("FX2 single mode", p(641.0 + 144.0, top + 35.0)),
+        st("CFX multi mode", p(79.0, cy)),
+        st("CFX multi: deck 1's effect off", p(505.0 + 55.0, cy)),
+        st("CFX multi: deck 1's effect on", p(505.0 + 55.0, cy)),
+        ("CFX multi: deck 1's COLOR to the right", pos2((505.0 + 121.0) * k, cy), pos2((505.0 + 121.0) * k, cy - 40.0)),
+        st("CFX single mode", p(114.0, cy)),
+        st("CFX multi mode again (deck 1 keeps its COLOR)", p(79.0, cy)),
+        ("CFX multi: deck 1's COLOR back to the centre", pos2((505.0 + 121.0) * k, cy), pos2((505.0 + 121.0) * k, cy + 40.0)),
+        st("FX1 single mode again (snapshot kept)", p(144.0, top + 35.0)),
+        st("FX1 single effect off", p(198.0, y1)),
+        // PAD FX on deck 1 (standard preset, PAD FX1): pad 5 ECHO 1/4, pad 4 V.BRAKE.
+        st("FXCALL:padfx deck 1 shows PAD FX", p(0.0, 0.0)),
+        st("PAD FX pad 5 (ECHO 1/4) held", pad(4)),
+        st("PAD FX pad 1 (ROLL 1/2) held", pad(0)),
+        st("PAD FX pad 4 (V.BRAKE 3/4, release) held", pad(3)),
+        st("PAD FX bank 2", pad(9)),
+        st("PAD FX pad 5 of bank 2 (REV ROLL 1/16) held", pad(4)),
+        st("PAD FX edit mode on", pad(10)),
+        st("PAD FX edit mode off", pad(10)),
+        st("PAD FX bank 1", pad(8)),
+        st("PAD FX page 9 - 16", pad(11)),
+        st("PAD FX pad 9 (TRANS 1/2) held", pad(0)),
+        st("PAD FX page 1 - 8", pad(11)),
+        // MERGE FX: enabled in Preferences, its row shown; unit 1 (deck 1, MERGE FX 1 = SNARE
+        // RISER) on, the knob up, off again: release (2.5 s), drop, deck 1 stops.
+        st("FXCALL:mfx enabled and its row shown", p(0.0, 0.0)),
+        st("MERGE FX unit 1 ON", p(234.0, my)),
+        ("MERGE FX unit 1 knob to the right", pos2(277.0 * k, my), pos2(277.0 * k, my - 50.0)),
+        st("FXCALL:wait while it builds", p(0.0, 0.0)),
+        st("PAD FX pad 5 while MERGE FX is on (refused)", pad(4)),
+        st("MERGE FX unit 1 OFF (release starts)", p(234.0, my)),
+        st("FXCALL:wait 1 (release)", p(0.0, 0.0)),
+        st("FXCALL:wait 2 (release)", p(0.0, 0.0)),
+        st("FXCALL:wait 3 (release)", p(0.0, 0.0)),
+        st("FXCALL:wait 4 (drop: deck 1 stopped)", p(0.0, 0.0)),
+        st("FXCALL:wait 5 (at rest)", p(0.0, 0.0)),
+        st("FXCALL:play deck 1 again", p(0.0, 0.0)),
+        st("MERGE FX unit 1 ON again", p(234.0, my)),
+        st("FXCALL:cancel unit 1 (Shift + ON)", p(0.0, 0.0)),
+        st("FXCALL:wait 6 (cancelled: no drop)", p(0.0, 0.0)),
+    ]
+}
+
+/// A step of the scripted run that is not a pointer event.
+pub fn selftest_call(app: &mut App, name: &str, f: u32, raw: &mut egui::RawInput) {
+    if name.contains("wait") {
+        // (About 0.65 s a step, so the audio, which runs in real time, gets somewhere.)
+        std::thread::sleep(std::time::Duration::from_millis(16));
+    }
+    if f == 0 {
+        raw.events.push(egui::Event::PointerMoved(pos2(700.0, 500.0)));
+    }
+    if f == 3 {
+        if name.contains("padfx deck 1") {
+            app.px.pad_mode[0] = crate::ui_padfx::PAD_FX;
+        } else if name.contains("mfx enabled") {
+            app.prefs.fx.mfx.enabled = true;
+            app.px.fxx.mfx.show = true;
+        } else if name.contains("play deck 1") {
+            app.with_deck(0, |a| {
+                if !a.player.state.lock().playing {
+                    a.play_pause();
+                }
+            });
+        } else if name.contains("cancel unit 1") {
+            crate::mfx::toggle(app, 0, true);
+        }
+    }
+    if f == 30 {
+        eprintln!("perftest: {name}: {}", selftest_state(app));
+    }
+}
+
+/// PAD FX and MERGE FX as the interface and the audio thread hold them.
+pub fn selftest_state(app: &App) -> String {
+    let d = &app.px.fxx.pad.decks[0];
+    let m = &app.px.fxx.mfx.units[0];
+    let audio = match fx::RACK.lock().as_ref() {
+        Some(r) => {
+            let s = r.pad_set[0];
+            format!(
+                "pad unit made {} beat {:?} colour {:?} release {:?} | merge {} | rack in use {}",
+                r.has_pad(0),
+                s.beat.map(|b| (fx::name(b.kind), b.value, (b.level * 100.0).round())),
+                s.color,
+                s.release,
+                r.merge.as_ref().map(|e| format!("{:?} knob {:.2} drops {}", e.phase(0), e.cmd[0].knob, e.dropped[0])).unwrap_or("not made".into()),
+                r.active()
+            )
+        }
+        None => "no rack".into(),
+    };
+    format!(
+        "PAD FX deck 1: mode {} bank {} page {} edit {} held {:?} lit beat {:?} colour {:?} release {:?} slip {:?} | MERGE FX: enabled {} unit 1 on {} knob {:.2} busy {} | deck 1 playing {} | audio: {audio} | toast {:?}",
+        app.px.pad_mode[0] == crate::ui_padfx::PAD_FX,
+        app.prefs.fx.padfx.bank[0] + 1,
+        app.deck_of(0).x.pad_page + 1,
+        d.edit,
+        d.held,
+        d.beat,
+        d.color,
+        d.release,
+        d.slip,
+        app.prefs.fx.mfx.enabled,
+        m.on,
+        m.knob,
+        m.phase_on,
+        app.player.decks[0].lock().playing,
+        app.toasts.last().map(|t| t.text.clone())
+    )
+}
+
 
 #[cfg(test)]
 mod tests {
@@ -780,7 +1260,7 @@ mod tests {
         u.set_kind(0, Kind::Trans);
         u.set_kind(0, Kind::Helix);
         assert_eq!(u.idx[0], 2);
-        let all = FxSaved { units: [u.saved(), UnitSaved::default()], cfx: CfxSaved { multi_shown: true, user: true, user_fx: 6, params: [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9], multi_fx: [0, 1, 2, 3, 4, 8] } };
+        let all = FxSaved { units: [u.saved(), UnitSaved::default()], cfx: CfxSaved { multi_shown: true, user: true, user_fx: 6, params: [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9], multi_fx: [0, 1, 2, 3, 4, 8] }, ..FxSaved::default() };
         let json = serde_json::to_string(&all).unwrap();
         let back: FxSaved = serde_json::from_str(&json).unwrap();
         assert_eq!(back, all);
@@ -808,6 +1288,20 @@ mod tests {
 
     #[test]
     fn single_mode_read_outs() {
+        // rekordbox's read-outs (`convertSingleParamString`).
+        use fx::{single_knob_text as t, Kind as K};
+        assert_eq!(t(K::Echo, 0, 0.5), "0.5");
+        assert_eq!(t(K::Echo, 1, 1.0), "HPF 100");
+        assert_eq!(t(K::Echo, 1, 0.5), "0");
+        assert_eq!(t(K::Delay, 1, 0.0), "L:100%");
+        assert_eq!(t(K::Spiral, 1, 0.0), "-50%");
+        assert_eq!(t(K::Spiral, 1, 1.0), "+100%");
+        assert_eq!(t(K::Phaser, 1, 1.0), "R STAGE:60");
+        assert_eq!(t(K::Trans, 0, 1.0), "99%");
+        assert_eq!(t(K::MtDelay, 1, 0.5), "4");
+        assert_eq!(t(K::VinylBrake, 1, 0.5), "NONE");
+        assert_eq!(t(K::VinylBrake, 0, 1.0), "4");
+        assert_eq!(t(K::Stretch, 0, 0.0), "L:100%");
         assert_eq!(knob_text("FEEDBACK", 0.5), "50");
         assert_eq!(knob_text("PITCH", 0.5), "0");
         assert_eq!(knob_text("PITCH", 0.505), "0");

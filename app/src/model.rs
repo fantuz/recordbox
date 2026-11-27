@@ -222,6 +222,17 @@ pub struct Track {
 impl Track {
     /// The key as shown: the imported spelling when there is one, else in the chosen notation.
     pub fn key_label(&self, alnum: bool) -> String {
+        // (View > Display Type > "Display key information on the database": off, every key
+        // is shown in the chosen notation.)
+        if crate::prefs_bridge::SHOW_ORIGINAL_KEY.load(std::sync::atomic::Ordering::Relaxed) {
+            self.stored_key_label(alnum)
+        } else {
+            key_name(self.key, alnum)
+        }
+    }
+
+    /// Key spelling for interchange, independent of the current display preference.
+    pub fn stored_key_label(&self, alnum: bool) -> String {
         if self.key_text.trim().is_empty() {
             key_name(self.key, alnum)
         } else {

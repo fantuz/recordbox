@@ -172,11 +172,14 @@ pub struct Eq3 {
     made: ([f32; 3], u32),
     /// Positions in use, moving toward the knobs (so a turned knob does not step).
     cur: [f32; 3],
+    /// The "DJM-900NXS" EQ type: three peaking filters at 13 kHz, 1 kHz and 70 Hz.
+    pub nxs: bool,
+    made_nxs: bool,
 }
 
 impl Eq3 {
     pub fn new() -> Eq3 {
-        Eq3 { bands: [Biquad::unity(); 3], made: ([-1.0; 3], 0), cur: [0.5; 3] }
+        Eq3 { bands: [Biquad::unity(); 3], made: ([-1.0; 3], 0), cur: [0.5; 3], nxs: false, made_nxs: false }
     }
 
     /// Before a block: move toward the knob positions (low, mid, high) and remake the filters
@@ -187,9 +190,21 @@ impl Eq3 {
         for (c, k) in self.cur.iter_mut().zip(knobs) {
             *c += (k - *c).clamp(-step, step);
         }
-        if self.made != (self.cur, rate) {
+        if self.made != (self.cur, rate) || self.made_nxs != self.nxs {
             self.made = (self.cur, rate);
+            self.made_nxs = self.nxs;
             let r = rate as f64;
+            if self.nxs {
+                // rekordbox's `Equalizer`: high, mid, low in series, all three with the MID
+                // knob's gain law; the Q argument is 0.0802 (0.1103 for MID) times the gain
+                // or its inverse, whichever is over 1 (its Q tables follow that exactly).
+                for (band, (freq, q0, knob)) in [(13000.0, 0.0802, 2usize), (1000.0, 0.1103, 1), (70.0, 0.0802, 0)].into_iter().enumerate() {
+                    let g = mid_db_q(self.cur[knob]).0 as f64;
+                    let a = 10f64.powf(g / 20.0);
+                    self.bands[band].peaking(r, freq, g, q0 * a.max(1.0 / a));
+                }
+                return;
+            }
             self.bands[0].high_shelf(r, 2200.0, shelf_db(self.cur[2]) as f64, 2.0);
             let (g, q) = mid_db_q(self.cur[1]);
             self.bands[1].peaking(r, 1000.0, g as f64, q as f64);

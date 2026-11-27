@@ -187,9 +187,23 @@ pub struct Staged {
     pub music_failed: Vec<String>,
 }
 
-pub fn read_manifest(archive: &Path) -> Result<Manifest> {
+fn open_backup(archive: &Path) -> Result<zip::ZipArchive<std::fs::File>> {
     let mut za = zip::ZipArchive::new(std::fs::File::open(archive)?).map_err(|_| anyhow!("This file is not a recordbox library backup."))?;
     za.validate_header_consistency().context("The backup's ZIP headers are inconsistent or damaged.")?;
+    // Sampler packs can be compressed. All versions of our library backup writer store entries.
+    for i in 0..za.len() {
+        if za.by_index_raw(i)?.compression() != zip::CompressionMethod::Stored {
+            bail!("Library backups must contain stored ZIP entries.");
+        }
+    }
+    Ok(za)
+}
+
+pub fn read_manifest(archive: &Path) -> Result<Manifest> {
+    read_archive_manifest(&mut open_backup(archive)?)
+}
+
+fn read_archive_manifest(za: &mut zip::ZipArchive<std::fs::File>) -> Result<Manifest> {
     let mut s = String::new();
     za.by_name("manifest.json").map_err(|_| anyhow!("This file is not a recordbox library backup."))?.read_to_string(&mut s)?;
     let m: Manifest = serde_json::from_str(&s).map_err(|_| anyhow!("The backup's contents list cannot be read."))?;
@@ -238,9 +252,8 @@ fn extract(za: &mut zip::ZipArchive<std::fs::File>, entry: &str, dest: &Path, ca
 /// is replaced.
 pub fn stage_restore(archive: &Path, work_dir: &Path, artwork_dir: &Path, with_music: bool, progress: Progress, cancel: &AtomicBool) -> Result<Staged> {
     progress(0, 1, "Preparing restore...");
-    let manifest = read_manifest(archive)?;
-    let mut za = zip::ZipArchive::new(std::fs::File::open(archive)?)?;
-    za.validate_header_consistency().context("The backup's ZIP headers are inconsistent or damaged.")?;
+    let mut za = open_backup(archive)?;
+    let manifest = read_archive_manifest(&mut za)?;
     let _ = std::fs::remove_dir_all(work_dir);
     std::fs::create_dir_all(work_dir)?;
     let names: Vec<String> = za.file_names().map(|name| name.map(|s| s.into_owned())).collect::<zip::result::ZipResult<_>>()?;
@@ -466,6 +479,18 @@ mod tests {
         let mut st = c.prepare("SELECT title FROM tracks ORDER BY title").unwrap();
         let v = st.query_map([], |r| r.get::<_, String>(0)).unwrap().map(|x| x.unwrap()).collect();
         v
+    }
+
+    #[test]
+    fn sampler_deflate_support_does_not_change_library_backup_format() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("compressed.zip");
+        let mut archive = zip::ZipWriter::new(std::fs::File::create(&path).unwrap());
+        let options = zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+        archive.start_file("manifest.json", options).unwrap();
+        archive.write_all(b"{}").unwrap();
+        archive.finish().unwrap();
+        assert!(read_manifest(&path).unwrap_err().to_string().contains("stored ZIP entries"));
     }
 
     #[test]

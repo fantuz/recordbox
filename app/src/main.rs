@@ -3,30 +3,57 @@
 use eframe::egui;
 mod analysis;
 mod app;
+mod app_hooks;
 mod audio;
+mod automix;
 mod backup;
 mod brand;
 mod cfx;
 mod browser_ext;
 mod collection_cleanup;
 mod db;
+mod cue_tools;
+mod deck;
 mod demo;
+mod dupes;
 mod device_ext;
+mod edit_audio;
+mod edit_model;
+mod edit_project;
+mod edit_render;
+mod edit_selftest;
 mod export;
 mod fx;
+mod fx_core;
+mod mfx;
 mod icons;
 mod icons_player;
 mod icons_src;
 mod importer;
 mod itunes;
 mod jobs;
+mod keycmd_data;
+mod keycmd;
+mod keytest_selftest;
 mod key;
 mod library_ext;
 mod menus;
+mod midi;
+mod midi_csv;
+mod midi_map;
+mod mix_selftest;
 mod mixer;
+mod groove;
+mod ui_groove;
+mod pad_audio;
+mod pads;
+mod pads_ext;
+mod pads_selftest;
+mod mpl;
 mod perf_selftest;
 mod sampler;
 mod sampler_ext;
+mod sampler_lib;
 mod sequencer;
 mod ui_sampler;
 mod model;
@@ -35,25 +62,52 @@ mod phrase;
 mod playlist_files;
 mod preview;
 mod player_ext;
+mod prefs_bridge;
 mod prefs_ext;
+mod prefs_font;
+mod prefs_rb;
+mod prefs_selftest;
+mod prefs_shell;
 mod rbimport;
+mod recorder;
 mod stems;
 mod smart;
+mod playlist_art;
 mod theme;
+mod traffic;
+mod ui_automix;
 mod ui_browser;
 mod ui_browser_ext;
 mod ui_dialogs;
+mod ui_edit;
+mod ui_edit_view;
 mod ui_kit;
 mod ui_library_ext;
+mod ui_midi;
+mod ui_mpl;
+mod ui_sampler_lib;
 mod ui_player;
 mod ui_prefs;
 mod ui_sync;
+mod ui_rec;
+mod ui_prefs_adv;
+mod ui_prefs_item;
+mod ui_prefs_keys;
+mod ui_prefs_perf;
+mod ui_prefs_view;
 mod ui_fx;
+mod ui_pads;
+mod ui_padfx;
 mod ui_perf;
+mod ui_perf_layouts;
 mod ui_player2;
 mod xmlexport;
 #[cfg(target_os = "linux")]
 mod x11_fullscreen;
+mod vocal_rb;
+#[cfg(all(test, target_os = "macos"))]
+mod vocal_rb_mp3;
+mod vocal_rb_net;
 
 use app::App;
 
@@ -182,9 +236,19 @@ impl eframe::App for Gui {
     /// PREPDECK_SHOT_DRAG (with --screenshot): drag hot cue A 100 px to the right with real
     /// pointer events, to check marker dragging end to end; the result goes to stderr.
     fn raw_input_hook(&mut self, _ctx: &egui::Context, raw: &mut egui::RawInput) {
+        ui_groove::frame_hook(&mut self.app, raw);
+        app_hooks::raw_input(&mut self.app, raw);
         let Some((_, frame)) = self.app.screenshot.clone() else { return };
         self.app.shot_player_events(frame, raw);
         self.app.shot_perf_events(frame, raw);
+        self.app.shot_midi_events(frame, raw);
+        self.app.shot_rec_events(frame, raw);
+        self.app.shot_edit_events(frame, raw);
+        self.app.shot_pads_events(frame, raw);
+        crate::ui_perf_layouts::shot_layout_events(&mut self.app, frame, raw);
+        self.app.shot_mix_events(frame, raw);
+        self.app.shot_prefs_events(frame, raw);
+        self.app.shot_key_events(frame, raw);
         if std::env::var("PREPDECK_SHOT_DRAG").is_err() {
             return;
         }
@@ -251,28 +315,45 @@ impl eframe::App for Gui {
         step!(app.poll_import());
         step!(app.poll_analysis());
         step!(app.poll_load());
+        step!(midi::poll(app));
+        step!(prefs_bridge::frame(app));
         step!(app.poll_decks());
+        step!(automix::poll(app, ctx));
         step!(app.poll_export());
         step!(app.poll_rekordbox_sync());
         step!(app.poll_stems());
+        step!(app.poll_stem_waves());
         step!(app.poll_phrases());
         step!(app.poll_vocal());
         step!(app.poll_key_job());
         step!(app.poll_audio_device());
         step!(app.poll_relocate());
+        step!(app.poll_rec());
         step!(backup::poll(app));
         step!(menus::poll(app));
         step!(menus::sync(app));
+        step!(ui_edit::frame(app, ctx));
         window_input(app, ctx);
+        // Preferences > View > Tooltips off: no hover text anywhere, including the ones drawn
+        // with egui's own `on_hover_text` (a delay that never runs out; infinity would panic
+        // in egui's repaint timer).
+        let tip_delay = if app.prefs.tooltips { 0.5 } else { 1.0e9 };
+        if ctx.style().interaction.tooltip_delay != tip_delay {
+            ctx.all_styles_mut(|s| s.interaction.tooltip_delay = tip_delay);
+        }
 
+        let recording_strip = !app.performance() && app.prefs.rec.panel_export;
+        let deck_height = if ui_edit::is_edit(app) { 293.0 } else { app.player_height() };
+        let deck_height = deck_height + if recording_strip { ui_rec::EXPORT_H } else { 0.0 };
         let toggle_library = egui::TopBottomPanel::top("header").exact_height(28.0).show_separator_line(false).frame(egui::Frame::default().fill(theme::BG1)).show(ctx, |ui| {
             ui_browser::header_bar(app, ui)
         }).inner;
-        if toggle_library {
+        let menu_toggle = std::mem::take(&mut app.toggle_library_window);
+        if toggle_library || menu_toggle {
             if let Some(window) = app.library_window.take() {
                 self.pending_docked_size = window.reattach(ctx);
             } else if !ctx.embed_viewports() {
-                let mut window = DetachedLibrary::open(ctx, app.player_height());
+                let mut window = DetachedLibrary::open(ctx, deck_height);
                 window.docked_size = window.docked_size.or(self.pending_docked_size.take());
                 app.library_window = Some(window);
             }
@@ -280,8 +361,14 @@ impl eframe::App for Gui {
         egui::TopBottomPanel::bottom("footer").exact_height(28.0).show_separator_line(false).frame(egui::Frame::default().fill(theme::BG)).show(ctx, |ui| {
             ui_browser::footer(app, ui);
         });
-        let decks_visible = !app.full_browser() || app.performance();
-        if decks_visible {
+        // EXPORT mode's recording panel, a strip under the top bar.
+        if recording_strip {
+            egui::TopBottomPanel::top("recstrip").exact_height(ui_rec::EXPORT_H).show_separator_line(false).frame(egui::Frame::default().fill(theme::BG2)).show(ctx, |ui| ui_rec::export_strip(app, ui));
+        }
+        let decks_visible = !ui_edit::is_edit(app) && (!app.full_browser() || app.performance());
+        if ui_edit::is_edit(app) {
+            step!(ui_edit_view::top_panel(app, ctx));
+        } else if decks_visible {
             // The header is 28 pt and 1 Player / 2 Players 256 pt tall with no rule between them
             // (measured on rekordbox: the player ends 284 pt below the window top); the Simple
             // Player is one 58 pt row.
@@ -302,7 +389,6 @@ impl eframe::App for Gui {
             }
         }
         let library_id = DetachedLibrary::id();
-        let deck_height = app.player_height();
         if let Some(window) = &mut app.library_window {
             window.fit_decks(ctx, deck_height);
             // An egui layout retry still belongs to the same native update. Only a new update
@@ -331,7 +417,7 @@ impl eframe::App for Gui {
                 }
             }
         }
-        if app.library_window.is_none() {
+        if app.library_window.is_none() && !ui_edit_view::hides_browser(app) {
             step!(library_panel(app, ctx));
         }
         step!(ui_prefs::prefs_window(app, ctx));
@@ -347,6 +433,14 @@ impl eframe::App for Gui {
         }
         collection_cleanup::ui::guard_app_close(app, ctx);
         app.update_transport(ctx, decks_visible);
+        // Preferences rows of other files' features take effect (prefs_bridge.rs).
+        if app.dialogs.prefs_open || app.ctx.cumulative_pass_nr() < 3 {
+            app.prefs_bridge();
+        }
+        step!(dupes::windows(app, ctx));
+        step!(cue_tools::windows(app, ctx));
+        step!(ui_midi::window(app, ctx));
+        step!(ui_rec::windows(app, ctx));
 
         if app.analysis_total > 0 || app.importing.is_some() || app.export_job.is_some() {
             ctx.request_repaint_after(std::time::Duration::from_millis(250));
@@ -420,6 +514,7 @@ impl eframe::App for Gui {
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        prefs_bridge::on_exit(&mut self.app);
         self.app.save_prefs();
         let _ = self.app.db.conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);");
     }
@@ -556,7 +651,25 @@ fn shortcut_key_events(app: &App, ctx: &egui::Context) -> Vec<egui::Event> {
     events
 }
 
+fn step_list_selection(app: &mut App, up: bool) {
+    if app.list_dirty {
+        app.rebuild_list();
+    }
+    if !app.list.is_empty() {
+        let cur = app.anchor.unwrap_or(0);
+        let next = if up { cur.saturating_sub(1) } else { (cur + 1).min(app.list.len() - 1) };
+        let next = if app.anchor.is_none() { 0 } else { next };
+        app.set_anchor(next);
+        app.selected.clear();
+        app.selected.insert(app.list[next]);
+        app.scroll_to_selected = true;
+    }
+}
+
 fn shortcuts(app: &mut App, ctx: &egui::Context) {
+    if app.ext.cleanup.is_none() {
+        keycmd::frame(app, ctx);
+    }
     let key_events = shortcut_key_events(app, ctx);
     let was_released = |binding: Option<app::Shortcut>| binding.is_some_and(|sc| key_events.iter().any(|event| match event {
         egui::Event::Key { key, physical_key, modifiers, pressed: false, .. } if *key == sc.key => {
@@ -582,11 +695,36 @@ fn shortcuts(app: &mut App, ctx: &egui::Context) {
     }
     if app.deck.hot_preview.is_some() {
         let hot_held = (1..=8).any(|n| app.prefs.key_for(&format!("hot{n}")).map(|k| ctx.input(|i| i.key_down(k))).unwrap_or(false));
-        if !hot_held && !ctx.input(|i| i.pointer.any_down()) {
+        if !hot_held && !ctx.input(|i| i.pointer.any_down()) && !keycmd::holding(app.px.active) {
             app.hot_cue_up();
         }
     }
     if app.ext.cleanup.is_some() {
+        return;
+    }
+    if ui_edit::is_edit(app) {
+        if app.edit.modal.is_none() && !ctx.wants_keyboard_input() {
+            if ctx.viewport_id() == DetachedLibrary::id() {
+                let (up, down, load) = ctx.input_mut(|i| (
+                    i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowUp),
+                    i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowDown),
+                    i.consume_key(egui::Modifiers::NONE, egui::Key::Enter),
+                ));
+                if up || down {
+                    if app.dialogs.ext.focus_tree {
+                        prefs_ext::tree_step(app, if up { -1 } else { 1 });
+                    } else {
+                        step_list_selection(app, up);
+                    }
+                }
+                if load {
+                    if let Some(id) = app.anchor_id.filter(|id| app.list.contains(id)) {
+                        app.load_track(id);
+                    }
+                }
+            }
+            ui_edit::keys(app, ctx);
+        }
         return;
     }
     // Library edit Undo/Redo (text fields keep their own undo while they are being edited).
@@ -615,7 +753,7 @@ fn shortcuts(app: &mut App, ctx: &egui::Context) {
         return;
     }
     use egui::Key;
-    let shortcuts: std::collections::HashMap<&str, app::Shortcut> = recordbox_actions().iter().filter_map(|a| app.prefs.shortcut_for(a).map(|k| (*a, k))).collect();
+    let shortcuts: std::collections::HashMap<&str, app::Shortcut> = recordbox_actions().iter().filter(|a| keycmd::old_loop_runs(&app.prefs, a)).filter_map(|a| app.prefs.shortcut_for(a).map(|k| (*a, k))).collect();
     // A press of the action's key with exactly its modifiers (beat jumps also take Shift).
     // The sampler deck's keys work in PERFORMANCE mode only, and there they come before
     // another action on the same key (they are rekordbox's Performance preset).
@@ -705,20 +843,7 @@ fn shortcuts(app: &mut App, ctx: &egui::Context) {
     } else if right {
         app.beat_jump(if shift { 1.0 } else { app.prefs.beat_jump });
     }
-    if up || down {
-        if app.list_dirty {
-            app.rebuild_list();
-        }
-        if !app.list.is_empty() {
-            let cur = app.anchor.unwrap_or(0);
-            let next = if up { cur.saturating_sub(1) } else { (cur + 1).min(app.list.len() - 1) };
-            let next = if app.anchor.is_none() { 0 } else { next };
-            app.set_anchor(next);
-            app.selected.clear();
-            app.selected.insert(app.list[next]);
-            app.scroll_to_selected = true;
-        }
-    }
+    if up || down { step_list_selection(app, up); }
     if enter {
         if let Some(id) = app.anchor_id.filter(|id| app.list.contains(id)) {
             app.load_track(id);
@@ -836,7 +961,7 @@ fn main() -> eframe::Result<()> {
     let shot_mode = screenshot.is_some();
     let mut viewport = egui::ViewportBuilder::default().with_title("recordbox").with_inner_size([1512.0, 921.0]).with_min_inner_size(MAIN_MIN_SIZE);
     // The recordbox mark as the window and Dock icon.
-    if let Some(icon) = brand::mark_icon(512) {
+    if let Some(icon) = brand::app_icon(brand::system_dark()) {
         viewport = viewport.with_icon(std::sync::Arc::new(icon));
     }
     if shot_mode {

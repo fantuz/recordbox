@@ -162,6 +162,8 @@ pub fn status_cell(app: &mut App, ui: &mut Ui, t: &Track, r: Rect) {
         let sc = pos2(b.min.x + if cued { 7.5 } else { 14.5 }, cy - 0.5);
         crate::icons_src::star(&p, sc + vec2(0.0, 0.0), true, WHITE);
     }
+    // The middle cell: EDIT and Track Type attributes (ui_edit.rs).
+    crate::ui_edit::attribute_icons(app, &p, Rect::from_min_max(pos2(a.max.x, r.min.y), pos2(b.min.x, r.max.y)), t.id, &mut tips);
     if !tips.is_empty() && app.prefs.tooltips && ui.rect_contains_pointer(r) {
         let resp = ui.interact(r, ui.id().with(("attr_tip", t.id, r.min.y as i32)), Sense::hover());
         resp.on_hover_text(tips.join("\n"));
@@ -545,89 +547,147 @@ fn check_item(ui: &mut Ui, on: bool, label: &str) -> egui::Response {
     ui.checkbox(&mut v, label)
 }
 
-/// The track context menu (also the menu bar's Track menu).
+/// The track context menu, in the order rekordbox 7.2.19 builds it for collection and
+/// playlist rows (`BrowsePopupMenuManager::showListViewPopupMenu`, traced in
+/// `checks/re-7.2.19/shell-menus-traffic.md` section 5). recordbox's own entries, which
+/// rekordbox has no item for, come after the last separator.
 pub fn track_menu(app: &mut App, ui: &mut Ui, sel: &[i64]) {
     if sel.is_empty() {
         ui.label(RichText::new("No track selected").color(DIM));
         return;
     }
     let one = sel.len() == 1;
-    if one && ui.add_enabled(!app.deck_options.disable_load, egui::Button::new("Load to Player")).clicked() {
+    let manual = app.is_manual_playlist();
+    let remove_items = |app: &mut App, ui: &mut Ui| {
+        if let Some(pl) = manual {
+            if ui.button("Remove from Playlist").clicked() {
+                let s: HashSet<i64> = sel.iter().copied().collect();
+                app.remove_from_playlist(pl, &s);
+                ui.close_menu();
+            }
+        } else if let View::History(h) = app.view {
+            if ui.button("Remove from History").clicked() {
+                app.history_remove_tracks(h, sel);
+                ui.close_menu();
+            }
+        } else if ui.button("Remove from Collection").clicked() {
+            app.dialogs.confirm_remove = Some(sel.to_vec());
+            ui.close_menu();
+        }
+    };
+    // Rows whose file is gone get rekordbox's short menu.
+    if sel.iter().all(|id| app.track(*id).map(|t| t.missing).unwrap_or(false)) {
+        ui.add_enabled(false, egui::Button::new("File is Missing"));
+        ui.separator();
+        if ui.button("Auto Relocate").clicked() {
+            ui.close_menu();
+            app.auto_relocate(Some(sel.to_vec()));
+        }
+        if ui.add_enabled(one, egui::Button::new("Relocate")).clicked() {
+            ui.close_menu();
+            if let Some(f) = rfd::FileDialog::new().pick_file() {
+                app.relocate_to(sel[0], &f);
+            }
+        }
+        if app.is_manual_playlist().is_some() || matches!(app.view, View::History(_)) {
+            remove_items(app, ui);
+        } else if ui.button("Review collection cleanup…").clicked() {
+            crate::collection_cleanup::ui::open(app, Some(sel.iter().copied().collect()));
+            ui.close_menu();
+        }
+        return;
+    }
+    // Load > Deck1..Deck4: always listed, usable in PERFORMANCE.
+    let perf = app.performance();
+    if !perf && one && ui.add_enabled(!app.deck_options.disable_load, egui::Button::new("Load to Player")).clicked() {
         app.load_track(sel[0]);
         ui.close_menu();
     }
-    ui.menu_button("Add To Playlist", |ui| add_to_playlist_menu(app, ui, sel));
-    let all_tagged = sel.iter().all(|t| app.ext.tag_set.contains(t));
-    if !all_tagged && ui.button("Add To Tag List").clicked() {
-        app.tag_list_add(sel);
-        ui.close_menu();
-    }
-    if sel.iter().any(|t| app.ext.tag_set.contains(t)) && ui.button("Remove from Tag List").clicked() {
-        app.tag_list_remove(sel);
-        ui.close_menu();
-    }
-    if ui.button(if one { "Export Track" } else { "Export Tracks" }).clicked() {
-        crate::ui_browser::open_export(app, vec![], sel.to_vec());
-        ui.close_menu();
-    }
+    ui.add_enabled_ui(perf && one && !app.deck_options.disable_load, |ui| {
+        ui.menu_button("Load", |ui| {
+            let count = app.deck_count();
+            for n in 0..4u8 {
+                if ui.add_enabled(n < count, egui::Button::new(format!("Deck{}", n + 1))).clicked() {
+                    let id = sel[0];
+                    app.with_deck(n, |a| a.load_track_here(id));
+                    ui.close_menu();
+                }
+            }
+        });
+    });
     ui.separator();
+    // Collection rows are in the collection already.
+    ui.add_enabled(false, egui::Button::new("Import To Collection"));
     if ui.button(if one { "Analyze Track" } else { "Analyze Tracks" }).clicked() {
         app.reanalyze(sel);
         ui.close_menu();
     }
-    if ui.button("Analyze Missing Data").clicked() {
-        app.analyze_missing(sel);
-        ui.close_menu();
-    }
-    if ui.button("Add New Analysis Data").clicked() {
-        app.analyze_missing(sel);
-        ui.close_menu();
-    }
-    if ui.button(if one { "Analyze Key" } else { "Analyze Keys" }).clicked() {
-        app.analyze_key_tracks(sel);
-        ui.close_menu();
-    }
     let locked = sel.iter().all(|id| app.track(*id).map(|t| t.grid_locked).unwrap_or(false));
-    if check_item(ui, locked, "Analysis Lock").clicked() {
-        for id in sel {
-            if let Some(t) = app.track_mut(*id) {
-                t.grid_locked = !locked;
+    let unlocked = sel.iter().all(|id| app.track(*id).map(|t| !t.grid_locked).unwrap_or(false));
+    ui.menu_button("Analysis Lock", |ui| {
+        for (on, label, enabled) in [(true, "On", !locked), (false, "Off", !unlocked)] {
+            if ui.add_enabled(enabled, egui::Button::new(label)).clicked() {
+                for id in sel {
+                    if let Some(t) = app.track_mut(*id) {
+                        t.grid_locked = on;
+                    }
+                    app.save_track(*id);
+                }
+                ui.close_menu();
             }
-            app.save_track(*id);
         }
-        ui.close_menu();
-    }
-    if app.analysis_total > 0 && ui.button("Stop Analyzing").clicked() {
-        app.pool.stop();
-        ui.close_menu();
-    }
+    });
     ui.separator();
-    ui.menu_button("Rating", |ui| {
-        for s in 0..=5u8 {
-            if ui.button(if s == 0 { "No rating".to_string() } else { "★".repeat(s as usize) }).clicked() {
-                for id in sel {
-                    if let Some(t) = app.track_mut(*id) {
-                        t.rating = s;
-                    }
-                    app.save_track(*id);
-                }
+    ui.menu_button("Add To Playlist", |ui| add_to_playlist_menu(app, ui, sel));
+    let all_tagged = sel.iter().all(|t| app.ext.tag_set.contains(t));
+    if all_tagged {
+        if ui.button("Remove from Tag List").clicked() {
+            app.tag_list_remove(sel);
+            ui.close_menu();
+        }
+    } else if ui.button("Add To Tag List").clicked() {
+        app.tag_list_add(sel);
+        ui.close_menu();
+    }
+    if ui.button(if one { "Reload Tag" } else { "Reload Tags" }).clicked() {
+        app.reload_tags_from_files(sel);
+        ui.close_menu();
+    }
+    if ui.button("Get Info from iTunes").clicked() {
+        app.get_info_from_itunes(sel);
+        ui.close_menu();
+    }
+    // PERFORMANCE: Add To Sampler List (ui_sampler_lib.rs).
+    crate::ui_sampler_lib::track_menu(app, ui, sel);
+    // Track Type: how the track plays in the sampler.
+    let kind = if one { app.track_type(sel[0]) } else { 255 };
+    ui.menu_button("Track Type", |ui| {
+        for (mode, label) in [(1u8, "Oneshot"), (2, "Loop"), (0, "Normal")] {
+            if ui.add_enabled(kind != mode, egui::Button::new(label)).clicked() {
+                app.set_track_type(sel, mode);
                 ui.close_menu();
             }
         }
     });
-    ui.menu_button("Color", |ui| {
-        for i in 0..9u8 {
-            if ui.button(RichText::new(format!("■ {}", COLOR_NAMES[i as usize])).color(if i == 0 { DIM } else { label_color(i) })).clicked() {
-                for id in sel {
-                    if let Some(t) = app.track_mut(*id) {
-                        t.color = i;
-                    }
-                    app.save_track(*id);
-                }
+    ui.separator();
+    ui.menu_button(if one { "Export Track" } else { "Export Tracks" }, |ui| {
+        let devices: Vec<(String, String)> = app.devices.iter().map(|d| (d.root.clone(), d.name.clone())).collect();
+        for (root, name) in devices {
+            if ui.button(name).clicked() {
+                crate::ui_browser::open_export(app, vec![], sel.to_vec());
+                app.dialogs.export_root = Some(root);
                 ui.close_menu();
             }
         }
+        if !app.devices.is_empty() {
+            ui.separator();
+        }
+        if ui.button("Export to USB Device…").clicked() {
+            crate::ui_browser::open_export(app, vec![], sel.to_vec());
+            ui.close_menu();
+        }
     });
+    ui.separator();
     ui.menu_button("Auto Load Hot Cue", |ui| {
         let auto = sel.iter().all(|id| app.track(*id).map(|t| t.autoload_hotcue).unwrap_or(false));
         let none = sel.iter().all(|id| app.track(*id).map(|t| !t.autoload_hotcue).unwrap_or(false));
@@ -643,14 +703,6 @@ pub fn track_menu(app: &mut App, ui: &mut Ui, sel: &[i64]) {
             }
         }
     });
-    if ui.button(if one { "Reload Tag" } else { "Reload Tags" }).clicked() {
-        app.reload_tags_from_files(sel);
-        ui.close_menu();
-    }
-    if ui.button("Get Info from iTunes").clicked() {
-        app.get_info_from_itunes(sel);
-        ui.close_menu();
-    }
     if ui.button(if one { "Reset DJ Play Count" } else { "Reset DJ Play Counts" }).clicked() {
         for id in sel {
             if let Some(t) = app.track_mut(*id) {
@@ -660,38 +712,52 @@ pub fn track_menu(app: &mut App, ui: &mut Ui, sel: &[i64]) {
         }
         ui.close_menu();
     }
+    if ui.button("Add New Analysis Data").clicked() {
+        app.analyze_missing(sel);
+        ui.close_menu();
+    }
+    if ui.button("Convert Memory Cues to Hot Cues").clicked() {
+        app.convert_memory_cues(sel);
+        ui.close_menu();
+    }
+    if ui.button("Sort Hot Cues by time").clicked() {
+        app.cue_tools.sort_ask = Some(sel.to_vec());
+        ui.close_menu();
+    }
+    ui.separator();
+    remove_items(app, ui);
+    ui.separator();
+    let info = crate::ui_browser_ext::right_panel(app) == 4;
+    if ui.button(if info { "Hide information" } else { "Show information" }).clicked() {
+        crate::ui_browser_ext::set_right_panel(app, if info { 0 } else { 4 });
+        ui.close_menu();
+    }
+    if ui.button(crate::ui_browser::REVEAL_FILE).clicked() {
+        if let Some(t) = app.track(sel[0]) {
+            if let Err(err) = crate::ui_browser::reveal_path(std::path::Path::new(&t.path)) {
+                app.toast_err(format!("Could not open the file location: {err}"));
+            }
+        }
+        ui.close_menu();
+    }
+    // PERFORMANCE: Add tracks to Automix playlist (ui_automix.rs).
+    if app.performance() {
+        ui.separator();
+        crate::ui_automix::track_menu(app, ui, sel);
+    }
+    // ---- recordbox's own
+    ui.separator();
+    if ui.button(if one { "Analyze Key" } else { "Analyze Keys" }).clicked() {
+        app.analyze_key_tracks(sel);
+        ui.close_menu();
+    }
+    if app.analysis_total > 0 && ui.button("Stop Analyzing").clicked() {
+        app.pool.stop();
+        ui.close_menu();
+    }
     if one && ui.button("Change Artwork").clicked() {
         ui.close_menu();
         add_artwork(app, sel);
-    }
-    ui.menu_button("Relocate", |ui| {
-        if ui.add_enabled(one, egui::Button::new("Relocate")).clicked() {
-            ui.close_menu();
-            if let Some(f) = rfd::FileDialog::new().pick_file() {
-                app.relocate_to(sel[0], &f);
-            }
-        }
-        if ui.button("Auto Relocate").clicked() {
-            ui.close_menu();
-            app.auto_relocate(Some(sel.to_vec()));
-        }
-    });
-    if one {
-        ui.menu_button("Playlists including this track", |ui| {
-            let pls: Vec<(i64, String)> = app.db.playlists_containing(sel[0]).unwrap_or_default().into_iter().filter_map(|p| app.node(p).map(|n| (n.id, n.name.clone()))).collect();
-            if pls.is_empty() {
-                ui.label(RichText::new("none").color(DIM));
-            }
-            for (id, name) in pls {
-                if ui.button(name).clicked() {
-                    app.jump_to_playlist(id);
-                    app.selected = [sel[0]].into_iter().collect();
-                    app.anchor_id = Some(sel[0]);
-                    app.scroll_to_selected = true;
-                    ui.close_menu();
-                }
-            }
-        });
     }
     // Matching with the track in the player.
     if let Some(src) = app.deck.track.filter(|s| !(one && sel[0] == *s)) {
@@ -706,52 +772,6 @@ pub fn track_menu(app: &mut App, ui: &mut Ui, sel: &[i64]) {
                 ui.close_menu();
             }
         });
-    }
-    if ui.button("Show in Finder").clicked() {
-        if let Some(t) = app.track(sel[0]) {
-            let _ = std::process::Command::new("/usr/bin/open").arg("-R").arg(&t.path).spawn();
-        }
-        ui.close_menu();
-    }
-    if one && ui.button("Property").clicked() {
-        app.dialogs.info_track = app.track(sel[0]).cloned();
-        ui.close_menu();
-    }
-    ui.separator();
-    let manual = app.is_manual_playlist();
-    if ui.add_enabled(manual.is_some(), egui::Button::new("Cut")).clicked() {
-        app.copy_tracks(true);
-        ui.close_menu();
-    }
-    if ui.button("Copy").clicked() {
-        app.copy_tracks(false);
-        ui.close_menu();
-    }
-    if ui.add_enabled(app.can_paste(), egui::Button::new("Paste")).clicked() {
-        app.paste_tracks();
-        ui.close_menu();
-    }
-    if ui.button("Select All").clicked() {
-        app.select_all();
-        ui.close_menu();
-    }
-    ui.separator();
-    if let Some(pl) = manual {
-        if ui.button("Remove from Playlist").clicked() {
-            let s: HashSet<i64> = sel.iter().copied().collect();
-            app.remove_from_playlist(pl, &s);
-            ui.close_menu();
-        }
-    }
-    if let View::History(h) = app.view {
-        if ui.button("Remove from History").clicked() {
-            app.history_remove_tracks(h, sel);
-            ui.close_menu();
-        }
-    }
-    if ui.button("Remove from Collection").clicked() {
-        app.dialogs.confirm_remove = Some(sel.to_vec());
-        ui.close_menu();
     }
 }
 
@@ -808,28 +828,72 @@ pub fn export_playlist_dialog(app: &mut App, node: i64) {
     }
 }
 
-/// Extra playlist-tree menu entries for one node (after the create / rename entries).
-pub fn node_menu_extra(app: &mut App, ui: &mut Ui, n: &PlaylistNode) {
+/// The right-click menu of a playlist, intelligent playlist or folder in the tree, in the
+/// order rekordbox 7.2.19 builds it (`BrowsePopupMenuManager::showTreeViewPopupMenu`
+/// 0x100118eec; `checks/re-7.2.19/shell-menus-traffic.md`). Left out: cloud, sharing and
+/// Request Catalog items. recordbox's own entries
+/// come after the last separator. A name is changed by double-clicking it, as in rekordbox;
+/// Rename is also kept among recordbox's own entries.
+pub fn node_menu(app: &mut App, ui: &mut Ui, n: &PlaylistNode) {
     let folder = n.kind == NodeKind::Folder;
-    if ui.button("Import Playlist").clicked() {
-        ui.close_menu();
-        import_playlist_dialog(app, if folder { n.id } else { n.parent });
-    }
-    if ui.button("Save Playlist Info").clicked() {
-        ui.close_menu();
-        export_playlist_dialog(app, n.id);
-    }
-    if folder && ui.button("Sort Items").clicked() {
-        app.sort_node_children(n.id);
+    let parent_for_new = if folder { n.id } else { n.parent };
+    if n.kind == NodeKind::Smart && ui.button("Edit the Intelligent Playlist").clicked() {
+        app.dialogs.smart_edit = Some((Some(n.id), n.parent, n.name.clone(), n.smart.clone().unwrap_or_default()));
         ui.close_menu();
     }
-    if n.kind == NodeKind::Playlist {
-        let can = app.view == View::Playlist(n.id) && app.can_renumber();
-        if ui.add_enabled(can, egui::Button::new("Renumber Track Order")).on_disabled_hover_text("Sort the playlist by a column other than # first.").clicked() {
-            app.renumber_track_order(n.id);
+    ui.menu_button(if folder { "Export Folder" } else { "Export Playlist" }, |ui| {
+        let devices: Vec<(String, String)> = app.devices.iter().map(|d| (d.root.clone(), d.name.clone())).collect();
+        for (root, name) in devices {
+            if ui.button(name).clicked() {
+                crate::ui_browser::open_export(app, vec![n.id], vec![]);
+                app.dialogs.export_root = Some(root);
+                ui.close_menu();
+            }
+        }
+        if !app.devices.is_empty() {
+            ui.separator();
+        }
+        if ui.button("Export to USB Device…").clicked() {
+            crate::ui_browser::open_export(app, vec![n.id], vec![]);
+            ui.close_menu();
+        }
+    });
+    ui.separator();
+    for (label, kind) in [("Create New Playlist", NodeKind::Playlist), ("Create New Intelligent Playlist", NodeKind::Smart), ("Create New Folder", NodeKind::Folder)] {
+        if ui.button(label).clicked() {
+            app.create_node(parent_for_new, kind);
             ui.close_menu();
         }
     }
+    ui.separator();
+    // Playlist artwork (playlist_art.rs): between the Create items and Delete Playlist.
+    if n.kind == NodeKind::Playlist {
+        crate::playlist_art::menu(app, ui, n.id);
+    }
+    if ui.button(if folder { "Delete Folder" } else { "Delete Playlist" }).clicked() {
+        app.dialogs.confirm_delete_node = Some((n.id, n.name.clone(), folder));
+        ui.close_menu();
+    }
+    ui.separator();
+    if folder {
+        if ui.button("Sort Items").clicked() {
+            app.sort_node_children(n.id);
+            ui.close_menu();
+        }
+    } else {
+        ui.menu_button("Save Playlist Info", |ui| {
+            for (label, ext) in [("Export a playlist to a file (*.txt)", "txt"), ("Export a playlist to a file for music apps (*.m3u8)", "m3u8")] {
+                if ui.button(label).clicked() {
+                    ui.close_menu();
+                    let name = crate::playlist_files::safe_file_name(&n.name);
+                    if let Some(f) = rfd::FileDialog::new().set_title("Export a playlist to a file").set_file_name(format!("{name}.{ext}")).add_filter(label, &[ext]).save_file() {
+                        app.export_playlist_file(n.id, &f);
+                    }
+                }
+            }
+        });
+    }
+    ui.separator();
     if app.prefs.shortcuts.contains(&n.id) {
         if ui.button("Delete Shortcut").clicked() {
             app.shortcut_remove(n.id);
@@ -839,7 +903,38 @@ pub fn node_menu_extra(app: &mut App, ui: &mut Ui, n: &PlaylistNode) {
         app.shortcut_add(n.id);
         ui.close_menu();
     }
+    if !folder && app.performance() {
+        ui.separator();
+        crate::ui_automix::node_menu(app, ui, n.id);
+        ui.separator();
+        if ui.button("Load the top 16 tracks into the current sampler bank").clicked() {
+            crate::app_hooks::playlist_to_sampler_bank(app, n.id);
+            ui.close_menu();
+        }
+    }
+    // ---- recordbox's own
+    ui.separator();
+    if ui.button("Rename").clicked() {
+        app.dialogs.rename = Some((n.id, n.name.clone()));
+        ui.close_menu();
+    }
+    if ui.button("Import Playlist").clicked() {
+        ui.close_menu();
+        import_playlist_dialog(app, parent_for_new);
+    }
+    if n.kind == NodeKind::Smart && ui.button("Convert to a normal playlist").clicked() {
+        let tracks = n.smart.as_ref().map(|r| app.smart_tracks(r)).unwrap_or_default();
+        let id = app.db.create_node(n.parent, &format!("{} (copy)", n.name), NodeKind::Playlist, None).unwrap_or(0);
+        let _ = app.db.set_playlist_tracks(id, &tracks);
+        app.reload_playlists();
+        ui.close_menu();
+    }
     if n.kind == NodeKind::Playlist {
+        let can = app.view == View::Playlist(n.id) && app.can_renumber();
+        if ui.add_enabled(can, egui::Button::new("Renumber Track Order")).on_disabled_hover_text("Sort the playlist by a column other than # first.").clicked() {
+            app.renumber_track_order(n.id);
+            ui.close_menu();
+        }
         if let Some(slot) = app.prefs.palette.iter().position(|p| *p == n.id) {
             if ui.button("Remove from Palette").clicked() {
                 app.palette_remove(slot);
@@ -860,6 +955,21 @@ pub fn node_menu_extra(app: &mut App, ui: &mut Ui, n: &PlaylistNode) {
             });
         }
     }
+    if n.parent != 0 && ui.button("Move to top level").clicked() {
+        let _ = app.db.move_node(n.id, 0, 0);
+        app.reload_playlists();
+        ui.close_menu();
+    }
+    ui.menu_button("Move into folder", |ui| {
+        let folders: Vec<PlaylistNode> = app.nodes.iter().filter(|f| f.kind == NodeKind::Folder && f.id != n.id).cloned().collect();
+        for f in folders {
+            if ui.button(&f.name).clicked() {
+                let _ = app.db.move_node(n.id, f.id, 0);
+                app.reload_playlists();
+                ui.close_menu();
+            }
+        }
+    });
 }
 
 /// Menu of the "Playlists" root row (after the create entries).
@@ -1542,8 +1652,10 @@ pub fn source_list(app: &mut App, ui: &mut Ui, kind: u8, node: &str) {
                     app.source_import_tracks(kind, &idx);
                     ui.close_menu();
                 }
-                if ui.button("Show in Finder").clicked() {
-                    let _ = std::process::Command::new("/usr/bin/open").arg("-R").arg(&t.path).spawn();
+                if ui.button(crate::ui_browser::REVEAL_FILE).clicked() {
+                    if let Err(err) = crate::ui_browser::reveal_path(std::path::Path::new(&t.path)) {
+                        app.toast_err(format!("Could not open the file location: {err}"));
+                    }
                     ui.close_menu();
                 }
             });

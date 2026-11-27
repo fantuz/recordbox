@@ -205,6 +205,48 @@ pub(crate) fn pos2(f: usize, t: usize, c: usize) -> Vec<f32> {
     out
 }
 
+/// Candle's PthTensors::get reopens the ZIP directory for each weight. Reuse one
+/// archive reader for the complete checkpoint, transferring each tensor immediately.
+fn read_checkpoint(path: &Path, device: &Device) -> Result<HashMap<String, Tensor>> {
+    use std::io::Read;
+    let pth = candle_core::pickle::PthTensors::new(path, Some("state"))?;
+    let infos = pth.tensor_infos();
+    if infos.len() != 533 {
+        candle_core::bail!("expected an HTDemucs checkpoint with 533 tensors, found {}", infos.len())
+    }
+    let mut archive = zip::ZipArchive::new(std::io::BufReader::new(std::fs::File::open(path)?))
+        .map_err(|e| candle_core::Error::Msg(e.to_string()))?;
+    let mut weights = HashMap::with_capacity(infos.len());
+    for (name, info) in infos {
+        let mut entry = archive.by_name(&info.path).map_err(|e| candle_core::Error::Msg(e.to_string()))?;
+        let layout = &info.layout;
+        let fortran = layout.is_fortran_contiguous();
+        if !layout.is_contiguous() && !fortran {
+            candle_core::bail!("unsupported layout in tensor {name}")
+        }
+        let bytes = layout.dims().iter().copied().try_fold(info.dtype.size_in_bytes(), usize::checked_mul)
+            .ok_or_else(|| candle_core::Error::Msg(format!("invalid size for tensor {name}")))?;
+        // Candle's pickle reader records the start offset in bytes.
+        let skip = layout.start_offset() as u64;
+        if skip.checked_add(bytes as u64).is_none_or(|end| end > entry.size()) {
+            candle_core::bail!("tensor {name} exceeds its checkpoint entry")
+        }
+        if skip != 0 {
+            std::io::copy(&mut entry.by_ref().take(skip), &mut std::io::sink())?;
+        }
+        let mut buf = vec![0; bytes];
+        entry.read_exact(&mut buf)?;
+        let mut tensor = Tensor::from_raw_buffer(&buf, info.dtype, layout.dims(), device)?;
+        let rank = layout.dims().len();
+        if fortran && rank > 1 {
+            tensor = tensor.reshape(layout.dims().iter().rev().copied().collect::<Vec<_>>())?
+                .permute((0..rank).rev().collect::<Vec<_>>())?;
+        }
+        weights.insert(name.clone(), tensor);
+    }
+    Ok(weights)
+}
+
 /// One loaded HTDemucs network.
 pub struct Graph {
     #[cfg(all(target_os = "linux", feature = "vulkan"))]
@@ -275,17 +317,7 @@ impl Graph {
     pub(super) fn read_weights(path: &Path, device: &Device) -> Result<HashMap<String, Tensor>> {
         let raw: HashMap<String, Tensor> = match path.extension().and_then(|e| e.to_str()) {
             Some("safetensors") => candle_core::safetensors::load(path, device)?,
-            _ => {
-                // torch.save({"klass", "args", "kwargs", "state": state_dict, ...})
-                let pth = candle_core::pickle::PthTensors::new(path, Some("state"))?;
-                let mut m = HashMap::new();
-                for name in pth.tensor_infos().keys() {
-                    if let Some(t) = pth.get(name)? {
-                        m.insert(name.clone(), t.to_device(device)?);
-                    }
-                }
-                m
-            }
+            _ => read_checkpoint(path, device)?,
         };
         let weights = raw.into_iter().map(|(k, v)| Ok((k, v.to_dtype(DType::F32)?))).collect::<Result<HashMap<_, _>>>()?;
         if weights.len() != 533 {
@@ -921,6 +953,24 @@ fn separate_accelerated(audio: &[f32], len: usize, opts: &Options, buffered_segm
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Check the fast ZIP reader against Candle on an optional local Demucs checkpoint.
+    #[test]
+    #[ignore = "set PREPDECK_STEM_TH to a downloaded HTDemucs checkpoint"]
+    fn checkpoint_reader_matches_candle() {
+        let path = std::env::var_os("PREPDECK_STEM_TH").expect("provide a local .th checkpoint");
+        let path = Path::new(&path);
+        let actual = read_checkpoint(path, &Device::Cpu).unwrap();
+        let reference = candle_core::pickle::PthTensors::new(path, Some("state")).unwrap();
+        assert_eq!(actual.len(), reference.tensor_infos().len());
+        for (name, tensor) in actual {
+            let expected = reference.get(&name).unwrap().unwrap();
+            assert_eq!(tensor.dtype(), expected.dtype(), "{name}");
+            assert_eq!(tensor.dims(), expected.dims(), "{name}");
+            let values = |t: Tensor| t.to_dtype(DType::F32).unwrap().flatten_all().unwrap().to_vec1::<f32>().unwrap();
+            assert!(values(tensor).iter().zip(values(expected)).all(|(a, b)| a.to_bits() == b.to_bits()), "{name}");
+        }
+    }
 
     #[cfg(feature = "directml")]
     #[test]

@@ -215,7 +215,7 @@ impl App {
                 if let Some(e) = sampler::SAMPLER.lock().as_mut() {
                     if stop {
                         e.stop(pad, bank, true);
-                    } else {
+                    } else if !self.deck_options.disable_play {
                         loop_refused = e.launch(pad, bank, velocity);
                     }
                 }
@@ -391,7 +391,7 @@ impl App {
 
     /// Carry out a keyboard action of the sampler deck.
     pub fn sampler_action(&mut self, act: SmpAct) {
-        if !self.performance() {
+        if !self.performance() || (self.deck_options.disable_play && matches!(act, SmpAct::SeqPlay)) {
             return;
         }
         // Auto Panel Mode: a sampler or sequencer key shows the sampler panel first.
@@ -487,6 +487,9 @@ impl App {
     /// pattern again on the next beat, another one on the next bar (rekordbox's quantize
     /// arguments 0, 1 and 4 beats).
     pub fn sampler_seq_call(&mut self, slot: usize, stop: bool) {
+        if self.deck_options.disable_play && !stop {
+            return;
+        }
         if let Some(e) = sampler::SAMPLER.lock().as_mut() {
             if stop {
                 if e.seq.playing && e.seq.current() == slot {

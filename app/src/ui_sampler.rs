@@ -249,6 +249,7 @@ impl App {
             return;
         }
         self.sampler_put(idx, id, t.path.clone(), t.display_title(), t.bpm as f32);
+        self.sampler_apply_track_type(idx, id);
     }
 
     /// Load an audio file that need not be in the collection (a file dropped from Finder, a
@@ -740,6 +741,14 @@ pub fn panel(app: &mut App, ui: &mut Ui, r: Rect) {
                 }
             }
         }
+        // Sampler list rows dragged here (sampler_lib.rs).
+        crate::ui_sampler_lib::note_slot(app, idx, sr);
+        if app.mixx.lib.drag.is_some() && app.drag.is_none() && hovered {
+            p.rect_stroke(sr.shrink(3.0), 0.0, Stroke::new(2.0_f32, BLUE), egui::StrokeKind::Inside);
+            if released {
+                app.smplib_drop_on_slot(idx);
+            }
+        }
         // Another slot's sample dragged here moves here.
         if let Some(from) = app.px.sampler.drag_slot.filter(|f| *f != idx) {
             if hovered {
@@ -998,7 +1007,7 @@ fn sequencer_strip(app: &mut App, ui: &mut Ui, so: Pos2, sv: &SeqView, sp: &mut 
     let o = seq_box(&p, pr, if sv.playing { BLUE } else { BTN });
     p.add(egui::Shape::convex_polygon(vec![o + vec2(6.2, 5.7), o + vec2(12.2, 9.0), o + vec2(6.2, 12.3)], WHITE, Stroke::new(0.5_f32, WHITE)));
     if tip(resp, app, "Sequence Play:\nPlay Sampler sequence").clicked() {
-        with_engine(&mut |e| if sv.playing { e.seq_stop() } else { e.seq_play() });
+        app.sampler_action(crate::sampler_ext::SmpAct::SeqPlay);
     }
 
     // SAVE: the pattern as it is goes into its slot (a paid function in rekordbox; free here).

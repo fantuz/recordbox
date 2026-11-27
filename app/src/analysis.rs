@@ -12,19 +12,26 @@ pub struct AnalysisSettings {
     pub bpm_max: f64,
     pub do_grid: bool,
     pub high_precision: bool,
+    /// Optional installed-model grid mode captured when this job is queued.
+    pub model_grid_mode: u8,
     pub do_key: bool,
     /// Loudness the auto gain aims for (LUFS).
     pub target_lufs: f64,
     /// Analysis Mode "Dynamic": the grid follows tempo changes (several anchors).
     pub dynamic: bool,
+    /// Vocal detection (rekordbox's, `vocal_rb`), Preferences > Analysis > Vocal.
+    pub vocal: bool,
 }
 
 pub mod dynamic;
 mod precision;
+pub mod mp3_timebase;
+pub mod rb_hp;
 
 impl Default for AnalysisSettings {
     fn default() -> Self {
-        AnalysisSettings { bpm_min: 70.0, bpm_max: 180.0, do_grid: true, high_precision: false, do_key: true, target_lufs: -10.0, dynamic: false }
+        AnalysisSettings { bpm_min: 70.0, bpm_max: 180.0, do_grid: true, high_precision: false,
+            model_grid_mode: rb_hp::mode_from_preferences(false, 0), do_key: true, target_lufs: -10.0, dynamic: false, vocal: false }
     }
 }
 
@@ -54,6 +61,8 @@ pub struct AnalysisResult {
     pub gain_db: f32,
     /// Linear sample peak of the measured audio (0 when unavailable).
     pub peak: f32,
+    /// Vocal levels 0–4 per 1024 samples at 22,050 Hz (`vocal_rb`), when detected.
+    pub vocal: Option<Vec<u8>>,
 }
 
 pub fn analyze_file(path: &str, s: &AnalysisSettings) -> Result<AnalysisResult> {
@@ -90,6 +99,7 @@ fn analyze_passes(dec: &Decoded, s: &AnalysisSettings, parallel: bool) -> Analys
     // are independent and only borrow the decoded samples.
     let timing = || {
         let (bpm, grid) = analyze_grid(&mono, sr, s);
+        let (bpm, grid) = rb_hp::dispatch(dec, s, bpm, grid);
         let key = if s.do_key { crate::key::detect_key_stereo(&dec.samples, dec.sr, bpm, grid.as_ref()) } else { -1 };
         (bpm, grid, key)
     };
@@ -102,7 +112,8 @@ fn analyze_passes(dec: &Decoded, s: &AnalysisSettings, parallel: bool) -> Analys
     };
     // No measurement stays unavailable (NaN), never a usable 0 dB or an infinite gain.
     let gain_db = if lufs.is_finite() { (s.target_lufs - lufs).clamp(-24.0, 24.0) as f32 } else { f32::NAN };
-    AnalysisResult { duration: dec.duration(), raw_samples: dec.raw_frames as u64, sample_rate: dec.sr, bpm, grid, key, wave, gain_db, peak }
+    let vocal = if s.vocal { crate::vocal_rb::analyse(dec) } else { None };
+    AnalysisResult { duration: dec.duration(), raw_samples: dec.raw_frames as u64, sample_rate: dec.sr, bpm, grid, key, wave, gain_db, peak, vocal }
 }
 
 // ------------------------------------------------------------------------------------------
@@ -418,7 +429,7 @@ pub fn tempo_and_grid(mono: &[f32], sr: f64, bpm_min: f64, bpm_max: f64) -> (f64
     // 3) Sub-frame refinement against low-band transients in the time domain.
     let period_s = 60.0 / bpm;
     let mut first = o.t0 + phase / fps;
-    first = refine_phase(mono, sr, first, period_s);
+    first = refine_phase(mono, sr, first, period_s) - phase_lead() / 1000.0;
     // Bring the first beat to the earliest position >= 0.
     first -= (first / period_s).floor() * period_s;
 
@@ -552,14 +563,30 @@ fn attack_fraction() -> f32 {
     std::env::var("PREPDECK_ATTACK").ok().and_then(|v| v.parse().ok()).unwrap_or(ATTACK_FRACTION)
 }
 
+/// Low-pass of the envelope the phase is refined on; 0 = the full band. rekordbox marks the
+/// broadband onset of the kick (measured: full band 1.3 ms median against its grids, 150 Hz 5.8 ms
+/// and about 24 ms late).
+fn refine_hz() -> f64 {
+    std::env::var("PREPDECK_REFINE_HZ").ok().and_then(|v| v.parse().ok()).unwrap_or(0.0)
+}
+fn phase_lead() -> f64 {
+    std::env::var("PREPDECK_PHASE_LEAD").ok().and_then(|v| v.parse().ok()).unwrap_or(0.0)
+}
+fn refine_back() -> isize {
+    std::env::var("PREPDECK_REFINE_BACK").ok().and_then(|v| v.parse().ok()).unwrap_or(12)
+}
+
 fn refine_phase(mono: &[f32], sr: f64, first: f64, period: f64) -> f64 {
-    let mut lp1 = Biquad::new("lp", 150.0, 0.707, sr, 0.0);
-    let mut lp2 = Biquad::new("lp", 150.0, 0.707, sr, 0.0);
+    let hz = refine_hz();
+    let lookback = refine_back().clamp(0, 80);
+    let fraction = attack_fraction();
+    let mut lp1 = Biquad::new("lp", hz.max(1.0), 0.707, sr, 0.0);
+    let mut lp2 = Biquad::new("lp", hz.max(1.0), 0.707, sr, 0.0);
     let ms = (sr / 1000.0).max(1.0) as usize;
     let mut env = Vec::with_capacity(mono.len() / ms + 1);
     let mut acc = 0f32;
     for (i, &x) in mono.iter().enumerate() {
-        let y = lp2.run(lp1.run(x as f64)).abs() as f32;
+        let y = if hz > 0.0 { lp2.run(lp1.run(x as f64)).abs() as f32 } else { x.abs() };
         acc = acc.max(y);
         if (i + 1) % ms == 0 {
             env.push(acc);
@@ -592,8 +619,8 @@ fn refine_phase(mono: &[f32], sr: f64, first: f64, period: f64) -> f64 {
                 env[i as usize + 1] - env[i as usize - 2]
             };
             let mut start = best.0;
-            for d in (best.0 - 12).max(-40)..best.0 {
-                if rise_at(d) >= attack_fraction() * best.1 {
+            for d in (best.0 - lookback).max(-40)..best.0 {
+                if rise_at(d) >= fraction * best.1 {
                     start = d;
                     break;
                 }
@@ -1003,6 +1030,25 @@ mod real_files {
 }
 
 #[cfg(test)]
+mod decode_probe {
+    /// Writes the first 30 s of each decoded file (left channel, f32 LE) to PREPDECK_DUMP_PCM so
+    /// the start offset can be compared with another decoder. PREPDECK_AUDIO = paths joined by '|'.
+    #[test]
+    #[ignore]
+    fn dump_decoded_head() {
+        let Ok(dir) = std::env::var("PREPDECK_DUMP_PCM") else { return };
+        let list = std::env::var("PREPDECK_AUDIO").unwrap_or_default();
+        for (i, p) in list.split('|').filter(|s| !s.is_empty()).enumerate() {
+            let Ok(d) = crate::audio::decode_file(p) else { continue };
+            let n = (d.sr as usize * 30).min(d.frames());
+            let bytes: Vec<u8> = d.samples.chunks_exact(2).take(n).flat_map(|c| c[0].to_le_bytes()).collect();
+            std::fs::write(format!("{dir}/{i}.f32"), bytes).unwrap();
+            eprintln!("{i}\t{}\t{}\t{:?}\t{p}", d.frames(), d.raw_frames, crate::audio::mp3_timing_class(p));
+        }
+    }
+}
+
+#[cfg(test)]
 mod ground_truth {
     /// Compare analysis with reference grids: PREPDECK_GT = tsv of "path\tbeat,bpm100,ms;..."
     #[test]
@@ -1055,6 +1101,9 @@ mod ground_truth {
         let mean = ph.iter().sum::<f64>() / ph.len().max(1) as f64;
         let down = res.iter().filter(|r| r.4).count();
         eprintln!("tracks {n}  bpm exact {bpm_ok}  downbeat {down}");
+        let mut sg = ph.clone();
+        sg.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        eprintln!("phase median signed {:.1} ms", sg.get(sg.len() / 2).unwrap_or(&0.0));
         eprintln!("phase mean {mean:.1} ms, median |err| {:.1} ms, 90% {:.1} ms, within 5ms {}", abs.get(abs.len() / 2).unwrap_or(&0.0), abs.get(abs.len() * 9 / 10).unwrap_or(&0.0), abs.iter().filter(|x| **x <= 5.0).count());
         for r in bpm_oct {
             eprintln!("  BPM ref {:.2} mine {:.2} :: {}", r.1, r.2, r.0);

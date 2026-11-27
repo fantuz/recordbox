@@ -6,6 +6,8 @@
 //! rekordbox's own (vendor) models are never used.
 
 pub mod htdemucs;
+#[cfg(test)]
+mod bench;
 mod backend;
 #[cfg(feature = "directml")]
 mod directml;

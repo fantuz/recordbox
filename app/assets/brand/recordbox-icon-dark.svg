@@ -1,0 +1,27 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+<title>recordbox</title>
+<defs>
+<path id="sq" d="M352.20 0.00L671.80 0.00C773.21 0.00 823.92 0.00 878.50 17.26C938.10 38.95 985.05 85.90 1006.74 145.50C1024.00 200.08 1024.00 250.79 1024.00 352.20L1024.00 671.80C1024.00 773.21 1024.00 823.92 1006.74 878.50C985.05 938.10 938.10 985.05 878.50 1006.74C823.92 1024.00 773.21 1024.00 671.80 1024.00L352.20 1024.00C250.79 1024.00 200.08 1024.00 145.50 1006.74C85.90 985.05 38.95 938.10 17.26 878.50C0.00 823.92 0.00 773.21 0.00 671.80L0.00 352.20C0.00 250.79 0.00 200.08 17.26 145.50C38.95 85.90 85.90 38.95 145.50 17.26C200.08 0.00 250.79 0.00 352.20 0.00Z"/>
+<clipPath id="clip"><use href="#sq"/></clipPath>
+<clipPath id="top"><rect x="0" y="0" width="1024" height="498"/></clipPath>
+<clipPath id="bot"><rect x="0" y="526" width="1024" height="498"/></clipPath>
+<clipPath id="dT"><circle cx="472" cy="498" r="264"/></clipPath>
+<clipPath id="dB"><circle cx="552" cy="526" r="264"/></clipPath>
+<linearGradient id="tile" gradientUnits="userSpaceOnUse" x1="0" y1="0" x2="0" y2="1024"><stop offset="0" stop-color="#2E3138"/><stop offset="1" stop-color="#101216"/></linearGradient>
+<linearGradient id="rim" gradientUnits="userSpaceOnUse" x1="0" y1="0" x2="0" y2="1024"><stop offset="0" stop-color="#fff" stop-opacity="0.3"/><stop offset="0.45" stop-color="#fff" stop-opacity="0"/><stop offset="0.6" stop-color="#000" stop-opacity="0"/><stop offset="1" stop-color="#000" stop-opacity="0.35"/></linearGradient>
+<linearGradient id="vinyl" gradientUnits="userSpaceOnUse" x1="260" y1="240" x2="780" y2="800"><stop offset="0" stop-color="#E4FF62"/><stop offset="1" stop-color="#AEE61A"/></linearGradient>
+<filter id="lift" filterUnits="userSpaceOnUse" x="0" y="0" width="1024" height="1024" color-interpolation-filters="sRGB"><feGaussianBlur in="SourceAlpha" stdDeviation="16"/><feOffset dy="14"/><feComponentTransfer><feFuncA type="linear" slope="0.55"/></feComponentTransfer><feMerge><feMergeNode/><feMergeNode in="SourceGraphic"/></feMerge></filter>
+<filter id="soft" filterUnits="userSpaceOnUse" x="0" y="0" width="1024" height="1024"><feGaussianBlur stdDeviation="12"/></filter>
+</defs>
+<use href="#sq" fill="url(#tile)"/>
+<g clip-path="url(#clip)">
+<g filter="url(#lift)" fill="url(#vinyl)"><path d="M208 498A264 264 0 0 1 736 498Z"/><path d="M288 526A264 264 0 0 0 816 526Z"/></g>
+<g clip-path="url(#top)">
+<circle cx="472" cy="498" r="88" fill="#1B1D22"/>
+</g>
+<g clip-path="url(#bot)">
+<circle cx="552" cy="526" r="88" fill="#1B1D22"/>
+</g>
+<use href="#sq" fill="none" stroke="url(#rim)" stroke-width="14"/>
+</g>
+</svg>

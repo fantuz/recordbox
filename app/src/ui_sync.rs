@@ -156,6 +156,9 @@ pub fn show(app: &mut App, ctx: &Context) {
     window.show(ctx, |ui| {
         kit::apply_style(ui);
         ui.heading("Sync direction");
+        if app.prefs.rb.library_protection {
+            ui.label("Library Protection is enabled. You can preview changes and review interrupted write-back recovery.");
+        }
         let previous = review.direction;
         ui.add_enabled_ui(!working, |ui| {
             ui.vertical(|ui| {
@@ -206,9 +209,9 @@ pub fn show(app: &mut App, ctx: &Context) {
                 if matches!(review.recovery, Ok(true)) {
                     ui.colored_label(CAUTION_TX, "An interrupted write-back needs review. Choose Write back to inspect recovery before importing.");
                 }
-                import = ui.add_enabled(review.found && matches!(review.recovery, Ok(false)), btn("Import into recordbox")).clicked();
+                import = ui.add_enabled(!app.prefs.rb.library_protection && review.found && matches!(review.recovery, Ok(false)), btn("Import into recordbox")).clicked();
             }
-            Some(Direction::WriteBack) => writeback_view(review, ui),
+            Some(Direction::WriteBack) => writeback_view(review, ui, app.prefs.rb.library_protection),
             None => {}
         }
         if !working {
@@ -239,7 +242,7 @@ fn changes(n: usize) -> String {
     format!("{n} change{}", if n == 1 { "" } else { "s" })
 }
 
-fn writeback_view(review: &mut Review, ui: &mut Ui) {
+fn writeback_view(review: &mut Review, ui: &mut Ui, library_protected: bool) {
     if let Some(status) = review.status() {
         ui.horizontal(|ui| {
             ui.spinner();
@@ -298,7 +301,7 @@ fn writeback_view(review: &mut Review, ui: &mut Ui) {
                 ui.label("recordbox rechecks the selected fields and creates a verified recovery copy of the database and affected analysis files before writing. Close AlphaTheta Rekordbox and its agents. Use a local library with Cloud Library Sync turned off on every linked computer.");
                 ui.horizontal_wrapped(|ui| {
                     apply = ui
-                        .add_enabled(count > 0, btn(format!("Back up and apply {}", changes(count))))
+                        .add_enabled(!library_protected && count > 0, btn(format!("Back up and apply {}", changes(count))))
                         .clicked();
                     if ui.add(btn("Back to selection")).clicked() {
                         *confirm = false;
@@ -310,7 +313,7 @@ fn writeback_view(review: &mut Review, ui: &mut Ui) {
             } else {
                 preview_rows(ui, plan, selected, links, page);
                 ui.horizontal_wrapped(|ui| {
-                    if ui.add_enabled(!selected.is_empty(), btn("Review selected changes")).clicked() {
+                    if ui.add_enabled(!library_protected && !selected.is_empty(), btn("Review selected changes")).clicked() {
                         *confirm = true;
                     }
                 });

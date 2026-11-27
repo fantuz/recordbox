@@ -107,6 +107,8 @@ pub fn apply(ctx: &egui::Context) {
         fam.extend(fonts.families.get(&egui::FontFamily::Proportional).cloned().unwrap_or_default());
         fonts.families.insert(egui::FontFamily::Name(name.into()), fam);
     }
+    // The face of rekordbox's Preferences window (families "pref" and "pref-bold", see prefs_font.rs).
+    crate::prefs_font::install(&mut fonts);
     // The browser's face: Helvetica regular and bold (faces 0 and 1 of the system collection),
     // falling back to the proportional list.
     for (fam, face, idx) in [("rb", "rb-regular", 0u32), ("rb-bold", "rb-boldface", 1)] {
@@ -129,6 +131,13 @@ pub fn apply(ctx: &egui::Context) {
         caps_fam.insert(0, "arial-bold".to_owned());
     }
     fonts.families.insert(egui::FontFamily::Name("caps".into()), caps_fam);
+    // Arial regular: the face of rekordbox's Performance decks (ui_perf_layouts.rs).
+    let mut arial_fam = fonts.families.get(&egui::FontFamily::Proportional).cloned().unwrap_or_default();
+    if let Ok(b) = std::fs::read("/System/Library/Fonts/Supplemental/Arial.ttf") {
+        fonts.font_data.insert("arial-regular".to_owned(), std::sync::Arc::new(egui::FontData::from_owned(b)));
+        arial_fam.insert(0, "arial-regular".to_owned());
+    }
+    fonts.families.insert(egui::FontFamily::Name("arial".into()), arial_fam);
     ctx.set_fonts(fonts);
     let mut style = (*ctx.style()).clone();
     use egui::{FontFamily::Proportional, FontId, TextStyle};

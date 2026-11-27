@@ -1480,6 +1480,9 @@ pub fn run_export(mut req: ExportRequest, progress: &dyn Fn(Progress), cancel: &
             if et.track.bpm <= 0.0 {
                 et.track.bpm = res.bpm;
             }
+            if et.vocal.is_none() {
+                et.vocal = res.vocal.clone();
+            }
         }
         progress(Progress::Analyzed(id, Box::new(r)));
     }

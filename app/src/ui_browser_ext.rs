@@ -762,31 +762,7 @@ pub fn column_view(app: &mut App, ui: &mut Ui, drop: &mut Vec<(Rect, i64)>) {
                         }
                     }
                     let nn = n.clone();
-                    resp.context_menu(|ui| {
-                        let into = if nn.kind == NodeKind::Folder { nn.id } else { nn.parent };
-                        for (label, kind) in [("Create New Playlist", NodeKind::Playlist), ("Create New Intelligent Playlist", NodeKind::Smart), ("Create New Folder", NodeKind::Folder)] {
-                            if ui.button(label).clicked() {
-                                app.create_node(into, kind);
-                                ui.close_menu();
-                            }
-                        }
-                        ui.separator();
-                        let what = if nn.kind == NodeKind::Folder { "Folder" } else { "Playlist" };
-                        if ui.button(format!("Rename {what}")).clicked() {
-                            app.dialogs.rename = Some((nn.id, nn.name.clone()));
-                            ui.close_menu();
-                        }
-                        if ui.button(format!("Export {what}")).clicked() {
-                            crate::ui_browser::open_export(app, vec![nn.id], vec![]);
-                            ui.close_menu();
-                        }
-                        crate::ui_library_ext::node_menu_extra(app, ui, &nn);
-                        ui.separator();
-                        if ui.button(format!("Delete {what}")).clicked() {
-                            app.dialogs.confirm_delete_node = Some((nn.id, nn.name.clone(), nn.kind == NodeKind::Folder));
-                            ui.close_menu();
-                        }
-                    });
+                    resp.context_menu(|ui| crate::ui_library_ext::node_menu(app, ui, &nn));
                 }
                 // The rest of the column: a menu for creating at this level.
                 let rest = ui.available_rect_before_wrap();
@@ -989,7 +965,7 @@ pub fn sub_browser(app: &mut App, ui: &mut Ui, r: Rect, drop: &mut Vec<(Rect, i6
         (src::itunes, Some(SideMode::Itunes), "iTunes"),
         (src::device, Some(SideMode::Devices), "Devices"),
         (src::history, Some(SideMode::History), "Histories"),
-        (src::recording, None, "Recordings (not available in this app)"),
+        (src::recording, Some(SideMode::Recordings), "Recordings"),
     ];
     for (i, (draw, mode, name)) in tiles.iter().enumerate() {
         let rr = Rect::from_center_size(pos2(r.min.x + 14.5, r.min.y + 12.0 + i as f32 * 20.0), vec2(18.0, 18.0));
@@ -1016,6 +992,7 @@ pub fn sub_browser(app: &mut App, ui: &mut Ui, r: Rect, drop: &mut Vec<(Rect, i6
                     }
                     SideMode::History => app.set_view(View::History(0)),
                     SideMode::Itunes => app.set_view(View::Source { kind: crate::library_ext::SRC_ITUNES, node: String::new() }),
+                    SideMode::Recordings => app.set_view(View::Explorer(crate::ui_rec::rec_dir(&app.prefs.rec).to_string_lossy().to_string())),
                     _ => {}
                 }
             }
