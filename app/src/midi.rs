@@ -3118,20 +3118,9 @@ mod tests {
         }
     }
 
-    /// End to end over CoreMIDI: a virtual controller (a source that sends, a destination
-    /// that receives the LEDs) is found by name, its user mapping is loaded, notes and CCs
-    /// change the decks and the mixer in the engine without any interface frame, and the
-    /// LED messages come back out.
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn a_virtual_controller_plays_a_deck_moves_the_mixer_and_gets_its_leds() {
-        use midir::os::unix::{VirtualInput, VirtualOutput};
-        let name = format!("recordbox test ctl {}", std::process::id());
-        let dir = std::env::temp_dir().join(format!("recordbox-midi-e2e-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+    pub(super) fn virtual_controller_mapping(name: &str) -> String {
         // The controller's mapping, as a user file in rekordbox's format.
-        let csv = format!(
+        format!(
             "@file,1,{name}\r\n\
              MidiOutInterval,MidiOutInterval,Parameter,FFF3,,,,,,,,,,Value=2;,\r\n\
              PlayPause,PlayPause,Button,,900B,910B,,,,900B,910B,,,Fast;Blink=1000;Priority=50;,\r\n\
@@ -3145,8 +3134,22 @@ mod tests {
              Sync,Sync,Button,,9058,9158,,,,9058,9158,,,,\r\n\
              JogPlayPauseIndicatorShort,JogPlayPauseIndicatorShort,JogIndicator,,,,,,,BB00,BB01,,,RO;Min=1;Max=72;Priority=100;,\r\n\
              ChannelLevel,ChannelLevel,Indicator,,,,,,B002,0,1,,,RO;Priority=50;,\r\n"
-        );
-        std::fs::write(dir.join(format!("{name}.midi.csv")), csv).unwrap();
+        )
+    }
+
+    /// End to end over CoreMIDI: a virtual controller (a source that sends, a destination
+    /// that receives the LEDs) is found by name, its user mapping is loaded, notes and CCs
+    /// change the decks and the mixer in the engine without any interface frame, and the
+    /// LED messages come back out.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_virtual_controller_plays_a_deck_moves_the_mixer_and_gets_its_leds() {
+        use midir::os::unix::{VirtualInput, VirtualOutput};
+        let name = format!("recordbox test ctl {}", std::process::id());
+        let dir = std::env::temp_dir().join(format!("recordbox-midi-e2e-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(format!("{name}.midi.csv")), virtual_controller_mapping(&name)).unwrap();
 
         // The virtual controller: its source (what it sends) and its destination (its LEDs).
         let mut ctl_out = match midir::MidiOutput::new("test-controller")
@@ -3276,12 +3279,28 @@ mod tests {
         ctl_out.send(&[0xB0, 0x00, 0x60]).unwrap();
         ctl_out.send(&[0xB0, 0x20, 0x00]).unwrap();
         wait("the tempo", || (decks[0].lock().tempo - (1.0 + 0.10 * 4096.0 / 8191.0)).abs() < 1e-6);
-        // The outer jog ring: a bend while it turns, gone 60 ms after it stops.
-        for _ in 0..8 {
-            ctl_out.send(&[0xB0, 0x23, 0x50]).unwrap();
-            std::thread::sleep(Duration::from_millis(8));
+        // One +63-count movement crosses this platter's deadband. Observe the
+        // bend while sending, even if the runner pauses between MIDI callbacks.
+        assert_eq!(dev.map.lock().input_at(0xB023).map(|e| (e.name.as_str(), e.deck, e.kind)),
+                   Some(("JogPitchBend", 1, crate::midi_csv::Kind::JogRotate)));
+        let jog_tag = registry().tag("JogPitchBend");
+        let until = Instant::now() + Duration::from_secs(5);
+        let mut jog_events = 0;
+        let received_before = dev.received.load(Relaxed);
+        loop {
+            ctl_out.send(&[0xB0, 0x23, 0x7F]).unwrap();
+            // The worker posts the event after applying the fast-path action.
+            if let Ok(UiEvent::Control { tag, deck: 1, val: Val::Jog { delta: 63, .. }, fast_done: true, .. })
+                = rx.recv_timeout(Duration::from_millis(10))
+            {
+                if tag == jog_tag {
+                    jog_events += 1;
+                    if decks[0].lock().bend > 0.0 { break; }
+                }
+            }
+            assert!(Instant::now() < until, "no positive jog bend: {jog_events} mapped events, {} MIDI packets received",
+                dev.received.load(Relaxed) - received_before);
         }
-        wait("the bend", || decks[0].lock().bend > 0.0);
         wait("the bend to end", || decks[0].lock().bend == 0.0);
         // A row without Fast (SYNC) is left to the interface.
         while rx.try_recv().is_ok() {}
@@ -3305,7 +3324,7 @@ mod tests {
             let l = leds.lock();
             l.iter().any(|m| m == &[0x90, 0x58, 0x7F]) && l.iter().any(|m| m == &[0x91, 0x58, 0x00])
         });
-        assert!(dev.received.load(Relaxed) >= 20 && dev.sent.load(Relaxed) >= 6);
+        assert!(dev.received.load(Relaxed) >= 18 && dev.sent.load(Relaxed) >= 6);
 
         // LEARN captures the message without running its previous mapping.
         hub.set_learning(&dev, true);

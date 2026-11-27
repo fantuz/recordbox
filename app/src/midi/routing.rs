@@ -406,6 +406,42 @@ mod tests {
     }
 
     #[test]
+    fn coremidi_mapping_routes_outer_wheel_cc_to_deck_bend_and_expires_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let name = "recordbox test ctl";
+        let (mut hub, rx) = hub();
+        let setup = Arc::get_mut(&mut hub).unwrap();
+        setup.user_dir = dir.path().into();
+        setup.factory_dirs.clear();
+        setup.native_user_dirs.clear();
+        std::fs::write(setup.user_file(name), crate::midi::tests::virtual_controller_mapping(name)).unwrap();
+        let (map, factory) = setup.load_map(name);
+        let dev = Device::mapped(name, name.into(), map, factory, None);
+        hub.routing.lock().performance = true;
+        hub.snap.lock().decks[0].loaded = true;
+
+        // Match the actual virtual controller's eight relative ticks. Controlled
+        // MIDI timestamps let us observe the short bend without depending on OS scheduling.
+        for tick in 0..8 {
+            let timestamp = 123_000.0 + f64::from(tick * 8);
+            hub.input_message(&dev, [0xB0, 0x23, 0x50], timestamp, 0, 0);
+            let UiEvent::Control { tag, deck, val, fast_done, .. } = rx.try_recv().expect("mapped wheel tick") else {
+                panic!("expected a jog control event");
+            };
+            assert_eq!(registry().get(tag).unwrap().act, Act::Jog(false));
+            assert_eq!((deck, val, fast_done), (1, Val::Jog { delta: 16, t_ms: timestamp }, true));
+        }
+        let bend = hub.decks[0].lock().bend;
+        assert!(bend > 0.0, "the mapped clockwise jog burst must bend deck 1");
+        assert_eq!(hub.decks[1].lock().bend, 0.0);
+        let end = dev.jog.lock()[0].deadline().expect("jog idle deadline");
+        hub.idle_jogs(&dev, end - Duration::from_millis(2));
+        assert_eq!(hub.decks[0].lock().bend, bend);
+        hub.idle_jogs(&dev, end);
+        assert_eq!(hub.decks[0].lock().bend, 0.0);
+    }
+
+    #[test]
     fn fader_messages_do_not_extend_a_jog_bend_deadline() {
         let (hub, _) = hub();
         hub.routing.lock().performance = true;
