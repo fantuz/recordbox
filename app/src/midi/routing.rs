@@ -603,6 +603,83 @@ mod tests {
         }
         assert_eq!(hub.decks[0].lock().bend, 0.0);
     }
+
+    fn fader_controller(name: &str) -> Arc<Device> {
+        let csv = format!(
+            "@file,1,{name}\r\nChannelFader,ChannelFader,KnobSlider,,B010,B110,,,,,,,,Fast;Max=127;,\r\n"
+        );
+        let map = MidiMap::load(name, None, Some(csv.as_bytes())).unwrap();
+        Device::mapped(name, name.into(), map, false, None)
+    }
+
+    #[test]
+    fn input_worker_expires_a_due_jog_with_faders_already_queued() {
+        let (hub, ui) = hub();
+        hub.routing.lock().performance = true;
+        let dev = fader_controller("wheel");
+        let last_turn = Instant::now() - Duration::from_millis(100);
+        let out = dev.jog.lock()[0].rotate(400, 123_000.0, false, last_turn);
+        hub.routed_jog(&mut hub.routing.lock(), &dev, 0, out, false);
+        assert_ne!(hub.decks[0].lock().bend, 0.0);
+
+        let (tx, input) = crossbeam_channel::unbounded();
+        for value in 0..128 {
+            tx.send((123_100_000 + u64::from(value), [0xb0, 0x10, value], 0, 0)).unwrap();
+        }
+        // The final fader cannot finish until the observer unlocks deck 2. This
+        // keeps the worker's disconnect cleanup from masking a missed jog deadline.
+        let gate = hub.decks[1].lock();
+        tx.send((123_101_000, [0xb1, 0x10, 64], 0, 0)).unwrap();
+        drop(tx);
+        let worker = {
+            let hub = hub.clone();
+            std::thread::spawn(move || hub.run_input(dev, input))
+        };
+        let first = ui.recv_timeout(Duration::from_secs(5));
+        let bend_at_delivery = hub.decks[0].lock().bend;
+        drop(gate);
+        worker.join().unwrap();
+        assert_eq!(bend_at_delivery, 0.0);
+
+        let mut events = std::iter::once(first.expect("first fader event")).chain(ui.try_iter());
+        for (deck, value) in (0..128).map(|v| (1, v)).chain([(2, 64)]) {
+            assert!(matches!(events.next(), Some(UiEvent::Control {
+                deck: d, tag, fast_done: true, val: Val::Abs { v, .. }, ..
+            }) if d == deck && v == value && registry().get(tag).unwrap().act == Act::ChFader));
+        }
+        assert!(events.next().is_none());
+    }
+
+    #[test]
+    fn acknowledging_faders_preserves_later_writes_from_both_ports() {
+        let (hub, ui) = hub();
+        hub.routing.lock().performance = true;
+        std::thread::scope(|scope| {
+            for (name, status) in [("left", 0xb0), ("right", 0xb1)] {
+                let dev = fader_controller(name);
+                let hub = &hub;
+                scope.spawn(move || {
+                    for value in 0..64 {
+                        hub.input_message(&dev, [status, 0x10, value], f64::from(value), 0, 0);
+                    }
+                });
+            }
+        });
+        let sent: Vec<_> = ui.try_iter().map(|event| {
+            let UiEvent::Control { seq, deck, val, fast_done: true, .. } = event else {
+                panic!("expected a fast fader");
+            };
+            (deck - 1, Param::ChFader, val.unit().unwrap(), seq)
+        }).collect();
+        assert_eq!(sent.len(), 128);
+        assert!(sent.windows(2).all(|pair| pair[0].3 < pair[1].3));
+        assert!(hub.overlay.lock().iter().eq(&sent));
+        for (ack_index, remaining) in [(63, 64), (17, 64), (63, 64), (100, 101), (127, 128)] {
+            hub.acknowledge_overlay(sent[ack_index].3);
+            assert!(hub.overlay.lock().iter().eq(&sent[remaining..]));
+        }
+    }
+
     #[test]
     fn held_fx_mapping_survives_active_deck_changes_and_releases_on_disconnect() {
         let (hub, rx) = hub();

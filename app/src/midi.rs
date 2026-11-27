@@ -26,7 +26,7 @@ use crate::midi_map::*;
 use crate::model::*;
 use parking_lot::{Condvar, Mutex};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering::Relaxed};
 use std::sync::Arc;
@@ -179,6 +179,31 @@ pub const PARAMS: [&str; 2] = ["MidiOutInterval", "JogIndicatorInterval"];
 /// Outputs that follow the engine and are sent by row name (`Hub::engine_outputs`).
 pub const NAMED_OUTPUTS: [&str; 7] = ["JogPlayPauseIndicator", "JogPlayPauseIndicatorShort", "ChannelLevel", "LoadedIndicator", "GetLoopActive", "SlipStateForFlashing", "PlayingState"];
 
+/// Segmented controller meters use the louder channel's pre-fader linear peak
+/// as a percentage of full scale. Each light stays on above its own threshold.
+fn channel_segment_threshold(name: &str) -> Option<u8> {
+    match name {
+        "ChannelLevel.1" => Some(10),
+        "ChannelLevel.2" => Some(30),
+        "ChannelLevel.3" => Some(50),
+        "ChannelLevel.4" => Some(70),
+        "ChannelLevel.5" => Some(90),
+        _ => None,
+    }
+}
+
+fn channel_meter_value(entry: &Entry, level: f32) -> u16 {
+    let level = level.clamp(0.0, 1.0);
+    let percent = (level * 100.0) as u8;
+    match channel_segment_threshold(&entry.name) {
+        Some(threshold) if percent < threshold => 0,
+        Some(_) if entry.kind == Kind::IndicatorHiRes => 16383,
+        Some(_) => 127,
+        None if entry.kind == Kind::IndicatorHiRes => (level * 16383.0).round() as u16,
+        None => u16::from(percent),
+    }
+}
+
 /// recordbox acts on an input row of this function and type.
 pub fn input_acts(name: &str, kind: Kind) -> bool {
     if kind == Kind::JogTimestamp { return true; }
@@ -192,11 +217,14 @@ pub fn input_acts(name: &str, kind: Kind) -> bool {
 
 /// recordbox drives an output row of this function (a light, a meter, the jog ring).
 pub fn output_source(name: &str) -> bool {
-    NAMED_OUTPUTS.contains(&name) || registry().by_name(name).map(|f| act_has_led(f.act) || echo_led(f.act)).unwrap_or(false)
+    NAMED_OUTPUTS.contains(&name) || channel_segment_threshold(name).is_some() || registry().by_name(name).map(|f| act_has_led(f.act) || echo_led(f.act)).unwrap_or(false)
 }
 
 /// An explicitly mapped output row with a source in the running application.
 pub fn output_acts(name: &str, kind: Kind) -> bool {
+    if channel_segment_threshold(name).is_some() {
+        return matches!(kind, Kind::Indicator | Kind::IndicatorHiRes);
+    }
     // Imported maps may attach an output code to a knob or a rotary. Learn only
     // offers Lights for a subset of those types, but their mapped feedback works.
     !matches!(kind, Kind::Parameter | Kind::JogTimestamp) && output_source(name)
@@ -951,7 +979,13 @@ impl Device {
         for o in &m.outputs {
             let tag = reg.tag(&o.name);
             if !output_acts(&o.name, o.kind) { continue; }
-            if let Some(name) = NAMED_OUTPUTS.iter().find(|&&name| o.name == name) {
+            // A deck's segmented and continuous meters share one update and queue lock.
+            let group = if channel_segment_threshold(&o.name).is_some() {
+                Some("ChannelLevel")
+            } else {
+                NAMED_OUTPUTS.iter().copied().find(|&name| o.name == name)
+            };
+            if let Some(name) = group {
                 named.entries.entry((name, o.deck)).or_default().push(o.clone());
             } else if tag != 0 {
                 idx.entry((tag, o.deck)).or_default().push(o.clone());
@@ -1173,7 +1207,8 @@ pub struct Hub {
     pub devices: Mutex<Vec<Arc<Device>>>,
     pub decks: [Arc<Mutex<PlayState>>; 4],
     pub snap: Mutex<Snapshot>,
-    overlay: Mutex<Vec<(u8, Param, f32, u64)>>,
+    // deliver holds the routing lock from sequence assignment through the fast write and UI send.
+    overlay: Mutex<VecDeque<(u8, Param, f32, u64)>>,
     seq: AtomicU64,
     tx: crossbeam_channel::Sender<UiEvent>,
     pub ctx: Mutex<Option<eframe::egui::Context>>,
@@ -1226,7 +1261,7 @@ impl Hub {
             devices: Mutex::new(vec![]),
             decks,
             snap: Mutex::new(Snapshot::default()),
-            overlay: Mutex::new(vec![]),
+            overlay: Mutex::new(VecDeque::new()),
             seq: AtomicU64::new(1),
             tx,
             ctx: Mutex::new(None),
@@ -1477,6 +1512,13 @@ impl Hub {
         self.wake();
     }
 
+    fn acknowledge_overlay(&self, seq: u64) {
+        let mut pending = self.overlay.lock();
+        while pending.front().is_some_and(|entry| entry.3 <= seq) {
+            pending.pop_front();
+        }
+    }
+
     /// The deck a mapping's deck number means: 1..4, or the active deck for a row without one.
     pub fn deck_ix(&self, deck: u8) -> Option<usize> {
         let s = self.snap.lock();
@@ -1679,7 +1721,7 @@ impl Hub {
         };
         let press = matches!(val, Val::On(true, _));
         let release = matches!(val, Val::On(false, _));
-        let over = |p: Param, v: f32| self.overlay.lock().push((n as u8, p, v, seq));
+        let over = |p: Param, v: f32| self.overlay.lock().push_back((n as u8, p, v, seq));
         match f.act {
             Act::PlayPause => {
                 if press {
@@ -1826,7 +1868,6 @@ impl Hub {
                     None => (false, 360, 0.0, false, false, false),
                 }
             };
-            let lvl = ((level.clamp(0.0, 1.0) * 100.0) as i32).clamp(0, 127) as u8;
             for d in &devs {
                 for deck in [n as u8 + 1, if n as u8 == snap.active { 0 } else { 255 }] {
                     if deck == 255 {
@@ -1840,8 +1881,7 @@ impl Hub {
                             });
                         }
                     }
-                    let level14 = (level.clamp(0.0, 1.0) * 16383.0).round() as u16;
-                    d.set_named("ChannelLevel", deck, |e| if e.kind == Kind::IndicatorHiRes { level14 } else { u16::from(lvl) });
+                    d.set_named("ChannelLevel", deck, |e| channel_meter_value(e, level));
                     for (name, on) in [("LoadedIndicator", loaded), ("GetLoopActive", looping), ("SlipStateForFlashing", slipping), ("PlayingState", playing)] {
                         d.set_named(name, deck, |e| match (on, e.kind) {
                             (false, _) => 0,
@@ -2136,7 +2176,7 @@ fn apply_pending(app: &mut App, hub: &Arc<Hub>) {
 /// last looked are put back over what the interface just wrote, and the jog's bend is added.
 pub fn after_push(app: &mut App) {
     let Some(hub) = app.midi.hub.as_ref() else { return };
-    let pending: Vec<(u8, Param, f32, u64)> = hub.overlay.lock().clone();
+    let pending = hub.overlay.lock().clone();
     for (n, p, v, _) in pending {
         hub.set_param(n as usize, p, v);
     }
@@ -2239,11 +2279,6 @@ pub fn apply(app: &mut App, hub: &Arc<Hub>, device: &str, f: &Func, deck: u8, va
     }
     let Some(n) = deck_of(app, deck) else { return };
     let ni = n as usize;
-    // An absolute value a worker already put into the engine: the app's own value follows.
-    let settle = |app: &mut App| {
-        hub.overlay.lock().retain(|o| o.3 > seq);
-        let _ = app;
-    };
     match f.act {
         Act::PlayPause => {
             if press {
@@ -2366,7 +2401,7 @@ pub fn apply(app: &mut App, hub: &Arc<Hub>, device: &str, f: &Func, deck: u8, va
                     app.midi.last_tempo[ni] = adj;
                 }
             }
-            settle(app);
+            hub.acknowledge_overlay(seq);
         }
         Act::TempoRange => {
             if press {
@@ -2768,7 +2803,7 @@ pub fn apply(app: &mut App, hub: &Arc<Hub>, device: &str, f: &Func, deck: u8, va
             if let Some(p) = unit {
                 app.px.mix[ni].trim = p;
             }
-            settle(app);
+            hub.acknowledge_overlay(seq);
         }
         Act::Eq(b) => {
             if let Some(p) = unit {
@@ -2780,7 +2815,7 @@ pub fn apply(app: &mut App, hub: &Arc<Hub>, device: &str, f: &Func, deck: u8, va
                     if m.stem_iso_on { m.stem_iso[b] = p } else { m.eq[b] = p }
                 }
             }
-            settle(app);
+            hub.acknowledge_overlay(seq);
         }
         Act::StemIsoKnob(i) => {
             if let Some(p) = unit {
@@ -2796,7 +2831,7 @@ pub fn apply(app: &mut App, hub: &Arc<Hub>, device: &str, f: &Func, deck: u8, va
             if let Some(p) = unit {
                 app.px.mix[ni].fader = p;
             }
-            settle(app);
+            hub.acknowledge_overlay(seq);
         }
         Act::HpMix => {
             if let Some(p) = unit {
@@ -2812,7 +2847,7 @@ pub fn apply(app: &mut App, hub: &Arc<Hub>, device: &str, f: &Func, deck: u8, va
             if let Some(p) = unit {
                 app.px.crossfader = p;
             }
-            settle(app);
+            hub.acknowledge_overlay(seq);
         }
         Act::XfAssign(side) => {
             if press {
@@ -3637,6 +3672,60 @@ mod tests {
         let mut out = dev.out.lock();
         let packets: Vec<_> = std::iter::from_fn(|| out.queue.pop()).collect();
         assert_eq!(&packets[2..], &[[0xB2, 9, 127], [0xB2, 0x19, 127]]);
+    }
+
+    #[test]
+    fn channel_meter_segments_emit_only_threshold_changes_on_the_mapped_deck() {
+        let mut csv = String::from("@file,1,Test\n");
+        for segment in 1..=5 {
+            csv.push_str(&format!("ChannelLevel.{segment},ChannelLevel,Indicator,,,,,,90{:02X},0,1,,,RO;,\n", 0x27 + segment));
+        }
+        csv.push_str("ChannelLevel.5,ChannelLevel,IndicatorHiRes,,,,,,B004,0,1,,,RO;,\n");
+        csv.push_str("ChannelLevel,ChannelLevel,Indicator,,,,,,B003,0,1,,,RO;,\n");
+        let map = MidiMap::load("Test", None, Some(csv.as_bytes())).unwrap();
+        let mut dev = Device::mapped("Test", "port".into(), map, false, None);
+        Arc::get_mut(&mut dev).unwrap().has_output = true;
+        let decks = std::array::from_fn(|_| Arc::new(Mutex::new(PlayState::default())));
+        let (hub, _) = Hub::new(decks, PathBuf::new(), false);
+        hub.devices.lock().push(dev.clone());
+        let read = || {
+            hub.engine_outputs();
+            let mut out = dev.out.lock();
+            let mut messages = std::iter::from_fn(|| out.queue.pop()).collect::<Vec<_>>();
+            messages.sort_unstable();
+            messages
+        };
+        let idle = read();
+        assert_eq!(idle.len(), 16); // Two decks, five lights, a 14-bit light and the whole meter.
+        assert!(idle.iter().all(|message| message[2] == 0));
+        assert!(read().is_empty());
+        for deck in 0..2u8 {
+            let note = 0x90 + deck;
+            let cc = 0xB0 + deck;
+            let state = &hub.decks[usize::from(deck)];
+            state.lock().audio = Some(tone(0.01));
+            let set = |level: f32| {
+                // Use opposite stereo channels so both sides of the peak meter are exercised.
+                state.lock().peak = if deck == 0 { [0.0, level] } else { [level, 0.0] };
+            };
+            for (segment, threshold) in [10u8, 30, 50, 70, 90].into_iter().enumerate() {
+                set((f32::from(threshold) - 0.25) / 100.0);
+                assert_eq!(read(), [[cc, 3, threshold - 1]]);
+                set(f32::from(threshold) / 100.0);
+                let mut expected = vec![[note, 0x28 + segment as u8, 127], [cc, 3, threshold]];
+                if threshold == 90 {
+                    expected.extend([[cc, 4, 127], [cc, 0x14, 127]]);
+                }
+                assert_eq!(read(), expected);
+                assert!(read().is_empty());
+            }
+            state.lock().audio = None;
+            let cleared = read();
+            assert_eq!(cleared.len(), 8);
+            assert!(cleared.iter().all(|&[status, _, value]| (status == note || status == cc) && value == 0));
+        }
+        assert!(!output_acts("ChannelLevel.5", Kind::Rotary));
+        assert!(!output_acts("ChannelLevel.6", Kind::Indicator));
     }
 
     #[test]
