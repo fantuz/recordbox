@@ -233,8 +233,8 @@ pub struct Input {
     /// The other deck's code of a `Dual` row (1 with 3, 2 with 4), when it has one.
     pub peer: Option<u16>,
     pub tag: u32,
-    /// 14-bit pair: the value so far (the MSB shifted up, the LSB or-ed in).
-    cache: u16,
+    /// Latest coarse byte of a 14-bit control, already shifted into position.
+    coarse: u16,
     /// RotaryAsKnob: the accumulated position.
     acc: i32,
     /// JogRotateAbsPos: the last position.
@@ -379,7 +379,7 @@ impl MidiMap {
             (Kind::RotaryAsKnob, v) if v >= 1 => (v.min(0x3FFF) as f64 * 0.5).round() as i32,
             _ => 64,
         };
-        self.inputs.push(Some(Input { e, peer, tag: 0, cache: 0, acc, last_pos: None }));
+        self.inputs.push(Some(Input { e, peer, tag: 0, coarse: 0, acc, last_pos: None }));
         true
     }
 
@@ -481,11 +481,11 @@ impl MidiMap {
             Kind::KnobSliderHiRes | Kind::Slider | Kind::Knob => {
                 if !lsb {
                     // The MSB alone is kept and not passed on.
-                    inp.cache = (b as u16) << 7;
+                    inp.coarse = (b as u16) << 7;
                     return None;
                 }
-                inp.cache |= b as u16;
-                Val::Abs { v: inp.cache as i32, lo: 0, mid: 8192, hi: 16383 }
+                // A fine adjustment can arrive without repeating the coarse byte.
+                Val::Abs { v: i32::from(inp.coarse | u16::from(b)), lo: 0, mid: 8192, hi: 16383 }
             }
             Kind::Difference => Val::Jog { delta: b as i32 - 64, t_ms },
             Kind::JogRotate => Val::Jog { delta: b as i32 - 64, t_ms },
@@ -1486,10 +1486,15 @@ mod tests {
         assert_eq!((e.deck, e.val), (1, Val::Abs { v: 8192, lo: 0, mid: 8192, hi: 16383 }));
         assert!(m.handle(&[0xB1, 0x00, 0x7F], 0.0).is_none());
         assert_eq!(m.handle(&[0xB1, 0x20, 0x7F], 0.0).unwrap().val.unit(), Some(1.0));
-        // LSBs without a new MSB are or-ed into the value kept (as rekordbox does).
+        // On either deck, repeated fine updates replace the low seven bits.
+        for (status, fine, expected) in [(0xB1, 0, 16256), (0xB0, 63, 8255), (0xB0, 1, 8193), (0xB1, 4, 16260)] {
+            assert_eq!(m.handle(&[status, 0x20, fine], 0.0).unwrap().val, Val::Abs { v: expected, lo: 0, mid: 8192, hi: 16383 });
+        }
+        // Preserve the initial fine-only behavior on a separate, untouched control.
+        assert_eq!(m.handle(&[0xB6, 0x3F, 7], 0.0).unwrap().val, Val::Abs { v: 7, lo: 0, mid: 8192, hi: 16383 });
         m.handle(&[0xB6, 0x1F, 0x01], 0.0);
         assert_eq!(m.handle(&[0xB6, 0x3F, 0x01], 0.0).unwrap().val, Val::Abs { v: 129, lo: 0, mid: 8192, hi: 16383 });
-        assert_eq!(m.handle(&[0xB6, 0x3F, 0x02], 0.0).unwrap().val, Val::Abs { v: 131, lo: 0, mid: 8192, hi: 16383 });
+        assert_eq!(m.handle(&[0xB6, 0x3F, 0x02], 0.0).unwrap().val, Val::Abs { v: 130, lo: 0, mid: 8192, hi: 16383 });
         // The row is refused when either of its two codes is taken.
         let m = map(&["A,A,Button,B020,,,,,,,,,,,", "T,T,KnobSliderHiRes,B000,,,,,,,,,,,"]);
         assert_eq!(m.rejected, 1);

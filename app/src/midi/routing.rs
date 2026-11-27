@@ -248,6 +248,9 @@ impl Hub {
         // Keep MIDI input outside the interval between changing the table and
         // tagging its entries, including when an import keeps the same binding.
         let mut route = self.routing.lock();
+        if dev.rx3_trial_active() {
+            return Err(crate::midi_map::Reject::Revert);
+        }
         edit(&mut dev.map.lock())?;
         dev.reindex();
         self.release_matching(&mut route, |h| {
@@ -262,6 +265,38 @@ impl Hub {
             edit(map);
             Ok(())
         });
+    }
+
+    /// A manual, reversible switch for this connection. The usual factory and
+    /// user loaders also remain authoritative when the device next connects.
+    pub(crate) fn set_rx3_trial(&self, dev: &Arc<Device>, on: bool) {
+        if !crate::midi_csv::rx3_primary_input(&dev.name) || dev.needs_auth {
+            return;
+        }
+        let mut route = self.routing.lock();
+        let mut original = dev.rx3_original.lock();
+        if !dev.alive.load(Relaxed) || original.is_some() == on {
+            return;
+        }
+        dev.input_epoch.fetch_add(1, Relaxed);
+        dev.learning.store(false, Relaxed);
+        self.release_holds(&mut route, Some(dev));
+        *dev.load_at.lock() = Default::default();
+        let mut map = dev.map.lock();
+        let mut offs = Vec::new();
+        if let Some(previous) = original.take() {
+            if dev.has_output {
+                // A pending OFF for one of the trial's four transport lamps
+                // may still be queued when the old map is restored.
+                offs.extend(map.outputs.iter().map(|e| (map.led_message(e, 0), e.opts.priority)));
+            }
+            *map = previous;
+        } else {
+            let pilot = MidiMap::load(&dev.name, Some(include_bytes!("profiles/XDJ-RX3.csv")), None)
+                .expect("built-in XDJ-RX3 profile");
+            *original = Some(std::mem::replace(&mut *map, pilot));
+        }
+        dev.reindex_map(&mut map, &offs);
     }
 
     pub(super) fn release_hidden_drum_decks(&self, count: u8) {
@@ -292,6 +327,7 @@ impl Hub {
 
     pub(crate) fn set_learning(&self, device: &Arc<Device>, on: bool) {
         let mut route = self.routing.lock();
+        if on && device.rx3_trial_active() { return; }
         if device.learning.swap(on, Relaxed) != on {
             device.input_epoch.fetch_add(1, Relaxed);
             if on {
@@ -430,6 +466,41 @@ mod tests {
         hub.set_learning(&b, true);
         assert!(!hub.decks[0].lock().playing);
         assert!(hub.routing.lock().held.is_empty());
+    }
+
+    #[test]
+    fn rx3_trial_releases_a_held_cue_drops_old_input_and_resets_only_its_lamps() {
+        let (hub, _) = hub();
+        hub.routing.lock().performance = true;
+        let mut rx3 = controller("XDJ-RX3");
+        Arc::get_mut(&mut rx3).unwrap().has_output = true;
+        let peer = controller("Other controller");
+        hub.set_rx3_trial(&peer, true);
+        assert!(!peer.rx3_trial_active());
+        let tag = registry().tag("PlayPause");
+        hub.set_rx3_trial(&rx3, true);
+        assert!(rx3.rx3_trial_active());
+        assert_eq!(rx3.map.lock().live_inputs().count(), 39);
+        assert_eq!(rx3.out_keys().len(), 4);
+        hub.input_message(&rx3, [0x90, 0x01, 127], 0.0, 0, 0);
+        assert!(!hub.decks[0].lock().playing, "queued before the trial");
+        hub.input_message(&rx3, [0x90, 0x01, 127], 1.0, 0, 1);
+        assert!(hub.decks[0].lock().playing);
+        rx3.set_led(tag, 2, Led::On);
+        hub.set_rx3_trial(&rx3, false);
+        assert!(!rx3.rx3_trial_active());
+        assert!(hub.routing.lock().held.is_empty());
+        assert!(!hub.decks[0].lock().playing);
+        assert_eq!(rx3.map.lock().live_inputs().count(), 1);
+        let mut out = rx3.out.lock();
+        let mut messages: Vec<_> = std::iter::from_fn(|| out.queue.pop()).collect();
+        messages.sort();
+        assert_eq!(messages, [[0x90, 0, 0], [0x90, 1, 0], [0x91, 0, 0], [0x91, 1, 0]]);
+        drop(out);
+        hub.input_message(&rx3, [0x90, 0x0B, 127], 2.0, 0, 1);
+        assert!(!hub.decks[0].lock().playing, "queued during the trial");
+        hub.input_message(&peer, [0x90, 0x0B, 127], 3.0, 0, 0);
+        assert!(hub.decks[0].lock().playing, "other port keeps its epoch and map");
     }
 
     fn drum_map(name: &str, code: u16) -> MidiMap {
@@ -603,6 +674,83 @@ mod tests {
         }
         assert_eq!(hub.decks[0].lock().bend, 0.0);
     }
+
+    fn fader_controller(name: &str) -> Arc<Device> {
+        let csv = format!(
+            "@file,1,{name}\r\nChannelFader,ChannelFader,KnobSlider,,B010,B110,,,,,,,,Fast;Max=127;,\r\n"
+        );
+        let map = MidiMap::load(name, None, Some(csv.as_bytes())).unwrap();
+        Device::mapped(name, name.into(), map, false, None)
+    }
+
+    #[test]
+    fn input_worker_expires_a_due_jog_with_faders_already_queued() {
+        let (hub, ui) = hub();
+        hub.routing.lock().performance = true;
+        let dev = fader_controller("wheel");
+        let last_turn = Instant::now() - Duration::from_millis(100);
+        let out = dev.jog.lock()[0].rotate(400, 123_000.0, false, last_turn);
+        hub.routed_jog(&mut hub.routing.lock(), &dev, 0, out, false);
+        assert_ne!(hub.decks[0].lock().bend, 0.0);
+
+        let (tx, input) = crossbeam_channel::unbounded();
+        for value in 0..128 {
+            tx.send((123_100_000 + u64::from(value), [0xb0, 0x10, value], 0, 0)).unwrap();
+        }
+        // The final fader cannot finish until the observer unlocks deck 2. This
+        // keeps the worker's disconnect cleanup from masking a missed jog deadline.
+        let gate = hub.decks[1].lock();
+        tx.send((123_101_000, [0xb1, 0x10, 64], 0, 0)).unwrap();
+        drop(tx);
+        let worker = {
+            let hub = hub.clone();
+            std::thread::spawn(move || hub.run_input(dev, input))
+        };
+        let first = ui.recv_timeout(Duration::from_secs(5));
+        let bend_at_delivery = hub.decks[0].lock().bend;
+        drop(gate);
+        worker.join().unwrap();
+        assert_eq!(bend_at_delivery, 0.0);
+
+        let mut events = std::iter::once(first.expect("first fader event")).chain(ui.try_iter());
+        for (deck, value) in (0..128).map(|v| (1, v)).chain([(2, 64)]) {
+            assert!(matches!(events.next(), Some(UiEvent::Control {
+                deck: d, tag, fast_done: true, val: Val::Abs { v, .. }, ..
+            }) if d == deck && v == value && registry().get(tag).unwrap().act == Act::ChFader));
+        }
+        assert!(events.next().is_none());
+    }
+
+    #[test]
+    fn acknowledging_faders_preserves_later_writes_from_both_ports() {
+        let (hub, ui) = hub();
+        hub.routing.lock().performance = true;
+        std::thread::scope(|scope| {
+            for (name, status) in [("left", 0xb0), ("right", 0xb1)] {
+                let dev = fader_controller(name);
+                let hub = &hub;
+                scope.spawn(move || {
+                    for value in 0..64 {
+                        hub.input_message(&dev, [status, 0x10, value], f64::from(value), 0, 0);
+                    }
+                });
+            }
+        });
+        let sent: Vec<_> = ui.try_iter().map(|event| {
+            let UiEvent::Control { seq, deck, val, fast_done: true, .. } = event else {
+                panic!("expected a fast fader");
+            };
+            (deck - 1, Param::ChFader, val.unit().unwrap(), seq)
+        }).collect();
+        assert_eq!(sent.len(), 128);
+        assert!(sent.windows(2).all(|pair| pair[0].3 < pair[1].3));
+        assert!(hub.overlay.lock().iter().eq(&sent));
+        for (ack_index, remaining) in [(63, 64), (17, 64), (63, 64), (100, 101), (127, 128)] {
+            hub.acknowledge_overlay(sent[ack_index].3);
+            assert!(hub.overlay.lock().iter().eq(&sent[remaining..]));
+        }
+    }
+
     #[test]
     fn held_fx_mapping_survives_active_deck_changes_and_releases_on_disconnect() {
         let (hub, rx) = hub();

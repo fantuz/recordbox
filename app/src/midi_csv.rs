@@ -534,6 +534,31 @@ fn alsa_endpoint(name: &str) -> Option<(&str, &str, u16, u16)> {
     Some((client, port, client_id.parse().ok()?, port_id.parse().ok()?))
 }
 
+/// Only offer the session trial on the primary RX3 input. A second MIDI
+/// endpoint, a neighbouring XDJ model or an arbitrary substring is ambiguous.
+pub fn rx3_primary_input(name: &str) -> bool {
+    const MODEL: &str = "XDJ-RX3";
+    if name.eq_ignore_ascii_case(MODEL) || name.eq_ignore_ascii_case("MIDIIN (XDJ-RX3)") {
+        return true;
+    }
+    alsa_endpoint(name).is_some_and(|(client, port, _, id)| {
+        id == 0 && client.eq_ignore_ascii_case(MODEL)
+            && [MODEL, "XDJ-RX3 MIDI 1", "MIDI 1"].iter().any(|p| port.eq_ignore_ascii_case(p))
+    })
+}
+
+#[cfg(test)]
+#[test]
+fn rx3_trial_accepts_only_unambiguous_primary_inputs() {
+    for name in ["XDJ-RX3", "MIDIIN (XDJ-RX3)", "XDJ-RX3:XDJ-RX3 MIDI 1 24:0", "XDJ-RX3:XDJ-RX3 MIDI 1 134:0"] {
+        assert!(rx3_primary_input(name), "{name}");
+    }
+    for name in ["XDJ-RX", "XDJ-RX2", "XDJ-RX30", "Virtual XDJ-RX3", "MIDIOUT (XDJ-RX3)", "MIDIIN2 (XDJ-RX3)",
+                 "XDJ-RX3:XDJ-RX3 MIDI 2 24:0", "XDJ-RX3:XDJ-RX3 MIDI 1 24:1", "Other:XDJ-RX3 MIDI 1 24:0"] {
+        assert!(!rx3_primary_input(name), "{name}");
+    }
+}
+
 pub fn alsa_key(name: &str) -> Option<String> {
     let (client, port, _, port_id) = alsa_endpoint(name)?;
     Some(format!("{client}:{port} #{port_id}"))
@@ -585,6 +610,10 @@ pub fn legacy_file(dir: &Path, device: &str) -> Option<PathBuf> {
 
 fn names_for_mapping(port: &str) -> Vec<&str> {
     let mut names = vec![port];
+    // WinMM can wrap the primary RX3 port; prefer a port-specific file when both exist.
+    if port.eq_ignore_ascii_case("MIDIIN (XDJ-RX3)") {
+        names.push("XDJ-RX3");
+    }
     if let Some((client, endpoint, _, _)) = alsa_endpoint(port) {
         if endpoint.eq_ignore_ascii_case(client) || endpoint.strip_suffix(" MIDI 1").is_some_and(|p| p.eq_ignore_ascii_case(client)) ||
             endpoint == "MIDI 1" {
