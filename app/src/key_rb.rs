@@ -135,12 +135,12 @@ const LP_B: [f32; 5] = [1.7625537e-7, 1.4100430e-6, 4.9351506e-6, 9.8703013e-6, 
 
 /// 8th-order low-pass over one block (state starts at rest), keeping every 8th output sample.
 /// The recursion is badly conditioned, so the order of operations follows the original.
-fn lowpass_decimate(block: &[f32], out: &mut [f32]) {
+fn lowpass_decimate(block: impl Iterator<Item = f32>, out: &mut [f32]) {
     let a: [f64; 8] = std::array::from_fn(|i| LP_A[i] as f64);
     let b: [f64; 5] = std::array::from_fn(|i| LP_B[i] as f64);
     let mut w = [0f64; 8]; // w[0] newest
     let mut k = 0;
-    for (i, &x) in block.iter().enumerate() {
+    for (i, x) in block.enumerate() {
         let mut acc = w[0] * a[0];
         for j in 1..8 {
             acc = w[j].mul_add(a[j], acc);
@@ -164,32 +164,38 @@ fn lowpass_decimate(block: &[f32], out: &mut [f32]) {
     }
 }
 
-/// The analyser's input signal: 0.99·L + 0.01·R, low-passed and decimated by 8 in one-second
-/// blocks. Returns `total/8` samples (the tail the blocks do not reach stays zero).
-pub fn decimate(left: &[f32], right: Option<&[f32]>, sr: u32) -> Vec<f32> {
-    let total = left.len();
+/// Low-pass and decimate by 8. Reset the filter every second. The tail the blocks do not
+/// reach stays zero, including when a full second does not divide into groups of eight.
+fn decimate_blocks(mut input: impl ExactSizeIterator<Item = f32>, sr: u32) -> Vec<f32> {
+    let total = input.len();
     let ndec = (total / 8).min(0xA4CB80);
     let mut dec = vec![0f32; ndec];
     let block = (sr as usize).max(8);
-    let (wl, wr) = if total < 30 * sr as usize { (0.999f32, 0.00099999f32) } else { (0.99f32, 0.01f32) };
-    let mut mono = vec![0f32; block];
     let (mut pos, mut done) = (0usize, 0usize);
     while done < total && pos < ndec {
         let n = (total - done).min(block);
-        match right {
-            Some(r) => {
-                for i in 0..n {
-                    mono[i] = r[done + i].mul_add(wr, left[done + i] * wl);
-                }
-            }
-            None => mono[..n].copy_from_slice(&left[done..done + n]),
-        }
         let dn = (n / 8).min(ndec - pos);
-        lowpass_decimate(&mono[..n], &mut dec[pos..pos + dn]);
+        lowpass_decimate(input.by_ref().take(n), &mut dec[pos..pos + dn]);
         pos += n / 8;
         done += n;
     }
     dec
+}
+
+fn decimate_pairs(frames: impl ExactSizeIterator<Item = (f32, f32)>, sr: u32) -> Vec<f32> {
+    let (wl, wr) = if frames.len() < 30 * sr as usize { (0.999f32, 0.00099999f32) } else { (0.99f32, 0.01f32) };
+    decimate_blocks(frames.map(|(left, right)| right.mul_add(wr, left * wl)), sr)
+}
+
+pub fn decimate(left: &[f32], right: Option<&[f32]>, sr: u32) -> Vec<f32> {
+    match right {
+        Some(r) => decimate_pairs(left.iter().enumerate().map(|(i, &l)| (l, r[i])), sr),
+        None => decimate_blocks(left.iter().copied(), sr),
+    }
+}
+
+pub(super) fn decimate_stereo(samples: &[f32], sr: u32) -> Vec<f32> {
+    decimate_pairs(samples.chunks_exact(2).map(|frame| (frame[0], frame[1])), sr)
 }
 
 // ------------------------------------------------------------------------------------------

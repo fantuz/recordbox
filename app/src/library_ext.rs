@@ -1127,33 +1127,40 @@ impl App {
     /// beat grid, key or waveform. Analysis Lock is respected. Returns how many were queued.
     pub fn analyze_missing(&mut self, ids: &[i64]) -> usize {
         let (want_grid, want_key) = (self.prefs.analyze_grid, self.prefs.analyze_key);
-        let (mut fresh, mut again) = (vec![], vec![]);
-        for id in ids {
-            let Some(t) = self.track(*id) else { continue };
-            if t.missing || t.analyzed == 3 {
+        let mut needed = HashSet::new();
+        let mut check_grids = Vec::new();
+        let mut seen = HashSet::new();
+        for &id in ids {
+            if !seen.insert(id) {
                 continue;
             }
-            if t.analyzed != 1 {
-                fresh.push(*id);
+            let Some(t) = self.track(id) else { continue };
+            if t.missing || t.analyzed == 3 || (t.analyzed == 1 && t.grid_locked) {
                 continue;
             }
-            if t.grid_locked {
-                continue;
-            }
-            let no_grid = want_grid && self.db.grid(*id).map(|g| g.is_empty()).unwrap_or(true);
             let no_key = want_key && t.key < 0 && t.key_text.trim().is_empty();
-            let no_wave = !self.previews.contains_key(id);
-            if no_grid || no_key || no_wave {
-                again.push(*id);
+            if t.analyzed != 1 || no_key || !self.previews.contains_key(&id) {
+                needed.insert(id);
+            } else if want_grid {
+                check_grids.push(id);
             }
         }
-        let n = fresh.len() + again.len();
-        self.analyze(&fresh, false);
-        self.analyze(&again, true);
-        if n == 0 {
-            self.toast("No analysis data is missing for the selected tracks.");
+        if !check_grids.is_empty() {
+            match self.db.missing_grids(&check_grids) {
+                Ok(missing) => needed.extend(missing),
+                Err(e) => {
+                    self.toast_err(format!("Could not check the selected beat grids ({e})."));
+                    return 0;
+                }
+            }
         }
-        n
+        let targets: Vec<_> = ids.iter().copied().filter(|id| needed.remove(id)).collect();
+        if targets.is_empty() {
+            self.toast("No analysis data is missing for the selected tracks.");
+        } else {
+            self.analyze(&targets, true);
+        }
+        targets.len()
     }
 
     // ---------------------------------------------------------------- clipboard / selection

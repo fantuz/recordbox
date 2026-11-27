@@ -324,6 +324,17 @@ jobs:
             export::usb_fix_test::a1_aligned_rows_paginate_at_row_group_boundaries_without_overlap; do
             cargo test --manifest-path app/Cargo.toml --release --locked "$test_filter" -- --test-threads=1
           done
+      - name: Check bulk collection analysis on Windows
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          for test_name in app::hot_cue_persistence_tests::first_analysis::bulk_missing_analysis_queues_only_unique_incomplete_tracks \
+            jobs::analysis_pool_tests::batch_budget_bounds_active_tracks_independently_of_dsp_threads \
+            jobs::analysis_pool_tests::underestimated_duration_retries_once_and_oversize_tracks_report_an_error \
+            audio::mp3_timeline_tests::batch_decode_uses_actual_frames_and_never_truncates; do
+            cargo test --manifest-path app/Cargo.toml --release --locked --bin recordbox "$test_name" -- --exact | tee "$RUNNER_TEMP/bulk-analysis-tests.log"
+            grep -Fq 'test result: ok. 1 passed;' "$RUNNER_TEMP/bulk-analysis-tests.log"
+          done
       - name: Check the macOS encoder, CoreMIDI loopback and supported Metal tensor operations
         if: runner.os == 'macOS'
         shell: bash
