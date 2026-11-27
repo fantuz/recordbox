@@ -907,6 +907,8 @@ pub struct Device {
     pub name: String,
     input_id: String,
     pub map: Mutex<MidiMap>,
+    /// A trial temporarily replaces only this connected port's map.
+    rx3_original: Mutex<Option<MidiMap>>,
     /// The rekordbox installed here has a factory mapping for it.
     pub factory: bool,
     native_mapping: AtomicBool,
@@ -941,6 +943,7 @@ impl Device {
             name: name.to_string(),
             input_id,
             map: Mutex::new(map),
+            rx3_original: Mutex::new(None),
             factory,
             native_mapping: AtomicBool::new(false),
             needs_auth: needs_auth(name),
@@ -968,8 +971,11 @@ impl Device {
     /// After the map changed: mark the functions recordbox knows, index the outputs and
     /// forget what the LEDs were sent, so that they are all sent again.
     pub fn reindex(&self) {
+        self.reindex_map(&mut self.map.lock(), &[]);
+    }
+
+    fn reindex_map(&self, m: &mut MidiMap, offs: &[([u8; 3], i32)]) {
         let reg = registry();
-        let mut m = self.map.lock();
         m.tag_inputs(|n| reg.tag(n));
         let mut idx: HashMap<(u32, u8), Vec<Entry>> = HashMap::new();
         let mut named = NamedRows::default();
@@ -999,6 +1005,16 @@ impl Device {
         out.blink = Blinker::default();
         out.blinking.clear();
         out.queue = OutQueue::default();
+        for &(packet, priority) in offs {
+            out.queue.push(packet, priority);
+        }
+        if !offs.is_empty() {
+            self.out_cv.notify_one();
+        }
+    }
+
+    pub fn rx3_trial_active(&self) -> bool {
+        self.rx3_original.lock().is_some()
     }
 
     /// Whether the selected user delta came from the installed AlphaTheta application.
@@ -1021,18 +1037,19 @@ impl Device {
 
     /// Set the light of a function (for a deck). Sends only when it changed.
     pub fn set_led(&self, tag: u32, deck: u8, led: Led) {
-        {
-            let mut l = self.leds.lock();
-            if l.get(&(tag, deck)) == Some(&led) {
-                return;
-            }
-            l.insert((tag, deck), led);
+        if self.leds.lock().get(&(tag, deck)) == Some(&led) {
+            return;
+        }
+        // The meter worker can publish transport feedback while the UI
+        // switches profiles. Resolve the output and queue it under one map.
+        let map = self.map.lock();
+        if self.leds.lock().insert((tag, deck), led) == Some(led) {
+            return;
         }
         let entries = self.out_index.lock().get(&(tag, deck)).cloned().unwrap_or_default();
         if entries.is_empty() {
             return;
         }
-        let map = self.map.lock();
         let mut out = self.out.lock();
         for e in entries {
             out.blink.stop(e.code);
@@ -1337,6 +1354,11 @@ impl Hub {
     }
 
     pub fn write_override(&self, device: &str, bytes: &[u8]) -> std::io::Result<()> {
+        let controller = self.device(device);
+        let original = controller.as_ref().map(|d| d.rx3_original.lock());
+        if original.as_ref().is_some_and(|saved| saved.is_some()) {
+            return Err(std::io::Error::other("Stop the XDJ-RX3 profile trial before changing a mapping."));
+        }
         let csv = crate::midi_csv::validate_import(device, bytes)?;
         let path = self.user_file(device);
         // Distinguish an explicit empty reset/import from an old automatic placeholder.
@@ -1346,14 +1368,20 @@ impl Hub {
             saved.extend_from_slice(b"# recordbox local override\r\n");
         }
         crate::midi_csv::atomic_write(&path, &saved, true, self.factory_dirs.iter().chain(&self.native_user_dirs))?;
-        if let Some(controller) = self.device(device) {
+        if let Some(controller) = controller.as_ref() {
             controller.native_mapping.store(false, Relaxed);
         }
         Ok(())
     }
 
     pub fn save_map(&self, dev: &Device) -> std::io::Result<()> {
-        let text = dev.map.lock().save_text();
+        let text = {
+            let original = dev.rx3_original.lock();
+            if original.is_some() {
+                return Err(std::io::Error::other("Stop the XDJ-RX3 profile trial before saving a mapping."));
+            }
+            dev.map.lock().save_text()
+        };
         self.write_override(&dev.name, text.as_bytes())
     }
 
@@ -3584,6 +3612,68 @@ mod tests {
         std::fs::write(native_file, contents(0x9011)).unwrap();
         let updated = hub.load_map("Deck").0;
         assert_eq!(updated.live_inputs().map(|i| i.e.code).collect::<Vec<_>>(), [0x9011]);
+    }
+
+    #[test]
+    fn rx3_trial_preserves_native_and_intentional_local_overrides_on_reconnect() {
+        let temp = tempfile::tempdir().unwrap();
+        let factory_dir = temp.path().join("factory");
+        let native_dir = temp.path().join("native");
+        let local_dir = temp.path().join("local");
+        std::fs::create_dir(&factory_dir).unwrap();
+        std::fs::create_dir(&native_dir).unwrap();
+        let name = "MIDIIN (XDJ-RX3)";
+        let csv = |code| format!("@file,1,XDJ-RX3\nPlayPause,,Button,,{code:04X},,,,,,,,,Fast;,\n");
+        let factory_path = factory_dir.join("XDJ-RX3.midi.csv");
+        let native_path = native_dir.join("XDJ-RX3.midi.csv");
+        std::fs::write(&factory_path, csv(0x9010)).unwrap();
+        std::fs::write(&native_path, csv(0x9011)).unwrap();
+        let decks = std::array::from_fn(|_| Arc::new(Mutex::new(PlayState::default())));
+        let (mut hub, _) = Hub::new(decks, local_dir.clone(), true);
+        let h = Arc::get_mut(&mut hub).unwrap();
+        h.factory_dirs = vec![factory_dir];
+        h.native_user_dirs = vec![native_dir];
+        let connect = || {
+            let (map, factory, native) = hub.load_map_source(name);
+            let dev = Device::mapped(name, name.into(), map, factory, None);
+            dev.native_mapping.store(native, Relaxed);
+            hub.devices.lock().push(dev.clone());
+            dev
+        };
+        let native = connect();
+        assert!(native.from_rekordbox() && native.factory);
+        assert_eq!(native.map.lock().live_inputs().count(), 2);
+        hub.set_rx3_trial(&native, true);
+        hub.set_learning(&native, true);
+        assert!(!native.learning.load(Relaxed));
+        assert!(hub.try_edit_mapping(&native, |_| panic!("trial must be read-only")).is_err());
+        assert!(hub.save_map(&native).is_err());
+        assert!(hub.write_override(name, csv(0x9022).as_bytes()).is_err());
+        let mut midi = MidiState { hub: Some(hub.clone()), ..Default::default() };
+        crate::ui_midi::select_device(&mut midi, name);
+        crate::ui_midi::close(&mut midi);
+        assert!(native.rx3_trial_active(), "closing settings keeps the session trial");
+        hub.set_rx3_trial(&native, false);
+        assert!(native.from_rekordbox());
+        let codes = |d: &Device| d.map.lock().live_inputs().map(|i| i.e.code).collect::<Vec<_>>();
+        assert_eq!(codes(&native), [0x9010, 0x9011]);
+        assert!(!local_dir.exists());
+        hub.write_override(name, crate::midi_csv::empty_user_file(name).as_bytes()).unwrap();
+        let local_path = hub.user_file(name);
+        let saved_empty = std::fs::read(&local_path).unwrap();
+        hub.devices.lock().clear();
+        let reset = connect();
+        assert!(!reset.from_rekordbox());
+        assert_eq!(codes(&reset), [0x9010]);
+        hub.set_rx3_trial(&reset, true);
+        assert!(reset.rx3_trial_active());
+        hub.devices.lock().clear();
+        let reconnected = connect();
+        assert!(!reconnected.rx3_trial_active());
+        assert_eq!(codes(&reconnected), [0x9010]);
+        assert_eq!(std::fs::read(local_path).unwrap(), saved_empty);
+        assert_eq!(std::fs::read_to_string(factory_path).unwrap(), csv(0x9010));
+        assert_eq!(std::fs::read_to_string(native_path).unwrap(), csv(0x9011));
     }
 
     #[test]

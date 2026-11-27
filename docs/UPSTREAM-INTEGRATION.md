@@ -73,6 +73,8 @@ Opening and closing MIDI Learn preserves the inherited mapping. On Linux, a lear
 
 ### Check a controller mapping before a set
 
+The XDJ-RX3 has an experimental two-deck profile for USB MIDI software control. You can try it for one connection and restore the currently selected map from the MIDI window. [Setup, supported controls and hardware check](studies/XDJ-RX3.md)
+
 Mappings with five separate channel meter lights can use `ChannelLevel.1` through `ChannelLevel.5`. They light cumulatively at 10%, 30%, 50%, 70% and 90% of full-scale linear amplitude, using the louder stereo channel after EQ and before the channel fader. The ordinary `ChannelLevel` row sends a continuous meter reading. A segmented `Indicator` sends 0 or 127, and an `IndicatorHiRes` sends 0 or 16383. These thresholds follow the upstream WeGO mapping convention. [Upstream MIDI implementation](https://github.com/adamsardo/recordbox/blob/4c3351486585c4db20528a59747bca87348bc153/app/src/midi.rs#L2081-L2092)
 
 Run `recordbox --midi-coverage "My Controller.midi.csv"` to see which input actions and output indicators recordbox handles in that file. Use `./recordbox` from the Linux portable folder or `.\recordbox.exe` in Windows PowerShell. The command reads one CSV and exits before the GUI or MIDI ports open. Each row identifies its source line, action and direction. A PLAY row can appear in both totals, and a mapping for several decks counts once per direction. A valid CSV can contain unsupported rows. Missing or invalid files produce an error exit.
