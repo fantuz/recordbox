@@ -60,6 +60,19 @@ pub(super) fn protections(db: &Db) -> Result<Protections> {
         UNION ALL SELECT track_id FROM media_stamps
         UNION ALL SELECT id FROM tracks WHERE EXISTS (
             SELECT 1 FROM settings WHERE key='phrase_edit:'||tracks.id AND value!='')")?;
+    // DJs can remove a Matching Tracks pair while the edit or stem still links to its source.
+    let mut derived = db.conn.prepare(
+        "SELECT substr(key,9),value FROM settings WHERE key GLOB 'edit_of_*' OR key GLOB 'stem_of_*'",
+    )?;
+    let mut links = derived.query([])?;
+    while let Some(link) = links.next()? {
+        let child = link.get_ref(0)?.as_str()?;
+        let value = link.get_ref(1)?.as_str()?;
+        // EDIT stores the source ID. Stem exports append the part after a colon.
+        let source = value.split_once(':').map_or(value, |(id, _)| id);
+        prepared.insert(child.parse().context("Cannot verify a derived track ID")?);
+        prepared.insert(source.parse().context("Cannot verify a derived track's source ID")?);
+    }
     let mut paths = HashSet::new();
     if let Some(json) = db.setting_checked("hot_cue_banks")? {
         let banks: crate::export::hotcue_bank::Banks =
@@ -340,6 +353,31 @@ mod tests {
         drop(db);
         let upgraded = Db::open(&path).unwrap();
         assert!(protections(&upgraded).unwrap().native.contains(&old));
+    }
+
+    #[test]
+    fn edit_and_stem_sources_stay_protected_after_unmatching() {
+        let (_dir, _path, db) = collection();
+        let unrelated = db.insert_local_file(&track("unrelated.wav")).unwrap();
+        for (source_name, child_name, stem) in [
+            ("song-a.wav", "song-a-edit.wav", false),
+            ("song-b.wav", "song-b-vocals.wav", true),
+        ] {
+            let source = db.insert_local_file(&track(source_name)).unwrap();
+            let child = db.insert_track(&track(child_name)).unwrap();
+            assert!(!protections(&db).unwrap().prepared.contains(&source));
+            let (key, value) = if stem {
+                (crate::stem_export::link_key(child), format!("{source}:vocals"))
+            } else {
+                (crate::ui_edit::edited_key(child), source.to_string())
+            };
+            db.set_setting_checked(&key, &value).unwrap();
+            db.set_match(source, child, true).unwrap();
+            db.set_match(source, child, false).unwrap();
+            let checked = protections(&db).unwrap();
+            assert!(checked.prepared.contains(&source) && checked.prepared.contains(&child));
+            assert!(!checked.prepared.contains(&unrelated));
+        }
     }
 
     #[test]
