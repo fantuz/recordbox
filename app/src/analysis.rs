@@ -141,14 +141,16 @@ impl std::fmt::Display for AnalysisMemoryLimit {
 }
 impl std::error::Error for AnalysisMemoryLimit {}
 
-/// Called inside the batch's bounded Rayon pool; nested passes share its workers.
-pub(super) fn analyze_file_on_worker(path: &str, s: &AnalysisSettings, bytes: u64, cancelled: impl Fn() -> bool + Sync) -> Result<AnalysisResult> {
+/// Library jobs can share their bounded Rayon pool. The USB worker runs the same
+/// whole-track analysis and cancellation checks with sequential DSP.
+pub(crate) fn analyze_file_bounded(path: &str, s: &AnalysisSettings, bytes: u64, parallel: bool, cancelled: impl Fn() -> bool + Sync) -> Result<AnalysisResult> {
+    anyhow::ensure!(!cancelled(), "stopped");
     if bytes <= ANALYSIS_BASE_BYTES {
         return Err(AnalysisMemoryLimit.into());
     }
     let dec = crate::audio::decode_for_analysis(path, bytes, &cancelled)?;
     anyhow::ensure!(!cancelled(), "stopped");
-    let result = analyze_passes(&dec, &s.within_model_budget(&dec, bytes), true, &cancelled);
+    let result = analyze_passes(&dec, &s.within_model_budget(&dec, bytes), parallel, &cancelled);
     anyhow::ensure!(!cancelled(), "stopped");
     Ok(result)
 }

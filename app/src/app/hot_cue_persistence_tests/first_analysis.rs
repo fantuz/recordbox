@@ -90,6 +90,37 @@ fn bulk_missing_analysis_queues_only_unique_incomplete_tracks() -> Result<()> {
     })
 }
 
+#[test]
+fn collection_retains_trackwide_bpm_when_the_intro_has_a_different_tempo() -> Result<()> {
+    isolated(concat!(module_path!(), "::collection_retains_trackwide_bpm_when_the_intro_has_a_different_tempo"), |profile| {
+        let mut app = open_app();
+        let id = add_track(&mut app, &profile.join("changes-tempo.wav"))?;
+        let mut grid = BeatGrid::constant(0.0, 118.0, 1);
+        grid.anchors.push(crate::model::GridAnchor { time: 4.0, bpm: 126.0, beat: 1 });
+        let result = |grid, bpm| AnalysisResult {
+            duration: 8.0, raw_samples: 352_800, sample_rate: 44_100, bpm, grid,
+            key: -1, wave: Waveform::default(), gain_db: 0.0, peak: 0.5, vocal: None,
+        };
+        app.apply_analysis(id, Ok(result(Some(grid.clone()), 122.0)));
+        assert_eq!(app.db.track(id).unwrap().bpm, 122.0);
+        assert_eq!(app.db.grid(id).unwrap().first_bpm(), 118.0);
+
+        app.track_mut(id).unwrap().bpm = 124.0;
+        app.apply_analysis(id, Ok(result(None, 0.0)));
+        assert_eq!(app.db.track(id).unwrap().bpm, 124.0);
+        assert_eq!(app.db.grid(id), Some(grid.clone()));
+
+        app.track_mut(id).unwrap().bpm = 0.0;
+        app.apply_analysis(id, Ok(result(None, 0.0)));
+        assert_eq!(app.db.track(id).unwrap().bpm, 118.0);
+        // The existing grid is explicitly requested again, but its new summary is missing.
+        app.grid_requested.insert(id, Some(grid.clone()));
+        app.apply_analysis(id, Ok(result(Some(grid), f64::NAN)));
+        assert_eq!(app.db.track(id).unwrap().bpm, 118.0);
+        Ok(())
+    })
+}
+
 fn complete_first_analysis(app: &mut App, id: i64) -> Result<Vec<Cue>> {
     assert!(app.db.wave(id).is_none());
     assert_eq!(app.track(id).unwrap().analyzed, 3);

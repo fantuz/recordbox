@@ -2815,7 +2815,7 @@ impl App {
         if !self.prefs.phrase_analysis {
             return;
         }
-        let Some(path) = self.track(id).map(|t| t.path.clone()) else { return };
+        let Some((path, phrase_key)) = self.track(id).map(|t| (t.path.clone(), crate::phrase::key_input(t))) else { return };
         let map: HashMap<String, String> = self.db.setting("rb_anlz").and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default();
         let base = map.get(&path).map(std::path::PathBuf::from);
         let grid = self.deck.grid.clone();
@@ -2834,7 +2834,7 @@ impl App {
                 crate::export::anlz::read_pssi(&b.with_extension("EXT")).and_then(|s| crate::phrase::parse(&s))
             });
             let stopped = || cancel.load(std::sync::atomic::Ordering::Relaxed);
-            let r = from_rb.or_else(|| crate::phrase::analyze_audio(&a, &beats, classic, &stopped));
+            let r = from_rb.or_else(|| crate::phrase::analyze_audio(&a, &beats, phrase_key, classic, &stopped));
             let _ = tx.send((id, if stopped() { None } else { r }));
             ctx.request_repaint();
         });
@@ -3863,17 +3863,21 @@ impl App {
                         t.key_manual = false;
                     }
                 }
-                let mut save_grid = None;
-                if !keep_grid {
-                    if let Some(g) = res.grid {
-                        t.bpm = g.first_bpm();
-                        save_grid = Some(g);
+                let save_grid = if keep_grid {
+                    // Imported and manually edited tracks may have a collection BPM
+                    // distinct from the first beat. Preserve it on a waveform-only pass.
+                    if !(t.bpm.is_finite() && t.bpm > 0.0) {
+                        if let Some(bpm) = existing_grid.as_ref().map(BeatGrid::first_bpm).filter(|b| b.is_finite() && *b > 0.0) {
+                            t.bpm = bpm;
+                        }
                     }
-                } else if let Some(g) = &existing_grid {
-                    if g.first_bpm() > 0.0 {
-                        t.bpm = g.first_bpm();
+                    None
+                } else {
+                    if let Some(g) = &res.grid {
+                        t.bpm = if res.bpm.is_finite() && res.bpm > 0.0 { res.bpm } else { g.first_bpm() };
                     }
-                }
+                    res.grid
+                };
                 if let Ok(m) = std::fs::metadata(&t.path) {
                     let _ = self.db.set_media_stamp(id, media_stamp(&m));
                 }

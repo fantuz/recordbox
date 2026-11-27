@@ -1457,7 +1457,10 @@ pub fn run_export(mut req: ExportRequest, progress: &dyn Fn(Progress), cancel: &
     // Tracks without analysis are analysed first (as the original does when exporting),
     // here on the export thread so the window stays responsive.
     // (Tracks whose file is missing are not analysed: they can only keep a copy already on the drive.)
-    let needs: Vec<i64> = req.tracks.values().filter(|t| (t.wave.is_none() || t.grid.is_none()) && Path::new(&t.track.path).exists()).map(|t| t.track.id).collect();
+    let needs: Vec<i64> = req.tracks.values()
+        .filter(|t| (t.wave.is_none() || (req.analysis.do_grid && t.grid.is_none())) && Path::new(&t.track.path).is_file())
+        .map(|t| t.track.id).collect();
+    let mut preparation_failures = HashMap::new();
     let n_needs = needs.len();
     for (i, id) in needs.into_iter().enumerate() {
         if cancel.load(Relaxed) {
@@ -1465,27 +1468,30 @@ pub fn run_export(mut req: ExportRequest, progress: &dyn Fn(Progress), cancel: &
         }
         let Some(et) = req.tracks.get_mut(&id) else { continue };
         progress(Progress::Step { done: i, total: n_needs, text: format!("Analyzing {}", et.track.display_title()) });
-        let r = crate::analysis::analyze_file(&et.track.path, &req.analysis).map_err(|e| e.to_string());
-        if let Ok(res) = &r {
-            if et.grid.is_none() {
-                et.grid = res.grid.clone();
+        let stopped = || cancel.load(Relaxed);
+        let analysis = crate::analysis::analyze_file_bounded(
+            &et.track.path, &req.analysis, crate::jobs::analysis_memory_budget(), false, stopped,
+        );
+        if stopped() { return Err(anyhow!("Export was stopped. The device library was not changed.")); }
+        let res = match analysis {
+            Ok(res) => res,
+            Err(error) => {
+                // A partial sync must not delete anything based on an incomplete playlist.
+                if !req.remove_nodes.is_empty() && req.delete_unreferenced {
+                    return Err(anyhow!("Could not prepare {} ({error}). The device library was not changed.", et.track.display_title()));
+                }
+                preparation_failures.insert(id, error.to_string());
+                continue;
             }
-            if et.wave.is_none() {
-                et.wave = Some(res.wave.clone());
-            }
-            et.track.raw_samples = res.raw_samples;
-            et.track.sample_rate = res.sample_rate;
-            if et.track.duration <= 0.0 {
-                et.track.duration = res.duration;
-            }
-            if et.track.bpm <= 0.0 {
-                et.track.bpm = res.bpm;
-            }
-            if et.vocal.is_none() {
-                et.vocal = res.vocal.clone();
-            }
-        }
-        progress(Progress::Analyzed(id, Box::new(r)));
+        };
+        if et.grid.is_none() { et.grid = res.grid.clone(); }
+        if et.wave.is_none() { et.wave = Some(res.wave.clone()); }
+        et.track.raw_samples = res.raw_samples;
+        et.track.sample_rate = res.sample_rate;
+        if et.track.duration <= 0.0 { et.track.duration = res.duration; }
+        if et.track.bpm <= 0.0 { et.track.bpm = res.bpm; }
+        if et.vocal.is_none() { et.vocal = res.vocal.clone(); }
+        progress(Progress::Analyzed(id, Box::new(Ok(res))));
     }
 
     // Phrases for tracks without rekordbox's own (computed on the track's grid).
@@ -1493,7 +1499,7 @@ pub fn run_export(mut req: ExportRequest, progress: &dyn Fn(Progress), cancel: &
     let mut phrases: HashMap<i64, crate::phrase::Structure> = req.tracks.values().filter_map(|t| t.phrases.clone().map(|p| (t.track.id, p))).collect();
     let mut todo = Vec::new();
     if req.phrases {
-        for track in req.tracks.values().filter(|t| t.grid.is_some() && t.phrases.is_none()) {
+        for track in req.tracks.values().filter(|t| t.grid.is_some() && t.phrases.is_none() && !preparation_failures.contains_key(&t.track.id)) {
             if cancel.load(Relaxed) { return Err(anyhow!("Export was stopped. The device library was not changed.")); }
             if !track.has_rb_phrases() { todo.push(track.track.id); }
         }
@@ -1517,7 +1523,7 @@ pub fn run_export(mut req: ExportRequest, progress: &dyn Fn(Progress), cancel: &
         }
         if let Ok(d) = crate::audio::decode_bounded(&et.track.path, crate::phrase::MAX_ANALYSIS_SECONDS, stopped) {
             let beats = grid.beats(d.duration());
-            if let Some(st) = crate::phrase::analyze_audio(&d, &beats, req.classic_phrase_estimator, &stopped) {
+            if let Some(st) = crate::phrase::analyze_audio(&d, &beats, crate::phrase::key_input(&et.track), req.classic_phrase_estimator, &stopped) {
                 phrases.insert(id, st);
                 inferred_phrases += 1;
             }
@@ -1531,7 +1537,7 @@ pub fn run_export(mut req: ExportRequest, progress: &dyn Fn(Progress), cancel: &
     let need: u64 = req
         .tracks
         .values()
-        .filter(|t| !lib.tracks.values().any(|d| d.source == t.track.path))
+        .filter(|t| !preparation_failures.contains_key(&t.track.id) && !lib.tracks.values().any(|d| d.source == t.track.path))
         .map(|t| std::fs::metadata(&t.track.path).map(|m| m.len()).unwrap_or(0))
         .sum();
     if let Some(free) = free_space(&root) {
@@ -1609,6 +1615,22 @@ pub fn run_export(mut req: ExportRequest, progress: &dyn Fn(Progress), cancel: &
             // A track rekordbox itself exported to this drive (no Recordbox record of it): the
             // row with this track's content path and file size is updated in place.
             .or_else(|| foreign_row(&lib, &root, t, src, src_len, &taken).map(|id| (id, lib.tracks[&id].file_path.clone())));
+        if let Some(reason) = preparation_failures.get(&t.id) {
+            // A failed refresh must not replace the device's sound, grid or cue files.
+            // Keep a proven existing copy in the selected playlists.
+            let kept = if let Some((id, path)) = &existing {
+                let dest = root.join(path.trim_start_matches('/'));
+                target::confined(&root, &dest)?;
+                if dest.is_file() {
+                    map.insert(t.id, *id);
+                    taken.insert(*id);
+                    true
+                } else { false }
+            } else { false };
+            let prior = if kept { "; previous device copy kept" } else { "" };
+            skipped.push(format!("{} (analysis failed: {reason}{prior})", t.display_title()));
+            continue;
+        }
         let mut protects_embedding = false;
         if let Some((id, path)) = &existing {
             let current = &lib.tracks[id];
