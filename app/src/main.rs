@@ -18,6 +18,7 @@ mod deck;
 mod demo;
 mod dupes;
 mod device_ext;
+mod onelibrary;
 mod edit_audio;
 mod edit_model;
 mod edit_project;
@@ -952,10 +953,19 @@ mod launch_tests {
 }
 
 fn main() -> eframe::Result<()> {
+    let mut native_args = std::env::args_os().skip(1);
+    if native_args.next().as_deref() == Some(std::ffi::OsStr::new("--inspect-onelibrary")) {
+        if let Err(error) = onelibrary::cli(native_args) {
+            eprintln!("OneLibrary inspection failed: {error:#}");
+            std::process::exit(2);
+        }
+        return Ok(());
+    }
     if midi_cover::cli() { return Ok(()); }
     let args: Vec<String> = std::env::args().collect();
     if args.iter().skip(1).any(|arg| arg == "--help" || arg == "-h") {
         println!("Usage: recordbox [--disable-load] [--disable-play] [--mp3-timeline legacy|rekordbox] [--screenshot FILE] [--stems-cpu] [--stems-status | --stems-device | --compare-stems FILE]\n\n  --disable-load  Disable loading tracks into decks for this session.\n  --disable-play  Disable audio playback and previews for this session.\n  --mp3-timeline legacy|rekordbox\n                  Select the MP3 sample clock for this session. Legacy opens your usual library.\n                  Rekordbox uses a separate collection and a different MP3 time origin.\n                  Audition imported cues and grids before export or write-back.\n  --screenshot    Save a picture of the window to FILE and exit.\n  --stems-cpu     Use CPU separation for this session.\n  --stems-status  Show build, system memory and local model status without starting inference.\n  --stems-device  Check the selected separation device and exit.\n  --compare-stems FILE  Compare GPU and CPU separation of one local track and exit.");
+        println!("USB inspection: recordbox --inspect-onelibrary USB_ROOT [--playlist ID [--classic-playlist ID]]");
         println!("  --midi-coverage FILE  Report software support for MIDI inputs and outputs in one mapping CSV and exit.");
         return Ok(());
     }

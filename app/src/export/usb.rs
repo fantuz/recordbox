@@ -324,7 +324,7 @@ fn referenced_files(root: &Path, lib: &DeviceLibrary) -> std::collections::HashS
 /// (left behind by deleted playlists, other programs or copies made by hand), with sizes.
 /// Nothing is listed while an interrupted export's journal is still on the drive.
 pub fn unused_files(root: &Path, lib: &DeviceLibrary) -> Vec<(PathBuf, u64)> {
-    // A OneLibrary database (which Recordbox can't read) may use files export.pdb doesn't.
+    // OneLibrary can reference files outside export.pdb. Playlist inspection cannot establish that a file is unused.
     if journal_dir(root).join("journal.log").exists() || !matches!(check_export_target(root), Ok(DeviceLayout::Classic)) {
         return vec![];
     }

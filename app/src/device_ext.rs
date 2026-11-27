@@ -74,6 +74,7 @@ pub struct DeviceUi {
     pub import: Option<DeviceImport>,
     pub property: Option<PropertyState>,
     pub sync: Option<SyncState>,
+    pub one_inspector: crate::onelibrary::Inspector,
     /// Devices whose automatic synchronisation was offered since they were connected.
     pub auto_offered: HashSet<String>,
     /// "The selected lists are synchronized automatically at each connection." waiting for an answer.
@@ -766,7 +767,9 @@ pub fn device_row_menu(app: &mut App, ui: &mut Ui, root: &str) {
     let blocker = dev.write_blocker.clone();
     let mixed = dev.layout == Some(usb::DeviceLayout::Mixed);
     let known = dev.layout.is_some();
+    let one_library = mixed || dev.layout == Some(usb::DeviceLayout::OneLibrary);
     let catalog_blocker = blocker.clone().or_else(|| dev.lib.is_none().then(|| "This action needs a classic Device Library.".to_string()));
+    if one_library && app.device_ui.one_inspector.button(ui, root) { ui.close_menu(); }
     if ui.add_enabled(blocker.is_none(), egui::Button::new("Sync Manager")).on_disabled_hover_text(blocker.as_deref().unwrap_or_default()).on_hover_text("Synchronize playlists with a device").clicked() {
         open_sync_manager(app, root);
         ui.close_menu();
@@ -809,6 +812,7 @@ pub fn windows(app: &mut App, ctx: &Context) {
     import_progress(app, ctx);
     property_window(app, ctx);
     sync_window(app, ctx);
+    app.device_ui.one_inspector.window(ctx);
     confirm_windows(app, ctx);
     crate::export::hotcue_bank::windows(app, ctx);
 }
@@ -964,11 +968,13 @@ fn sync_window(app: &mut App, ctx: &Context) {
     let format = device.catalog_label();
     let blocker = device.write_blocker.clone();
     let mixed = device.layout == Some(usb::DeviceLayout::Mixed);
+    let one_library = mixed || device.layout == Some(usb::DeviceLayout::OneLibrary);
     let mut open = true;
     let mut close = false;
     egui::Window::new("Sync Manager").id(egui::Id::new("sync_manager")).open(&mut open).collapsible(false).default_width(520.0).show(ctx, |ui| {
         ui.label(RichText::new(format!("Synchronize playlists with a device: {name}")).strong());
         ui.label(RichText::new(format!("{format} · {}", st.root)).size(11.0).color(DIM));
+        if one_library { app.device_ui.one_inspector.button(ui, &st.root); }
         if let Some(reason) = &blocker {
             ui.label(RichText::new(reason).color(CAUTION_TX));
             close = ui.button("Close").clicked();

@@ -6,6 +6,7 @@ pub mod settings;
 pub mod settings_fields;
 pub mod usb;
 mod usb_target;
+pub(crate) use usb_target::inspect_onelibrary_files;
 #[cfg(test)]
 mod public_device_tests;
 #[cfg(test)]
