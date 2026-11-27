@@ -57,23 +57,28 @@ fn join(acc: &mut Vec<(f32, i32)>, mut beats: Vec<(f32, i32)>, offset: f32, near
     acc.extend(beats.into_iter().skip(skip));
 }
 
-fn network_beats(net: &Net, dbn: &Dbn, samples: &[f32], sr: u32, len: usize) -> Vec<(f32, i32)> {
+fn network_beats(net: &Net, dbn: &Dbn, samples: &[f32], sr: u32, len: usize, cancelled: &dyn Fn() -> bool) -> Option<Vec<(f32, i32)>> {
     let mut acc = Vec::new();
     for (start, count, nearest) in pieces(len, sr as usize) {
+        if cancelled() { return None; }
         // Both the network activations and the DBN backtrace live for one piece only.
         let activations = {
             let mono: Vec<_> = samples[2 * start..2 * (start + count)].chunks_exact(2)
                 .map(|lr| (lr[1] + lr[0]) * 0.5).collect();
+            if cancelled() { return None; }
             net.run(&mono)
         };
+        if cancelled() { return None; }
         let offset = if nearest {
             start as f32 * SAMPLE_44K
         } else {
             (sr as f32 * MINUTE_44K) * (start / (60 * sr as usize)) as f32
         };
-        join(&mut acc, dbn.track(&activations), offset, nearest);
+        let beats = dbn.track(&activations);
+        if cancelled() { return None; }
+        join(&mut acc, beats, offset, nearest);
     }
-    acc
+    Some(acc)
 }
 
 const EPS: f32 = f32::from_bits(0x34000000);
@@ -210,20 +215,25 @@ fn admissible_frames(sr: u32, total: usize, stereo_samples: usize) -> bool {
 
 /// Model7 runs sequentially in pieces of at most 60 seconds. The PCM is
 /// interleaved stereo at the analysis rate, and the native reader omits the last frame.
-pub fn madmom_tempo(net: &Net, dbn: &Dbn, samples: &[f32], sr: u32, total: usize) -> Option<(Vec<super::dbn::ListBeat>, i32)> {
-    if !admissible_frames(sr, total, samples.len()) { return None; }
+pub fn madmom_tempo(net: &Net, dbn: &Dbn, samples: &[f32], sr: u32, total: usize, cancelled: &dyn Fn() -> bool) -> Option<(Vec<super::dbn::ListBeat>, i32)> {
+    if cancelled() || !admissible_frames(sr, total, samples.len()) { return None; }
     let len = total - 1;
-    let mut beats = network_beats(net, dbn, samples, sr, len);
+    let beats = network_beats(net, dbn, samples, sr, len, cancelled)?;
+    finish_beats(beats, sr, len, cancelled)
+}
+
+fn finish_beats(mut beats: Vec<(f32, i32)>, sr: u32, len: usize, cancelled: &dyn Fn() -> bool) -> Option<(Vec<super::dbn::ListBeat>, i32)> {
+    if cancelled() { return None; }
     super::scale_times(&mut beats, sr as i32);
     // Raw pieces can produce close neighbours at a seam. Check chronology only
     // here so the repair can remove those beats before extrapolating either end.
     if beats.iter().any(|b| !b.0.is_finite()) || beats.windows(2).any(|b| b[0].0 > b[1].0) { return None; }
     let limit = 8 * len.div_ceil(sr as usize) + 2;
     seam_repair(&mut beats, len, sr, limit)?;
-    if !plausible_beats(&beats, len, sr, limit) { return None; }
+    if cancelled() || !plausible_beats(&beats, len, sr, limit) { return None; }
     let list = super::dbn::get_beat_list(&beats, len as i64, sr as i32, 4);
     let bpm = super::dbn::get_bpm(&list);
-    (list.len() <= limit && list.windows(2).all(|b| b[1].pos > b[0].pos) &&
+    (!cancelled() && list.len() <= limit && list.windows(2).all(|b| b[1].pos > b[0].pos) &&
         bpm.is_finite() && bpm > 0.0).then_some((list, bpm as i32))
 }
 
@@ -273,6 +283,19 @@ mod tests {
         join(&mut beats, vec![], 2.0, true);
         join(&mut beats, vec![(0.5, 2), (1.5, 3), (2.0, 4)], 2.0, true);
         assert_eq!(beats, [(3.0, 1), (3.5, 3), (4.0, 4)]);
+    }
+
+    #[test]
+    fn cancellation_discards_a_finished_window_list_before_publication() {
+        let beats = vec![(0.0, 1), (0.5, 2), (1.0, 3), (1.5, 4)];
+        assert!(finish_beats(beats.clone(), 44100, 88200, &|| false).is_some());
+        let checkpoints = std::cell::Cell::new(0);
+        let cancel_at_publication = || {
+            checkpoints.set(checkpoints.get() + 1);
+            checkpoints.get() == 3
+        };
+        assert!(finish_beats(beats, 44100, 88200, &cancel_at_publication).is_none());
+        assert_eq!(checkpoints.get(), 3);
     }
 
     #[test]

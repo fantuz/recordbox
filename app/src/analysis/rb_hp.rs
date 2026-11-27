@@ -278,7 +278,7 @@ fn dbn() -> &'static dbn::Dbn {
 /// The network + DBN + beat list stage for one window of the decode.
 pub fn madmom_stage(samples: &[f32], sr: u32, start: usize, len: usize, hendou: bool) -> Option<(Vec<dbn::ListBeat>, f64, Vec<(f32, i32)>)> {
     let pcm = samples.get(start.checked_mul(2)?..start.checked_add(len)?.checked_mul(2)?)?;
-    let net = if hendou { model(true).or_else(|| model(false))? } else { model(false)? };
+    let net = model(hendou)?;
     let mono: Vec<f32> = pcm.chunks_exact(2).map(|lr| (lr[0] + lr[1]) * 0.5).collect();
     let act = net.run(&mono);
     let mut beats = dbn().track(&act);
@@ -314,8 +314,8 @@ fn eligible_audio(sr: u32, frames: usize, mode: u8) -> bool {
         sr % 50 == 0 && frames > 1 && frames <= 900 * sr as usize
 }
 
-fn analyze_model(dec: &crate::audio::Decoded, mode: u8, shared: Option<super::rb_beat1::Front>) -> Result<HpOutcome, &'static str> {
-    if !eligible(dec, mode) || !models_present(mode) { return Err("unsupported track or missing local beat model"); }
+fn analyze_model(dec: &crate::audio::Decoded, mode: u8, shared: Option<super::rb_beat1::Front>, cancelled: &dyn Fn() -> bool) -> Result<HpOutcome, &'static str> {
+    if cancelled() || !eligible(dec, mode) || !models_present(mode) { return Err("unsupported track or missing local beat model"); }
     let sr = super::rb_beat1::analysis_rate(dec.sr);
     let converted;
     let samples = if sr == dec.sr { dec.samples.as_slice() } else {
@@ -326,6 +326,7 @@ fn analyze_model(dec: &crate::audio::Decoded, mode: u8, shared: Option<super::rb
     let analysed = total.saturating_sub(1);
     let input = &samples[..2 * analysed];
     let front = shared.or_else(|| super::rb_beat1::Front::from_audio(input, sr)).ok_or(NO_GRID)?;
+    if cancelled() { return Err(NO_GRID); }
     let env = Uba::from_audio(sr, input);
     let dynamic = mode == MODE_DYNAMIC;
     let l = legacy::analyze(front, sr, dynamic, Some(&env.low)).ok_or(NO_GRID)?;
@@ -334,27 +335,36 @@ fn analyze_model(dec: &crate::audio::Decoded, mode: u8, shared: Option<super::rb
     let legacy = Legacy { bpm: l.bpm, beats: l.beats.iter().map(|b| b.pos).collect() };
     let offset = if varying { 0 } else { get_offset_calc(&env, sr as i32, &legacy) };
     let (start, len) = madmom_window(total as i64, sr as i64, offset as i64, varying);
+    if cancelled() { return Err(NO_GRID); }
     let (list, mbpm) = if varying {
         // Each piece is processed and discarded before starting the next one.
         let net = model(true).ok_or(DYNAMIC_FALLBACK)?;
-        tempo::madmom_tempo(net, dbn(), samples, sr, total).ok_or(DYNAMIC_FALLBACK)?
+        tempo::madmom_tempo(net, dbn(), samples, sr, total, cancelled).ok_or(DYNAMIC_FALLBACK)?
     } else {
         let (list, bpm, _) = madmom_stage(samples, sr, start as usize, len as usize, false).ok_or(NO_GRID)?;
         (list, bpm as i32)
     };
+    if cancelled() { return Err(NO_GRID); }
     let ml: Vec<(i32, i32, i32)> = list.iter().map(|b| (b.pos as i32, b.num_bar, b.bpm)).collect();
     let input = focus::FocusInput { sr: sr as i32, total: analysed as i32, offset, hendou: varying,
         legacy_bpm100: bpm100, legacy_count: legacy.beats.len() as i32, madmom: &ml, madmom_bpm: mbpm };
     let failed = if varying { DYNAMIC_FALLBACK } else { NO_GRID };
     let out = focus::analyze_focus(&env, &input).map_err(|_| failed)?;
     let beats = out.beats;
-    if beats.is_empty() || out.bpm100 <= 0 ||
-        beats.iter().any(|&(pos, num, tempo)| pos < 0 || pos as usize > analysed || !(1..=4).contains(&num) || tempo <= 0) ||
-        beats.windows(2).any(|w| w[0].0 >= w[1].0) { return Err(failed); }
+    if !valid_model_beats(&beats, out.bpm100, analysed) { return Err(failed); }
     let bpm = f64::from(out.bpm100) / 100.0;
     let grid = grid_from_list(&beats, sr);
     if out.adaptive && !grid_replays(&grid, &beats, sr, total) { return Err(failed); }
     Ok(HpOutcome { bpm, grid, beats, adaptive: out.adaptive, offset, window: (start as usize, len as usize) })
+}
+
+/// Bound both the tempo and the number of beats before replaying the grid.
+fn valid_model_beats(beats: &[(i32, i32, i32)], bpm100: i32, frames: usize) -> bool {
+    const TEMPO: std::ops::RangeInclusive<i32> = 100..=100_000;
+    // 15 minutes at the maximum supported 1,000 BPM, plus boundary beats.
+    (1..=focus2::MAX_BEATS).contains(&beats.len()) && TEMPO.contains(&bpm100) &&
+        beats.iter().all(|&(pos, bar, tempo)| pos >= 0 && pos as usize <= frames && (1..=4).contains(&bar) && TEMPO.contains(&tempo)) &&
+        beats.windows(2).all(|w| w[0].0 < w[1].0)
 }
 
 /// Microseconds of a beat position as `AnalyzeJobBeatDetector::convertToMicrosec` (0x102328b20)
@@ -417,11 +427,12 @@ pub fn mode_from_preferences(enabled: bool, analysis_mode: u8) -> u8 {
 /// Try the selected model for this job. A complete result can replace the
 /// standard one only within the user's requested BPM range.
 pub(super) fn dispatch(dec: &crate::audio::Decoded, mono: &[f32], s: &super::AnalysisSettings,
-    bpm: f64, grid: Option<BeatGrid>, shared: Option<super::rb_beat1::Front>) -> (f64, Option<BeatGrid>) {
-    if grid.as_ref().is_none_or(BeatGrid::is_empty) || !eligible(dec, s.model_grid_mode) { return (bpm, grid); }
+    bpm: f64, grid: Option<BeatGrid>, shared: Option<super::rb_beat1::Front>, cancelled: &dyn Fn() -> bool) -> (f64, Option<BeatGrid>) {
+    if cancelled() || grid.as_ref().is_none_or(BeatGrid::is_empty) || !eligible(dec, s.model_grid_mode) { return (bpm, grid); }
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(||
-        analyze_model(dec, s.model_grid_mode, shared)
+        analyze_model(dec, s.model_grid_mode, shared, cancelled)
     )).unwrap_or(Err(NO_GRID));
+    if cancelled() { return (bpm, grid); }
     match result {
         Ok(o) => {
             let mut g = o.grid;
@@ -435,7 +446,7 @@ pub(super) fn dispatch(dec: &crate::audio::Decoded, mono: &[f32], s: &super::Ana
             // An unsupported change in tempo still needs the selected adaptive
             // estimator. Explicit Dynamic already computed that grid.
             let dynamic = super::AnalysisSettings { dynamic: true, model_grid_mode: 0, ..s.clone() };
-            let (b, g) = super::analyze_grid(dec, mono, &dynamic);
+            let (b, g) = super::analyze_grid(dec, mono, &dynamic, cancelled);
             if g.is_some() { (b, g) } else { (bpm, grid) }
         }
         Err(_) => (bpm, grid),
@@ -455,6 +466,13 @@ mod model_grid_tests {
         assert!(!eligible_audio(384_000, 384_000, MODE_AUTO));
         assert!(!eligible_audio(48_000, 1, MODE_NORMAL));
         assert!(eligible_audio(48_000, 48_000, MODE_DYNAMIC));
+    }
+
+    #[test]
+    fn excessive_local_tempo_cannot_expand_the_replayed_grid() {
+        assert!(valid_model_beats(&[(4_800, 1, 12_000), (28_800, 2, 12_000)], 12_000, 48_000));
+        assert!(!valid_model_beats(&[(4_800, 1, 12_000), (4_801, 2, i32::MAX)], 12_000, 48_000));
+        assert!(!valid_model_beats(&[(4_800, 1, 12_000)], i32::MAX, 48_000));
     }
 
     #[test]
@@ -771,7 +789,7 @@ mod reference_benchmark {
                         let t_std = t0.elapsed().as_secs_f64();
                         let Some(g) = grid else { continue };
                         let t1 = std::time::Instant::now();
-                        let out = super::analyze_model(&dec, mode, None).ok();
+                        let out = super::analyze_model(&dec, mode, None, &|| false).ok();
                         let t_hp = t1.elapsed().as_secs_f64();
                         let row = match out {
                             Some(o) => {

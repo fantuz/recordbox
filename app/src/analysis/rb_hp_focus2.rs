@@ -26,7 +26,7 @@ pub const UNPORTED_SHORT: &str = "the tempo-change analysis got too few beats (a
 
 /// Maximum beats in the supported fifteen-minute window at the public
 /// 1000 BPM upper bound, with room for extrapolated boundary beats.
-const MAX_BEATS: usize = 15_002;
+pub(super) const MAX_BEATS: usize = 15_002;
 pub const INVALID_LIST: &str = "variable model grid is outside the supported timing bounds";
 
 pub struct TempoFocus {
@@ -1122,4 +1122,47 @@ pub fn analyze(mut list: Vec<BeatInfo>, sr: i32, a7: i32, bpm72: f32, total: i32
         }
     }
     Ok(TempoFocus { list, bpm72 })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn network_list(ramp: bool) -> (Vec<BeatInfo>, i32) {
+        let mut seconds = 0.1;
+        let mut list = Vec::new();
+        for i in 0..240 {
+            let bpm = if ramp { 118.0 + 8.0 * f64::from(i) / 239.0 } else { 128.0 };
+            list.push(BeatInfo { pos: (seconds * 44100.0_f64).round() as i32, zero: 0,
+                num: i % 4 + 1, interval: (60_000.0 / bpm) as f32, minus1: -1, flag: false });
+            seconds += 60.0 / bpm;
+        }
+        (list, (seconds * 44100.0) as i32)
+    }
+
+    #[test]
+    fn dynamic_focus_preserves_a_gradual_tempo_change() {
+        let (list, total) = network_list(true);
+        let positions: Vec<_> = list.iter().map(|b| b.pos).collect();
+        let out = analyze(list, 44100, 12200, 128.0, total).unwrap();
+        assert_eq!(out.list.iter().map(|b| b.pos).collect::<Vec<_>>(), positions);
+        assert!(out.list.iter().enumerate().all(|(i, b)| b.num == (i % 4) as i32 + 1));
+        assert!((out.bpm72 - 122.00014).abs() < 0.001);
+        assert!((out.list[0].interval - 507.8630).abs() < 0.01);
+        assert!((out.list[239].interval - 477.1097).abs() < 0.01);
+    }
+
+    #[test]
+    fn dynamic_focus_repairs_one_skipped_pulse_and_rejects_invalid_input() {
+        let (mut list, total) = network_list(false);
+        let gap = list.remove(96);
+        let out = analyze(list, 44100, 12800, 128.0, total).unwrap();
+        assert_eq!(out.list.len(), 240);
+        assert!((out.list[96].pos - gap.pos).abs() <= 1);
+        assert_eq!(out.list[96].num, gap.num);
+        assert_eq!(analyze(out.list[..3].to_vec(), 44100, 12800, 128.0, total).err(), Some(UNPORTED_SHORT));
+        let mut repeated = out.list;
+        repeated[2].pos = repeated[1].pos;
+        assert_eq!(analyze(repeated, 44100, 12800, 128.0, total).err(), Some(INVALID_LIST));
+    }
 }

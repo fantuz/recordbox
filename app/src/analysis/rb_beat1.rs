@@ -215,10 +215,9 @@ pub fn analysis_rate(sr: u32) -> u32 {
     }
 }
 
-/// Interleaved stereo from `from` Hz to `to` Hz: windowed sinc (Blackman, 16 zero crossings,
-/// cut-off at 0.95 of the lower Nyquist frequency). rekordbox's own resampler
-/// (`rbxfrm::PcmReaderTemplate`) is not traced, so beats of such files are close to, not
-/// identical with, rekordbox's.
+/// Standard beat analysis uses recordbox's existing windowed sinc converter
+/// (Blackman, 16 zero crossings, cutoff at 0.95 of the lower Nyquist frequency).
+/// The optional model path uses the reconstructed PCM reader in `rb_hp_src`.
 fn resample(x: &[f32], from: u32, to: u32) -> Vec<f32> {
     let frames = x.len() / 2;
     let ratio = to as f64 / from as f64;

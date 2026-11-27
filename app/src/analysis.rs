@@ -80,7 +80,7 @@ pub fn analyze_file(path: &str, s: &AnalysisSettings) -> Result<AnalysisResult> 
 }
 
 pub fn analyze_decoded(dec: &Decoded, s: &AnalysisSettings) -> AnalysisResult {
-    analyze_passes(dec, s, false)
+    analyze_passes(dec, s, false, &|| false)
 }
 
 /// Room for per-job codec and DSP scratch independent of track duration.
@@ -142,13 +142,15 @@ impl std::fmt::Display for AnalysisMemoryLimit {
 impl std::error::Error for AnalysisMemoryLimit {}
 
 /// Called inside the batch's bounded Rayon pool; nested passes share its workers.
-pub(super) fn analyze_file_on_worker(path: &str, s: &AnalysisSettings, bytes: u64, cancelled: impl Fn() -> bool) -> Result<AnalysisResult> {
+pub(super) fn analyze_file_on_worker(path: &str, s: &AnalysisSettings, bytes: u64, cancelled: impl Fn() -> bool + Sync) -> Result<AnalysisResult> {
     if bytes <= ANALYSIS_BASE_BYTES {
         return Err(AnalysisMemoryLimit.into());
     }
     let dec = crate::audio::decode_for_analysis(path, bytes, &cancelled)?;
     anyhow::ensure!(!cancelled(), "stopped");
-    Ok(analyze_passes(&dec, &s.within_model_budget(&dec, bytes), true))
+    let result = analyze_passes(&dec, &s.within_model_budget(&dec, bytes), true, &cancelled);
+    anyhow::ensure!(!cancelled(), "stopped");
+    Ok(result)
 }
 
 #[cfg(test)]
@@ -166,9 +168,9 @@ fn actual_audio_length_cannot_spend_the_optional_model_reserve_twice() {
     assert_eq!(plain.estimated_batch_bytes(dec.duration(), dec.sr), actual);
 }
 
-fn analyze_grid(dec: &Decoded, mono: &[f32], settings: &AnalysisSettings) -> (f64, Option<BeatGrid>) {
+fn analyze_grid(dec: &Decoded, mono: &[f32], settings: &AnalysisSettings, cancelled: &dyn Fn() -> bool) -> (f64, Option<BeatGrid>) {
     let (lo, hi) = (settings.bpm_min, settings.bpm_max);
-    if !settings.do_grid || dec.sr == 0 || !(1.0..=1000.0).contains(&lo) || !(lo..=1000.0).contains(&hi)
+    if !settings.do_grid || cancelled() || dec.sr == 0 || !(1.0..=1000.0).contains(&lo) || !(lo..=1000.0).contains(&hi)
         || !mono.iter().all(|v| v.is_finite()) {
         return (0.0, None);
     }
@@ -182,6 +184,7 @@ fn analyze_grid(dec: &Decoded, mono: &[f32], settings: &AnalysisSettings) -> (f6
         rb_beat1::grid_with_front(&dec.samples, dec.sr, settings.dynamic, lo, hi, share.then_some(&mut shared))
             .filter(|(_, grid)| grid.is_some())
     };
+    if cancelled() { return (0.0, None); }
     let using_port = ported.is_some();
     let (mut bpm, mut grid) = ported.unwrap_or_else(|| {
         let detect = if settings.dynamic { dynamic::tempo_and_grid_dynamic } else { tempo_and_grid };
@@ -194,24 +197,24 @@ fn analyze_grid(dec: &Decoded, mono: &[f32], settings: &AnalysisSettings) -> (f6
         // Refining a local anchor must not replace the overall track tempo.
         if !settings.dynamic || !using_port { bpm = g.first_bpm(); }
     }
-    rb_hp::dispatch(dec, mono, settings, bpm, grid, shared)
+    rb_hp::dispatch(dec, mono, settings, bpm, grid, shared, cancelled)
 }
 
 #[cfg(test)]
 fn grid_from_mono(mono: &[f32], sr: f64, settings: &AnalysisSettings) -> (f64, Option<BeatGrid>) {
     let dec = Decoded { sr: sr as u32, samples: mono.iter().flat_map(|&v| [v, v]).collect(),
         raw_frames: mono.len(), damaged: 0, truncated: false };
-    analyze_grid(&dec, mono, settings)
+    analyze_grid(&dec, mono, settings, &|| false)
 }
 
-fn analyze_passes(dec: &Decoded, s: &AnalysisSettings, parallel: bool) -> AnalysisResult {
+fn analyze_passes(dec: &Decoded, s: &AnalysisSettings, parallel: bool, cancelled: &(dyn Fn() -> bool + Sync)) -> AnalysisResult {
     let mono = dec.mono();
     let sr = dec.sr as f64;
     // Key detection uses the measured tempo/grid. The waveform and loudness passes
     // are independent and only borrow the decoded samples.
     let timing = || {
-        let (bpm, grid) = analyze_grid(dec, &mono, s);
-        let key = if s.do_key {
+        let (bpm, grid) = analyze_grid(dec, &mono, s, cancelled);
+        let key = if s.do_key && !cancelled() {
             crate::key::detect_key_stereo_with_mono(&dec.samples, Some(&mono), dec.sr, bpm, grid.as_ref())
         } else { -1 };
         (bpm, grid, key)
@@ -225,7 +228,7 @@ fn analyze_passes(dec: &Decoded, s: &AnalysisSettings, parallel: bool) -> Analys
     };
     // No measurement stays unavailable (NaN), never a usable 0 dB or an infinite gain.
     let gain_db = if lufs.is_finite() { (s.target_lufs - lufs).clamp(-24.0, 24.0) as f32 } else { f32::NAN };
-    let vocal = if s.vocal { crate::vocal_rb::analyse(dec) } else { None };
+    let vocal = if s.vocal && !cancelled() { crate::vocal_rb::analyse(dec) } else { None };
     AnalysisResult { duration: dec.duration(), raw_samples: dec.raw_frames as u64, sample_rate: dec.sr, bpm, grid, key, wave, gain_db, peak, vocal }
 }
 
@@ -1096,8 +1099,8 @@ mod tests {
         let (own_bpm, own_grid) = tempo_and_grid(&mono, f64::from(sr), 70.0, 180.0);
         let own = (own_grid.as_ref().map_or(own_bpm, BeatGrid::first_bpm), own_grid);
         let expected = if own_beat_engine() { own.clone() } else { (native_bpm, native_grid) };
-        assert_eq!(analyze_grid(&dec, &mono, &settings), expected);
-        assert_eq!(analyze_grid(&dec, &mono, &AnalysisSettings { use_recordbox_estimator: true, ..settings }), own);
+        assert_eq!(analyze_grid(&dec, &mono, &settings, &|| false), expected);
+        assert_eq!(analyze_grid(&dec, &mono, &AnalysisSettings { use_recordbox_estimator: true, ..settings }, &|| false), own);
     }
 
     #[test]

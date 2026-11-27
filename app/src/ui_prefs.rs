@@ -1028,10 +1028,8 @@ fn page_analysis(app: &mut App, ui: &mut Ui, tab: usize) {
             kit::toggle_raw(ui, &mut app.prefs.refine_beatgrid_transients, "High precision: refine beat timing");
             kit::help(ui, 37.5, "Align beats and tempo to repeated attacks in the audio. Works with either estimator in Normal and Dynamic mode.");
         });
-        ui.add_enabled_ui(app.prefs.analysis_mode != 1, |ui| {
-            toggle(ui, &mut app.prefs.use_installed_beatgrid_model, "Use installed beat grid model");
-        });
-        note(ui, "Normal mode can also use a compatible local model on eligible tracks up to 15 minutes long. The selected estimator supplies the grid when the input or model is unsupported.");
+        toggle(ui, &mut app.prefs.use_installed_beatgrid_model, "Use installed beat grid model");
+        note(ui, "On eligible tracks up to 15 minutes long, Normal mode picks the model for a steady or changing tempo. Dynamic mode uses the changing-tempo model. The selected estimator supplies the grid if the local model cannot run.");
         kit::labeled(ui, "Analysis workers", |ui| {
             let before = app.prefs.analysis_threads;
             let label = if before == 0 { format!("Automatic ({})", app.pool.thread_count()) } else { app.pool.thread_count().to_string() };
