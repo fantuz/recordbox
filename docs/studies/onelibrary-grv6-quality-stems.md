@@ -32,6 +32,8 @@ cargo test --manifest-path app/Cargo.toml --locked -- --ignored --exact export::
 
 ## Physical MIDI on the AlphaTheta DDJ-GRV6
 
+The follow-up MIDI study compares the same two-deck messages on the fork and upstream, then measures the cost of updating controller feedback. [MIDI replay results and reproduction](midi-replay/README.md)
+
 The candidate passed a native Intel macOS **virtual** CoreMIDI exchange for transport, hot cues, mixer, jogs, feedback and disconnect. We also replayed the actual GRV6 bytes below against the candidate's mapping code, using a small independently written two-deck mapping. With no factory or user mapping, the software ignored PLAY. With the test map, it decoded input for each deck and encoded the expected LED bytes. A Linux integration test also imported the CSV through the candidate’s normal mapping path. PLAY toggled only the addressed deck. Rim and platter packets bent that deck in both directions and its engine returned to neutral at the idle deadline. Physical response, audio latency, decks 3/4 and Groove Circuit remain unverified. The candidate's MIDI action registry has no dedicated Drum Swap or Drum Capture action. [Native CI run](https://github.com/fantuz/recordbox/actions/runs/46036491081/job/140633314533#step:13:1) · [MIDI registry](https://github.com/fantuz/recordbox/blob/91c8e9789937151119ea60118263902bc38428d1/app/src/midi.rs#L357-L592) · [AlphaTheta message list, pages 1–3](https://downloads.support.alphatheta.com/software_info/dj-controllers/DDJ-GRV6/DDJ-GRV6_MIDI_Message_List_E1.pdf)
 
 | Control, Shift released | Deck 1 | Deck 2 | Expected result |

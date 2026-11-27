@@ -1,0 +1,10 @@
+case,state,fantuz_median_ns,adamsardo_median_ns,median_paired_speed_ratio,paired_ratio_min,paired_ratio_max
+unmapped,stable,280.505,412.238,1.466,1.442,1.587
+small,stable,609.423,1077.588,1.798,1.714,2.707
+small,changed,741.343,1193.708,1.611,1.338,3.004
+broad,stable,1588.298,5705.669,3.614,2.96,3.8
+broad,changed,2729.801,7205.2,2.61,1.807,2.751
+fanout,stable,2151.253,11655.471,5.395,5.027,5.494
+fanout,changed,8776.361,19379.813,2.238,2.102,3.536
+tagged,stable,67.732,67.978,1.004,0.963,1.096
+tagged,changed,774.007,761.194,0.988,0.954,1.049
