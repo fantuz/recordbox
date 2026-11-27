@@ -195,9 +195,11 @@ fn wait_for_shared_gpu<'a>(slot: &'a parking_lot::Mutex<()>, progress: &mut dyn 
     }
 }
 
+type LoadedGraph = std::sync::Arc<htdemucs::Graph>;
+static LOADED: std::sync::Mutex<Vec<(String, SeparationDevice, LoadedGraph)>> = std::sync::Mutex::new(Vec::new());
+
 /// Shared-memory DirectML models live for one job. Other backends reuse recent checkpoints.
 fn graph(file: &str, execution: SeparationDevice) -> Result<std::sync::Arc<htdemucs::Graph>> {
-    static LOADED: std::sync::Mutex<Vec<(String, SeparationDevice, std::sync::Arc<htdemucs::Graph>)>> = std::sync::Mutex::new(Vec::new());
     // A preceding job may have lost the GPU while this job waited for its turn.
     execution.check_hold()?;
     let execution = if execution == SeparationDevice::GpuOnly { SeparationDevice::Selected } else { execution };
@@ -221,6 +223,71 @@ fn graph(file: &str, execution: SeparationDevice) -> Result<std::sync::Arc<htdem
         loaded.push((file.to_string(), execution, load()?));
     }
     Ok(loaded.last().unwrap().2.clone())
+}
+
+/// Stage missing graphs privately. If the driver budget drops or a later allocation
+/// runs out of memory, dropping the candidates restores the original cache.
+fn quality_graphs(
+    files: &[&str; 4], execution: SeparationDevice, live: &Live, progress: &mut dyn FnMut(f32) -> bool,
+) -> Result<Option<[LoadedGraph; 4]>> {
+    if !live.can_hold_quality_models(0) { return Ok(None); }
+    let mut cache = LOADED.lock().map_err(|_| anyhow!("model cache is unusable"))?;
+    stage_quality_graphs(files, &mut cache, |remaining| {
+        if !progress(0.0) { anyhow::bail!("stopped"); }
+        execution.check_hold()?;
+        Ok(live.can_hold_quality_models(remaining))
+    }, |file| execution.load(&models_dir().join(file)))
+}
+
+fn stage_quality_graphs<T>(
+    files: &[&str; 4], cache: &mut Vec<(String, SeparationDevice, std::sync::Arc<T>)>,
+    mut admit: impl FnMut(usize) -> Result<bool>, mut load: impl FnMut(&str) -> Result<T>,
+) -> Result<Option<[std::sync::Arc<T>; 4]>> {
+    let mut missing = files.iter().filter(|file|
+        !cache.iter().any(|(f, mode, _)| f == **file && *mode == SeparationDevice::Selected)
+    ).count();
+    let mut candidates = Vec::with_capacity(files.len());
+    for &file in files {
+        if !admit(missing)? { return Ok(None); }
+        let entry = cache.iter().find(|(f, mode, _)| f == file && *mode == SeparationDevice::Selected);
+        let g = match entry {
+            Some((_, _, g)) => g.clone(),
+            None => match load(file) {
+                Ok(g) => { missing -= 1; std::sync::Arc::new(g) }
+                // The ordinary loader also evicts an old entry before allocating when
+                // the cache is full. It may recover even if the first candidate failed.
+                Err(error) if (!candidates.is_empty() || cache.len() >= files.len()) && allocation_pressure(&error) => return Ok(None),
+                Err(error) => return Err(error).with_context(|| format!("Loading {file}")),
+            },
+        };
+        candidates.push(g);
+    }
+    if !admit(0)? { return Ok(None); }
+    let graphs: [std::sync::Arc<T>; 4] = candidates.try_into().map_err(|_| anyhow!("expected four STEMS specialists"))?;
+    cache.clear();
+    cache.extend(files.iter().zip(&graphs).map(|(f, g)| (f.to_string(), SeparationDevice::Selected, g.clone())));
+    Ok(Some(graphs))
+}
+
+fn allocation_pressure(error: &anyhow::Error) -> bool {
+    // The CUDA driver distinguishes out-of-memory from a lost or failed device.
+    // Metal exposes generic resource errors, which we must propagate.
+    #[cfg(feature = "cuda12")]
+    {
+        use candle_core::cuda_backend::{cudarc::driver::sys::CUresult, CudaError};
+        let mut cause = error.downcast_ref::<candle_core::Error>();
+        while let Some(error) = cause {
+            match error {
+                candle_core::Error::Cuda(inner) => return matches!(inner.downcast_ref::<CudaError>(),
+                    Some(CudaError::Cuda(err)) if err.0 == CUresult::CUDA_ERROR_OUT_OF_MEMORY),
+                candle_core::Error::WithPath { inner, .. } | candle_core::Error::WithBacktrace { inner, .. } |
+                    candle_core::Error::Context { inner, .. } => cause = Some(inner),
+                _ => break,
+            }
+        }
+    }
+    let _ = error;
+    false
 }
 
 /// Planar stereo (left samples, then right) at 44.1 kHz from interleaved stereo at `sr`.
@@ -478,6 +545,14 @@ pub fn separate_with_live(m: &ModelSpec, samples: &[f32], sr: u32, progress: &mu
             let mut cb = |done: usize, total: usize| progress(done as f32 / total as f32);
             let publish = live.map(|live| live::Publication { live, previous: &[] });
             return htdemucs::separate_publishing(&g, &device, &planar, len, &htdemucs::Options { overlap: OVERLAP, source: None }, &mut cb, publish);
+        }
+        if let (Some(live), Ok(files)) = (live, m.files.try_into()) {
+            if let Some(graphs) = quality_graphs(files, execution, live, progress)? {
+                let parts = std::array::from_fn(|i| graphs[i].as_ref());
+                let mut cb = |done: usize, total: usize| progress(done as f32 / total as f32);
+                let publish = live::Publication { live, previous: &[] };
+                return htdemucs::separate_quality_windows(parts, &device, &planar, len, OVERLAP, &mut cb, publish);
+            }
         }
         // Model k is the specialist for source k (upstream's weights matrix is the identity),
         // so only that source is taken from it.
@@ -909,6 +984,42 @@ mod tests {
         drop(first_job);
         assert_eq!(wait_for_shared_gpu(&slot, &mut |_| false).unwrap_err().to_string(), "stopped");
         assert!(wait_for_shared_gpu(&slot, &mut |_| true).is_ok());
+    }
+
+    #[test]
+    fn quality_staging_rolls_back_on_pressure_and_reuses_warm_graphs() {
+        use std::sync::Arc;
+        let mode = SeparationDevice::Selected;
+        let warm = Arc::new(1);
+        let mut cache = vec![("drums".to_owned(), mode, warm.clone())];
+        let files = ["drums", "bass", "other", "vocals"];
+        let loads = std::cell::Cell::new(0);
+        let load = |_: &str| { loads.set(loads.get() + 1); Ok(2) };
+        // Keep one old graph and release both privately staged models on the last load.
+        assert!(stage_quality_graphs(&files, &mut cache, |missing| Ok(missing > 1), load).unwrap().is_none());
+        assert_eq!(loads.get(), 2);
+        assert_eq!(cache.len(), 1);
+        assert_eq!(Arc::strong_count(&warm), 2);
+        let error = stage_quality_graphs(&files, &mut cache, |_| Ok(true), |_| Err(anyhow!("device lost"))).unwrap_err();
+        assert!(format!("{error:#}").contains("device lost"));
+        assert_eq!(cache.len(), 1);
+        let result = stage_quality_graphs(&files, &mut cache, |_| Ok(true), load).unwrap().unwrap();
+        assert_eq!(loads.get(), 5);
+        assert!(Arc::ptr_eq(&result[0], &warm));
+        assert_eq!(cache.len(), 4);
+    }
+
+    #[test]
+    fn generic_device_errors_are_never_retried_as_memory_pressure() {
+        assert!(!allocation_pressure(&anyhow!("device lost")));
+        assert!(!allocation_pressure(&anyhow!("out of memory")));
+        #[cfg(feature = "cuda12")]
+        {
+            use candle_core::cuda_backend::{cudarc::driver::{result::DriverError, sys::CUresult}, CudaError};
+            let error = |code| anyhow::Error::from(candle_core::Error::from(CudaError::Cuda(DriverError(code))));
+            assert!(allocation_pressure(&error(CUresult::CUDA_ERROR_OUT_OF_MEMORY)));
+            assert!(!allocation_pressure(&error(CUresult::CUDA_ERROR_LAUNCH_FAILED)));
+        }
     }
 
     #[test]

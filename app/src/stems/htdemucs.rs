@@ -752,6 +752,23 @@ pub fn separate(graph: &Graph, device: &Device, audio: &[f32], len: usize, opts:
 }
 
 pub(super) fn separate_publishing(graph: &Graph, device: &Device, audio: &[f32], len: usize, opts: &Options, progress: &mut dyn FnMut(usize, usize) -> bool, publication: Option<super::live::Publication<'_>>) -> anyhow::Result<Vec<f32>> {
+    run_parts(&[(graph, opts.source)], device, audio, len, opts, progress, publication)
+}
+
+/// Each completed window contains all four fine-tuned parts. The same overlap-add
+/// and normalization as the single-network path determine when it can be published.
+pub(super) fn separate_quality_windows(
+    graphs: [&Graph; 4], device: &Device, audio: &[f32], len: usize, overlap: f64,
+    progress: &mut dyn FnMut(usize, usize) -> bool, publication: super::live::Publication<'_>,
+) -> anyhow::Result<Vec<f32>> {
+    let parts = std::array::from_fn::<_, 4, _>(|i| (graphs[i], Some(i)));
+    run_parts(&parts, device, audio, len, &Options { overlap, source: None }, progress, Some(publication))
+}
+
+fn run_parts(
+    parts: &[(&Graph, Option<usize>)], device: &Device, audio: &[f32], len: usize, opts: &Options,
+    progress: &mut dyn FnMut(usize, usize) -> bool, publication: Option<super::live::Publication<'_>>,
+) -> anyhow::Result<Vec<f32>> {
     if len == 0 || audio.len() != 2 * len {
         anyhow::bail!("empty or malformed input")
     }
@@ -760,47 +777,61 @@ pub(super) fn separate_publishing(graph: &Graph, device: &Device, audio: &[f32],
     }
     if !progress(0, 1) { anyhow::bail!("stopped"); }
     #[cfg(target_os = "macos")]
-    if let Some(fast) = &graph.fast {
-        return separate_accelerated(audio, len, opts, 2, progress, publication, |spec, wave, source| {
-            let (freq, frames, segment) = (NFFT/2, Stft::frames(TRAINING_FRAMES), TRAINING_FRAMES);
+    if let Some(fast) = parts.iter().map(|(g, src)| Some((g.fast.as_ref()?, *src))).collect::<Option<Vec<_>>>() {
+        // Each queued fine-tuned result contains eight time-domain planes and sixteen
+        // spectral planes. A rendezvous limits staging while all four graphs are resident.
+        let buffered = if fast.len() == 1 { 2 } else { 0 };
+        return separate_accelerated(audio, len, opts, buffered, progress, publication, |spec, wave, poll| {
+            let (freq, frames, segment) = (NFFT / 2, Stft::frames(TRAINING_FRAMES), TRAINING_FRAMES);
             let x = Tensor::from_vec(spec, (4, freq, frames), device)?;
             let xt = Tensor::from_vec(wave, (2, 1, segment), device)?;
-            let (mut y, mut yt) = fast.forward(&x, &xt)?;
-            if let Some(s) = source {
-                y = y.narrow(0, s * 4, 4)?;
-                yt = yt.narrow(0, s * 2, 2)?;
-            }
-            Ok((metal_fast::read(&y)?, metal_fast::read(&yt)?))
+            collect_parts(&fast, poll, |(net, src)| {
+                let (mut y, mut yt) = net.forward(&x, &xt)?;
+                if let Some(s) = *src {
+                    y = y.narrow(0, s * 4, 4)?;
+                    yt = yt.narrow(0, s * 2, 2)?;
+                }
+                Ok((metal_fast::read(&y)?, metal_fast::read(&yt)?))
+            })
         });
     }
     #[cfg(feature = "directml")]
-    if let Some(engine) = &graph.directml {
-        return separate_accelerated(audio, len, opts, engine.buffered_segments(), progress, publication, |spec, wave, source| {
-            engine.forward(spec, wave, source)
-        });
+    if let [(graph, source)] = parts {
+        if let Some(engine) = &graph.directml {
+            return separate_accelerated(audio, len, opts, engine.buffered_segments(), progress, publication, |spec, wave, _| {
+                engine.forward(spec, wave, *source)
+            });
+        }
     }
     let segment = TRAINING_FRAMES;
     let (offsets, weight) = plan(len, opts.overlap);
-    let sources: Vec<usize> = opts.source.map(|s| vec![s]).unwrap_or_else(|| (0..4).collect());
-    let mut out = vec![0f32; sources.len() * 2 * len];
+    let planes: usize = parts.iter().map(|(_, source)| if source.is_some() { 2 } else { 8 }).sum();
+    let mut out = vec![0f32; planes * len];
     let mut sums = vec![0f32; len];
     for (k, &offset) in offsets.iter().enumerate() {
         let chunk_len = (len - offset).min(segment);
-        let x = Tensor::from_vec(segment_at(audio, len, offset), (1, 2, segment), device)?;
-        let y = {
-            let _gpu = GPU.lock();
-            graph.forward(&x, &mut || {
-                if !progress(k, offsets.len()) { anyhow::bail!("stopped"); }
-                Ok(())
-            })?.to_device(&Device::Cpu)?.flatten_all()?.to_vec1::<f32>()?
-        };
         let crop = (segment - chunk_len) / 2;
-        for (n, &s) in sources.iter().enumerate() {
-            for ch in 0..2 {
-                let (dst, src) = (&mut out[(n * 2 + ch) * len + offset..][..chunk_len], &y[(s * 2 + ch) * segment + crop..][..chunk_len]);
+        let x = Tensor::from_vec(segment_at(audio, len, offset), (1, 2, segment), device)?;
+        let mut first_plane = 0;
+        for &(graph, source) in parts {
+            let y = {
+                let _gpu = GPU.lock();
+                let result = graph.forward(&x, &mut || {
+                    if !progress(k, offsets.len()) { anyhow::bail!("stopped"); }
+                    Ok(())
+                })?;
+                let result = match source {
+                    Some(s) => result.narrow(1, s, 1)?,
+                    None => result,
+                };
+                result.to_device(&Device::Cpu)?.flatten_all()?.to_vec1::<f32>()?
+            };
+            for plane in y.chunks_exact(segment) {
+                let dst = &mut out[first_plane * len + offset..][..chunk_len];
                 for i in 0..chunk_len {
-                    dst[i] += weight[i] * src[i];
+                    dst[i] += weight[i] * plane[crop + i];
                 }
+                first_plane += 1;
             }
         }
         for i in 0..chunk_len {
@@ -819,6 +850,28 @@ pub(super) fn separate_publishing(graph: &Graph, device: &Device, audio: &[f32],
         }
     }
     Ok(out)
+}
+
+/// Join each specialist's spectral and time-domain stereo output for the common
+/// inverse-transform/overlap-add stage. No output escapes on failure or cancellation.
+#[cfg(any(target_os = "macos", test))]
+fn collect_parts<T>(
+    parts: &[T], poll: &mut dyn FnMut() -> bool,
+    mut infer: impl FnMut(&T) -> anyhow::Result<(Vec<f32>, Vec<f32>)>,
+) -> anyhow::Result<(Vec<f32>, Vec<f32>)> {
+    let (mut spec, mut wave) = (Vec::new(), Vec::new());
+    for (i, part) in parts.iter().enumerate() {
+        if !poll() { anyhow::bail!("stopped"); }
+        let pair = infer(part)?;
+        if parts.len() == 1 { return Ok(pair); }
+        if i == 0 {
+            spec.try_reserve_exact(pair.0.len() * parts.len())?;
+            wave.try_reserve_exact(pair.1.len() * parts.len())?;
+        }
+        spec.extend(pair.0);
+        wave.extend(pair.1);
+    }
+    Ok((spec, wave))
 }
 
 /// Mean and (unbiased) standard deviation, accumulated in f64.
@@ -853,7 +906,7 @@ struct Raw {
 /// network, and a third does the inverse transform and the overlap-add.
 #[cfg(any(test, target_os = "macos", feature = "directml"))]
 fn separate_accelerated(audio: &[f32], len: usize, opts: &Options, buffered_segments: usize, progress: &mut dyn FnMut(usize, usize) -> bool, publication: Option<super::live::Publication<'_>>,
-    mut forward: impl FnMut(Vec<f32>, Vec<f32>, Option<usize>) -> anyhow::Result<(Vec<f32>, Vec<f32>)>) -> anyhow::Result<Vec<f32>> {
+    mut forward: impl FnMut(Vec<f32>, Vec<f32>, &mut dyn FnMut() -> bool) -> anyhow::Result<(Vec<f32>, Vec<f32>)>) -> anyhow::Result<Vec<f32>> {
     let segment = TRAINING_FRAMES;
     let freq = NFFT / 2;
     let frames = Stft::frames(segment);
@@ -924,7 +977,7 @@ fn separate_accelerated(audio: &[f32], len: usize, opts: &Options, buffered_segm
                 if !progress(k, offsets.len()) { anyhow::bail!("stopped"); }
                 let (spec, wave) = {
                     let _gpu = GPU.lock();
-                    forward(p.spec, p.wave, opts.source).with_context(|| format!("Separation segment {} of {}", k + 1, offsets.len()))?
+                    forward(p.spec, p.wave, &mut || progress(k, offsets.len())).with_context(|| format!("Separation segment {} of {}", k + 1, offsets.len()))?
                 };
                 if tx_out.send(Raw { offset: p.offset, spec, wave, stats: p.stats }).is_err() {
                     anyhow::bail!("stem post-processing stopped")
@@ -1007,6 +1060,64 @@ mod tests {
             assert_eq!(live.sample(6, i), Some(out[i]));
             assert_eq!(live.sample(7, i), Some(out[len + i]));
         }
+    }
+
+    #[test]
+    fn quality_window_preserves_specialist_order_and_stops_between_forwards() {
+        let sources = [0, 1, 2, 3];
+        let pair = |&n: &u8| Ok((vec![f32::from(n); 4], vec![f32::from(n); 2]));
+        let (spec, wave) = collect_parts(&sources, &mut || true, pair).unwrap();
+        for (source, (s, w)) in sources.into_iter().zip(spec.chunks_exact(4).zip(wave.chunks_exact(2))) {
+            assert_eq!(s, [f32::from(source); 4]);
+            assert_eq!(w, [f32::from(source); 2]);
+        }
+        let calls = std::cell::Cell::new(0);
+        let stopped = collect_parts(&sources, &mut || calls.get() < 2, |&n| {
+            calls.set(calls.get() + 1);
+            pair(&n)
+        }).unwrap_err();
+        assert_eq!(stopped.to_string(), "stopped");
+        assert_eq!(calls.get(), 2);
+    }
+
+    /// Run with RECORDBOX_TEST_QUALITY_MODELS pointing to the four checkpoint files.
+    #[test]
+    #[ignore = "requires the four HTDemucs fine-tuned checkpoints"]
+    fn quality_windows_match_independent_specialists() -> anyhow::Result<()> {
+        let dir = std::path::PathBuf::from(std::env::var_os("RECORDBOX_TEST_QUALITY_MODELS").expect("checkpoint directory"));
+        let files = super::super::CATALOG[0].files;
+        let mut graphs = Vec::new();
+        for file in files { graphs.push(Graph::load(&dir.join(file), &Device::Cpu)?); }
+        // Two windows overlap; the final window also needs left context and padding.
+        let len = 6 * SAMPLE_RATE as usize;
+        let audio = signal(len);
+        let live = super::super::live::Live::with_len(len).unwrap();
+        let mut early = 0;
+        let mut cb = |done, total| {
+            if done == 1 && total == 2 { early = live.ready_frames(); }
+            true
+        };
+        let part_graphs = std::array::from_fn(|i| &graphs[i]);
+        let publish = super::super::live::Publication { live: &live, previous: &[] };
+        let result = separate_quality_windows(part_graphs, &Device::Cpu, &audio, len, 0.25, &mut cb, publish)?;
+        assert!(early > 0 && early < len);
+        assert_eq!(live.ready_frames(), len);
+        for (i, g) in graphs.iter().enumerate() {
+            let reference = separate(g, &Device::Cpu, &audio, len, &Options { overlap: 0.25, source: Some(i) }, &mut |_, _| true)?;
+            let got = &result[i * 2 * len..(i + 1) * 2 * len];
+            let mut max_error = 0.0f32;
+            let mut energy = 0.0f64;
+            for (frame, (&expected, &actual)) in reference.iter().zip(got).enumerate() {
+                assert!(expected.is_finite() && actual.is_finite());
+                let difference = (expected - actual).abs();
+                max_error = max_error.max(difference);
+                energy += f64::from(difference).powi(2);
+                assert_eq!(live.sample(2 * i + frame / len, frame % len), Some(actual));
+            }
+            println!("{}: max abs {max_error:.8}, RMS {:.8}", SOURCES[i], (energy / got.len() as f64).sqrt());
+            assert_eq!(max_error, 0.0);
+        }
+        Ok(())
     }
 
     #[cfg(feature = "directml")]

@@ -19,6 +19,7 @@ pub struct Live {
     blocks: Box<[OnceLock<Box<[f32]>>]>,
     ready: AtomicUsize,
     exhausted: AtomicBool,
+    quality_hardware: Option<Hardware>,
 }
 
 impl Live {
@@ -55,7 +56,11 @@ impl Live {
         }
         let len = (source_frames as f64 * super::htdemucs::SAMPLE_RATE as f64 / source_rate as f64)
             .round() as usize;
-        Self::with_len(len).map(Arc::new)
+        let mut live = Self::with_len(len)?;
+        if model.per_source && len > super::htdemucs::TRAINING_FRAMES {
+            live.quality_hardware = Some(hw.clone());
+        }
+        Some(Arc::new(live))
     }
 
     pub(super) fn with_len(len: usize) -> Option<Self> {
@@ -78,6 +83,17 @@ impl Live {
             blocks: blocks.into_boxed_slice(),
             ready: 0.into(),
             exhausted: false.into(),
+            quality_hardware: None,
+        })
+    }
+
+    /// Leave the existing live job's scratch allowance available even after all four
+    /// graphs have loaded. On unified memory the final PCM and preview also compete
+    /// with the GPU. Check the current driver budget again after each model load.
+    pub(super) fn can_hold_quality_models(&self, remaining: usize) -> bool {
+        self.quality_hardware.as_ref().and_then(device_budget).is_some_and(|(free, scratch)| {
+            let required = quality_budget(scratch, self.len, self.limit, remaining);
+            free >= required
         })
     }
 
@@ -216,6 +232,15 @@ impl Publication<'_> {
     }
 }
 
+fn quality_budget(scratch: u64, frames: usize, preview_limit: usize, remaining_models: usize) -> u64 {
+    // Four stereo parts, their normalization weights, immutable preview,
+    // one graph's packing allowance per unloaded specialist and one Metal staging slot.
+    scratch.saturating_add((frames as u64).saturating_mul(36))
+        .saturating_add((preview_limit as u64).saturating_mul(32))
+        .saturating_add((remaining_models as u64).saturating_mul(GIB / 2))
+        .saturating_add(GIB / 4)
+}
+
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 fn device_budget(hw: &Hardware) -> Option<(u64, u64)> {
     if !hw.apple_silicon || hw.ram_gb * 1e9 < (32 * GIB) as f64 {
@@ -272,6 +297,16 @@ fn device_budget(_: &Hardware) -> Option<(u64, u64)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn quality_admission_accounts_for_unloaded_graphs_and_full_track_pcm() {
+        let frames = 44_100 * 240;
+        let initial = quality_budget(8 * GIB, frames, frames, 4);
+        let loaded = quality_budget(8 * GIB, frames, frames, 0);
+        assert_eq!(initial - loaded, 2 * GIB);
+        assert_eq!(loaded, 8 * GIB + GIB / 4 + frames as u64 * 68);
+        assert_eq!(quality_budget(u64::MAX, frames, frames, 4), u64::MAX);
+    }
 
     #[test]
     fn preview_normalization_matches_completed_stems_in_both_model_modes() {
