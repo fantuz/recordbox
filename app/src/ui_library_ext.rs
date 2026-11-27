@@ -130,8 +130,7 @@ pub fn status_cell(app: &mut App, ui: &mut Ui, t: &Track, r: Rect) {
         3 => {
             // Analysing: a ring that fills with the progress of the analysis run.
             let total = app.analysis_total.max(1) as f32;
-            let pending = app.pool.pending.load(std::sync::atomic::Ordering::Relaxed) as f32;
-            let frac = ((total - pending) / total).clamp(0.0, 1.0);
+            let frac = (app.analysis_done as f32 / total).clamp(0.0, 1.0);
             let tt = app.ctx.input(|i| i.time) as f32;
             ring(&p, ic, 4.6, 0.0, std::f32::consts::TAU, Stroke::new(1.4, hex(0x4A4A4A)));
             ring(&p, ic, 4.6, tt * 4.0, std::f32::consts::TAU * (0.15 + 0.85 * frac), Stroke::new(1.6, BLUE));
@@ -141,7 +140,7 @@ pub fn status_cell(app: &mut App, ui: &mut Ui, t: &Track, r: Rect) {
         }
         2 => {
             icon_unsupported(&p, ic);
-            tips.push("File format not supported");
+            tips.push("Track analysis failed");
         }
         0 => {
             // Not analysed: an empty ring.

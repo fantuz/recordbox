@@ -126,6 +126,21 @@ Pick one worker to limit CPU usage during a set. A single track can overlap
 waveform and loudness measurement with tempo and key detection. Key detection
 follows the beat grid. Several tracks share the same worker limit.
 
+**Add New Analysis Data** uses the CPU for collection analysis in both the
+standard Windows build and the Radeon DirectML build. DirectML accelerates
+STEMS separation. The worker setting limits CPU concurrency. The batch also
+budgets memory for the tracks it decodes together. On Windows it takes half
+the smaller of available physical memory and the memory Windows can still
+commit to the process. Tracks with an unknown duration run alone. If a track
+outgrows its share, it can retry once with the full batch budget. If that
+still falls short, recordbox reports the failure and keeps the track’s prior
+analysis.
+
+**For recordbox 0.9.0**, if a large selection closes the app, reopen it, set
+**Analysis workers** to **1** before starting another batch, select a small
+group of tracks and run **Add New Analysis Data** from their context menu.
+Wait for that group to finish before selecting the next one.
+
 To time a local collection, put one audio path per line in `tracks.txt` and run
 from the repository root on an otherwise idle machine.
 

@@ -83,9 +83,46 @@ pub fn analyze_decoded(dec: &Decoded, s: &AnalysisSettings) -> AnalysisResult {
     analyze_passes(dec, s, false)
 }
 
+/// Room for per-job codec and DSP scratch independent of track duration.
+pub(super) const ANALYSIS_BASE_BYTES: u64 = 32 * 1024 * 1024;
+/// Allow for stereo PCM, mono and key planes, overlapping waveform/loudness
+/// passes, resampling and spectral buffers. Budget low-rate inputs at the
+/// internal analysis rate as several detectors resample them to 44.1/48 kHz.
+const ANALYSIS_BYTES_PER_FRAME: u64 = 48;
+
+pub(super) fn estimated_working_bytes(seconds: f64, rate: u32) -> u64 {
+    let frames = (seconds * f64::from(rate.max(48_000))).ceil() as u64;
+    rate_scratch_bytes(rate).saturating_add(frames.saturating_mul(ANALYSIS_BYTES_PER_FRAME))
+}
+
+fn rate_scratch_bytes(rate: u32) -> u64 {
+    // Several filters initialise one or two seconds of scratch even on a short
+    // track. Count those buffers for unusually high or corrupt sample rates.
+    ANALYSIS_BASE_BYTES.max(u64::from(rate) * 64)
+}
+
+pub(super) fn frames_in_budget(bytes: u64, rate: u32) -> usize {
+    let frames = bytes.saturating_sub(rate_scratch_bytes(rate)) / ANALYSIS_BYTES_PER_FRAME;
+    let frames = u128::from(frames) * u128::from(rate) / u128::from(rate.max(48_000));
+    frames.min((isize::MAX as usize / 8) as u128) as usize
+}
+
+#[derive(Debug)]
+pub(super) struct AnalysisMemoryLimit;
+impl std::fmt::Display for AnalysisMemoryLimit {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("the complete track exceeds the available analysis memory budget")
+    }
+}
+impl std::error::Error for AnalysisMemoryLimit {}
+
 /// Called inside the batch's bounded Rayon pool; nested passes share its workers.
-pub(super) fn analyze_file_on_worker(path: &str, s: &AnalysisSettings) -> Result<AnalysisResult> {
-    let dec = decode_file(path)?;
+pub(super) fn analyze_file_on_worker(path: &str, s: &AnalysisSettings, bytes: u64, cancelled: impl Fn() -> bool) -> Result<AnalysisResult> {
+    if bytes <= ANALYSIS_BASE_BYTES {
+        return Err(AnalysisMemoryLimit.into());
+    }
+    let dec = crate::audio::decode_for_analysis(path, bytes, &cancelled)?;
+    anyhow::ensure!(!cancelled(), "stopped");
     Ok(analyze_passes(&dec, s, true))
 }
 
@@ -132,7 +169,9 @@ fn analyze_passes(dec: &Decoded, s: &AnalysisSettings, parallel: bool) -> Analys
     let timing = || {
         let (bpm, grid) = analyze_grid(dec, &mono, s);
         let (bpm, grid) = rb_hp::dispatch(dec, s, bpm, grid);
-        let key = if s.do_key { crate::key::detect_key_stereo(&dec.samples, dec.sr, bpm, grid.as_ref()) } else { -1 };
+        let key = if s.do_key {
+            crate::key::detect_key_stereo_with_mono(&dec.samples, Some(&mono), dec.sr, bpm, grid.as_ref())
+        } else { -1 };
         (bpm, grid, key)
     };
     let wave = || waveform(&mono, sr);

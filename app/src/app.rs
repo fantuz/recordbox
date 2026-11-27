@@ -1686,6 +1686,10 @@ pub struct App {
     pub pool: AnalysisPool,
     /// Hot slots the user cleared while this track's library analysis was outstanding.
     cleared_analysis_hot_slots: HashMap<i64, HashSet<i32>>,
+    /// Keep saved track status intact while the UI shows "queued".
+    analysis_previous_status: HashMap<i64, u8>,
+    /// First failed track and the number of failures in this batch.
+    analysis_failures: Option<(String, usize)>,
     pub analysis_total: usize,
     pub analysis_done: usize,
     pub importing: Option<Receiver<Option<Track>>>,
@@ -1844,6 +1848,8 @@ impl App {
             deck: Deck::default(),
             pool,
             cleared_analysis_hot_slots: HashMap::new(),
+            analysis_previous_status: HashMap::new(),
+            analysis_failures: None,
             analysis_total: 0,
             analysis_done: 0,
             importing: None,
@@ -2406,7 +2412,7 @@ impl App {
         if let Some(t) = self.track(id).cloned() {
             let mut t = t;
             if t.analyzed == 3 {
-                t.analyzed = 0;
+                t.analyzed = self.analysis_previous_status.get(&id).copied().unwrap_or(0);
             }
             let _ = self.db.update_track(&t);
         }
@@ -2423,7 +2429,7 @@ impl App {
         if let Some(t) = self.track(id).cloned() {
             let mut t = t;
             if t.analyzed == 3 {
-                t.analyzed = 0;
+                t.analyzed = self.analysis_previous_status.get(&id).copied().unwrap_or(0);
             }
             let _ = self.db.update_track(&t);
         }
@@ -3734,11 +3740,15 @@ impl App {
             if t.missing || (t.analyzed == 3) || (!force && t.analyzed == 1) || (t.grid_locked && t.analyzed == 1) {
                 continue;
             }
+            let previous = t.analyzed;
+            let job = AnalysisJob {
+                track_id: *id, path: t.path.clone(), duration: t.duration, sample_rate: t.sample_rate, settings: s.clone(),
+            };
             t.analyzed = 3;
-            let path = t.path.clone();
+            self.analysis_previous_status.insert(*id, previous);
             n += 1;
             submitted.push(*id);
-            self.pool.submit(AnalysisJob { track_id: *id, path, settings: s.clone() });
+            self.pool.submit(job);
         }
         self.analysis_total += n;
         self.list_dirty = true;
@@ -3746,11 +3756,31 @@ impl App {
     }
 
     pub fn poll_analysis(&mut self) {
-        while let Ok((id, r)) = self.pool.rx.try_recv() {
+        if self.analysis_total == 0 { return; }
+        // Leave time for input and rendering when a large batch finishes or is stopped.
+        let start = Instant::now();
+        while let Ok((id, result)) = self.pool.try_recv() {
             self.analysis_done += 1;
-            self.apply_analysis(id, r);
+            if let Err(error) = &result {
+                if error != "stopped" {
+                    if let Some((_, count)) = &mut self.analysis_failures {
+                        *count += 1;
+                    } else {
+                        let title = self.track(id).map(Track::display_title).unwrap_or_else(|| format!("Track {id}"));
+                        self.analysis_failures = Some((format!("{title} — {error}"), 1));
+                    }
+                }
+            }
+            self.apply_analysis(id, result);
+            if start.elapsed() >= std::time::Duration::from_millis(6) {
+                self.ctx.request_repaint();
+                break;
+            }
         }
         if self.analysis_done == self.analysis_total {
+            if let Some((first, count)) = self.analysis_failures.take() {
+                self.toast_err(format!("Analysis failed for {count} of {} tracks. First failure: {first}", self.analysis_total));
+            }
             self.analysis_total = 0;
             self.analysis_done = 0;
         }
@@ -3764,9 +3794,10 @@ impl App {
 
     pub fn apply_analysis(&mut self, id: i64, r: Result<crate::analysis::AnalysisResult, String>) {
         let cleared_hot_slots = self.cleared_analysis_hot_slots.remove(&id).unwrap_or_default();
-        let existing_grid = self.db.grid(id).filter(|g| !g.is_empty());
+        let previous = self.analysis_previous_status.remove(&id);
+        let existing_grid = if r.is_ok() { self.db.grid(id).filter(|g| !g.is_empty()) } else { None };
         // Earlier analysis means a stored waveform (a grid alone can come from an import).
-        let had_analysis = self.db.wave(id).is_some();
+        let had_analysis = r.is_ok() && self.db.has_wave(id).unwrap_or(false);
         let keep_tag_key = self.prefs.keep_tag_key;
         let key_requested = self.key_requested.remove(&id);
         let requested_grid = self.grid_requested.remove(&id);
@@ -3774,7 +3805,15 @@ impl App {
         let Some(t) = self.track_mut(id) else { return };
         match r {
             Err(e) => {
-                t.analyzed = if e == "stopped" { 0 } else { 2 };
+                t.analyzed = match (e.as_str(), previous) {
+                    ("stopped", status) => status.unwrap_or(0),
+                    (_, Some(1)) => 1, // A failed repair leaves the saved analysis usable.
+                    _ => 2,
+                };
+                if previous == Some(t.analyzed) {
+                    self.list_dirty = true;
+                    return;
+                }
             }
             Ok(res) if t.grid_locked && had_analysis => {
                 // Analysis Lock: a locked track keeps its grid, key, waveform and gain, whatever

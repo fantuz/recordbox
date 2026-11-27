@@ -665,9 +665,59 @@ impl Db {
         let s: Option<String> = self.conn.query_row("SELECT json FROM grids WHERE track_id=?1", [track], |r| r.get(0)).optional()?;
         Ok(s.map(|s| serde_json::from_str(&s)).transpose()?)
     }
+    /// Validate only the selected grids. A damaged or empty grid still needs analysis.
+    /// Stream the same anchor type as BeatGrid without allocating its full vector.
+    pub(crate) fn missing_grids(&self, ids: &[i64]) -> Result<Vec<i64>> {
+        #[derive(serde::Deserialize)]
+        struct GridPresence {
+            #[serde(deserialize_with = "read_anchors")]
+            anchors: bool,
+        }
+        fn read_anchors<'de, D: serde::Deserializer<'de>>(de: D) -> std::result::Result<bool, D::Error> {
+            struct Anchors;
+            impl<'de> serde::de::Visitor<'de> for Anchors {
+                type Value = bool;
+                fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                    formatter.write_str("an array of beat grid anchors")
+                }
+                fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut seq: A) -> std::result::Result<bool, A::Error> {
+                    let mut found = false;
+                    while seq.next_element::<GridAnchor>()?.is_some() {
+                        found = true;
+                    }
+                    Ok(found)
+                }
+            }
+            de.deserialize_seq(Anchors)
+        }
+        let mut missing = Vec::new();
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT selected.value, grids.json FROM json_each(?1) AS selected
+             LEFT JOIN grids ON grids.track_id=selected.value",
+        )?;
+        for batch in ids.chunks(256) {
+            let mut rows = stmt.query([serde_json::to_string(batch)?])?;
+            while let Some(row) = rows.next()? {
+                let complete = match row.get_ref(1)? {
+                    rusqlite::types::ValueRef::Text(json) => {
+                        serde_json::from_slice::<GridPresence>(json).is_ok_and(|grid| grid.anchors)
+                    }
+                    _ => false,
+                };
+                if !complete {
+                    missing.push(row.get(0)?);
+                }
+            }
+        }
+        Ok(missing)
+    }
     pub fn save_grid(&self, track: i64, g: &BeatGrid) -> Result<()> {
         self.conn.execute("INSERT OR REPLACE INTO grids(track_id,json) VALUES(?1,?2)", params![track, serde_json::to_string(g)?])?;
         Ok(())
+    }
+    /// Check for earlier analysis without reading a track-sized waveform blob.
+    pub fn has_wave(&self, track: i64) -> Result<bool> {
+        Ok(self.conn.query_row("SELECT EXISTS(SELECT 1 FROM waves WHERE track_id=?1)", [track], |row| row.get(0))?)
     }
     pub fn wave(&self, track: i64) -> Option<Waveform> {
         let b: Option<Vec<u8>> = self.conn.query_row("SELECT data FROM waves WHERE track_id=?1", [track], |r| r.get(0)).optional().ok().flatten();

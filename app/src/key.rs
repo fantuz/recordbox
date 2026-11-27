@@ -318,13 +318,23 @@ fn to_base_rate(ch: Vec<f32>, sr: u32) -> (Vec<f32>, u32) {
 /// The traced analysis with its intermediate decisions. `left`/`right` at `sr` Hz; `bpm` and
 /// `grid` as analysed (no grid = one whole-track decision, without the vote over segments).
 pub fn trace_key(left: Vec<f32>, right: Option<Vec<f32>>, sr: u32, bpm: f64, grid: Option<&BeatGrid>) -> key_rb::Trace {
-    let frames = left.len();
-    let duration = if sr > 0 { frames as f64 / sr as f64 } else { 0.0 };
-    // Nothing audible (digital silence, or noise far below any music): no key.
     let peak = left.iter().chain(right.iter().flatten()).fold(0f32, |m, v| m.max(v.abs()));
+    trace_with_grid(left.len(), sr, peak, bpm, grid, |bpm, beats| {
+        let (left, base) = to_base_rate(left, sr);
+        let right = right.map(|r| to_base_rate(r, sr).0);
+        key_rb::analyze(&left, right.as_deref(), base, bpm, beats)
+    })
+}
+
+fn trace_with_grid(
+    frames: usize, sr: u32, peak: f32, bpm: f64, grid: Option<&BeatGrid>,
+    analyze: impl FnOnce(f32, &[key_rb::GridBeat]) -> key_rb::Trace,
+) -> key_rb::Trace {
+    // Nothing audible (digital silence, or noise far below any music): no key.
     if frames == 0 || sr == 0 || !(peak > 1e-5) {
         return key_rb::Trace { key: -1, ..Default::default() };
     }
+    let duration = frames as f64 / sr as f64;
     let beats: Vec<key_rb::GridBeat> = match grid {
         Some(g) if !g.is_empty() => g
             .beats(duration)
@@ -335,18 +345,23 @@ pub fn trace_key(left: Vec<f32>, right: Option<Vec<f32>>, sr: u32, bpm: f64, gri
         _ => vec![],
     };
     let bpm = if bpm > 0.0 { bpm } else { grid.map(|g| g.first_bpm()).unwrap_or(0.0) };
-    let (left, base) = to_base_rate(left, sr);
-    let right = right.map(|r| to_base_rate(r, sr).0);
-    key_rb::analyze(&left, right.as_deref(), base, bpm as f32, &beats)
+    analyze(bpm as f32, &beats)
 }
 
 /// Key of interleaved stereo audio with its analysed tempo and beat grid (estimated here when
 /// none is given)
 /// (Camelot-ordered index, see model::key_from_pitch, or -1).
 pub fn detect_key_stereo(samples: &[f32], sr: u32, bpm: f64, grid: Option<&BeatGrid>) -> i32 {
-    let left: Vec<f32> = samples.chunks_exact(2).map(|c| c[0]).collect();
-    let right: Vec<f32> = samples.chunks_exact(2).map(|c| c[1]).collect();
-    let mono = || -> Vec<f32> { samples.chunks_exact(2).map(|c| 0.5 * (c[0] + c[1])).collect() };
+    detect_key_stereo_with_mono(samples, None, sr, bpm, grid)
+}
+
+/// `mono` may borrow the same track's existing arithmetic stereo downmix for tempo and fallback.
+pub(crate) fn detect_key_stereo_with_mono(samples: &[f32], mono: Option<&[f32]>, sr: u32, bpm: f64, grid: Option<&BeatGrid>) -> i32 {
+    use std::borrow::Cow;
+    let mono = || match mono {
+        Some(m) => Cow::Borrowed(m),
+        None => Cow::Owned(samples.chunks_exact(2).map(|c| 0.5 * (c[0] + c[1])).collect::<Vec<f32>>()),
+    };
     // Without a grid (grid analysis switched off) one is estimated just for the segment vote.
     let estimated = match grid {
         Some(g) if !g.is_empty() => None,
@@ -356,7 +371,18 @@ pub fn detect_key_stereo(samples: &[f32], sr: u32, bpm: f64, grid: Option<&BeatG
         Some((b, g)) => (*b, g.as_ref()),
         None => (bpm, grid),
     };
-    let k = from_traced(trace_key(left, Some(right), sr, bpm, grid).key);
+    let trace = if matches!(sr, 44100 | 48000) {
+        let frames = samples.len() / 2;
+        let peak = samples[..2 * frames].iter().fold(0f32, |m, v| m.max(v.abs()));
+        trace_with_grid(frames, sr, peak, bpm, grid, |bpm, beats| {
+            let decimated = key_rb::decimate_stereo(samples, sr);
+            key_rb::analyze_decimated(&decimated, frames, sr, bpm, beats)
+        })
+    } else {
+        let (left, right) = samples.chunks_exact(2).map(|c| (c[0], c[1])).unzip();
+        trace_key(left, Some(right), sr, bpm, grid)
+    };
+    let k = from_traced(trace.key);
     if k >= 0 {
         return k;
     }
@@ -432,6 +458,33 @@ mod tests {
         assert_eq!(from_traced(20), 3);
         assert_eq!(from_traced(24), -1);
         assert_eq!(from_traced(-1), -1);
+    }
+
+    #[test]
+    fn native_stereo_decimation_matches_separate_channels_bit_for_bit() {
+        // Cover a fractional and a whole group of eight per second, both stereo mix
+        // weights, and an incomplete final stereo frame.
+        for (sr, seconds) in [(44100, 2), (48000, 30)] {
+            let frames = sr as usize * seconds + 13;
+            let stereo: Vec<f32> = (0..frames)
+                .flat_map(|i| [((i % 251) as f32 - 125.0) / 127.0, ((i % 101) as f32 - 50.0) / 61.0])
+                .chain([0.95])
+                .collect();
+            let (left, right): (Vec<_>, Vec<_>) = stereo.chunks_exact(2).map(|pair| (pair[0], pair[1])).unzip();
+            let expected = key_rb::decimate(&left, Some(&right), sr);
+            let actual = key_rb::decimate_stereo(&stereo, sr);
+            assert_eq!(actual.len(), frames / 8);
+            assert!(actual.iter().map(|x| x.to_bits()).eq(expected.iter().map(|x| x.to_bits())), "{sr} Hz");
+        }
+    }
+
+    #[test]
+    fn stereo_key_uses_existing_downmix_for_the_short_track_fallback() {
+        let mono = progression(9, true, 2.0);
+        let stereo: Vec<_> = mono.iter().flat_map(|&v| [v, v]).collect();
+        let supplied = detect_key_stereo_with_mono(&stereo, Some(&mono), 44100, 0.0, None);
+        assert_eq!(supplied, legacy_detect_key(&mono, 44100.0));
+        assert_eq!(supplied, detect_key_stereo(&stereo, 44100, 0.0, None));
     }
 
     #[test]
