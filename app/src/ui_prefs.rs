@@ -59,7 +59,7 @@ fn tabs_of(page: u8, mode: Mode) -> &'static [&'static str] {
 }
 
 /// Every setting by name, for the search field: (page, tab, name).
-const SETTINGS: [(u8, &str, &str); 185] = [
+const SETTINGS: [(u8, &str, &str); 186] = [
     (7, "Effect", "Apply CFX to Sampler using MIC COLOR control knob."),
     (7, "Sampler", "SLOT"),
     (7, "Sampler", "Do not overwrite the loaded Slot."),
@@ -110,7 +110,8 @@ const SETTINGS: [(u8, &str, &str); 185] = [
     (5, "Configuration", "Preview Volume"),
     (5, "Input/Output", "Output channels"),
     (5, "Input/Output", "Master Output"),
-    (1, "Track Analysis", "Use high precision BeatGrid analysis"),
+    (1, "Track Analysis", "Beat grid estimator"),
+    (1, "Track Analysis", "High precision: refine beat timing"),
     (1, "Track Analysis", "Analysis Mode"),
     (1, "Track Analysis", "BPM Range"),
     (1, "Track Analysis", "BPM / Grid"),
@@ -988,17 +989,20 @@ fn page_analysis(app: &mut App, ui: &mut Ui, tab: usize) {
     }
     let no_cloud = "recordbox has no cloud service: nothing is collected or uploaded.";
     card(ui, "Track Analysis", |ui| {
-        kit::row(ui, 16.0, |ui| {
-            kit::toggle_raw(ui, &mut app.prefs.refine_beatgrid_transients, "Use high precision BeatGrid analysis");
-            kit::help(ui, 37.5, "Refine beat timing and tempo against repeated attacks in the audio. Works with Normal and Dynamic. Use Analyze Track to update an existing unlocked grid.");
+        kit::labeled(ui, "Beat grid estimator", |ui| {
+            let choices = [(false, "Rekordbox-compatible (default)"), (true, "recordbox classic")];
+            let selected = choices[usize::from(app.prefs.use_recordbox_estimator)].1;
+            kit::combo("beatgrid_estimator", 400.0, selected, 14.0).show_ui(ui, |ui| {
+                for (classic, name) in choices {
+                    ui.selectable_value(&mut app.prefs.use_recordbox_estimator, classic, name);
+                }
+            });
         });
-        toggle(ui, &mut app.prefs.use_installed_beatgrid_model, "Use installed beat grid model");
-        note(ui, "Tries a compatible local model during high precision analysis. When the model is unavailable, recordbox uses its built-in beat analysis.");
-        separator(ui);
+        note(ui, "Rekordbox-compatible uses the port of the original detector. Classic uses the earlier recordbox detector. Both support Normal and Dynamic.");
         kit::sub_help(ui, "Track Analysis Mode", Some("Normal: optimized for tracks which have a constant BPM.\nDynamic: for tracks whose tempo changes, the beat grid follows the tempo."));
         kit::labeled(ui, "Analysis Mode", |ui| {
             let modes = [("Normal", "Optimized for tracks which have a constant BPM"), ("Dynamic", "For tracks whose tempo changes: the beat grid follows the tempo")];
-            let cur = (app.prefs.analysis_mode as usize).min(1);
+            let cur = usize::from(app.prefs.analysis_mode == 1);
             kit::combo("amode", 400.0, modes[cur].0, 14.0).show_ui(ui, |ui| {
                 for (i, (n, tip)) in modes.iter().enumerate() {
                     if ui.selectable_label(cur == i, *n).on_hover_text(*tip).clicked() {
@@ -1007,6 +1011,14 @@ fn page_analysis(app: &mut App, ui: &mut Ui, tab: usize) {
                 }
             });
         });
+        kit::row(ui, 16.0, |ui| {
+            kit::toggle_raw(ui, &mut app.prefs.refine_beatgrid_transients, "High precision: refine beat timing");
+            kit::help(ui, 37.5, "Align beats and tempo to repeated attacks in the audio. Works with either estimator in Normal and Dynamic mode.");
+        });
+        ui.add_enabled_ui(app.prefs.analysis_mode != 1, |ui| {
+            toggle(ui, &mut app.prefs.use_installed_beatgrid_model, "Use installed beat grid model");
+        });
+        note(ui, "Normal mode can also use a compatible local model on eligible 44.1 or 48 kHz tracks. If the model cannot run, the selected estimator supplies the grid.");
         kit::labeled(ui, "Analysis workers", |ui| {
             let before = app.prefs.analysis_threads;
             let label = if before == 0 { format!("Automatic ({})", app.pool.thread_count()) } else { app.pool.thread_count().to_string() };
@@ -1716,6 +1728,7 @@ mod tests {
         assert_eq!(hits, vec![(5, 0, "Buffer size".to_string())]);
         assert!(search_settings("WAVEFORM", ex).len() >= 5, "search ignores case");
         assert!(search_settings("zzzz", ex).is_empty());
+        assert_eq!(search_settings("grid estimator", ex), vec![(1, 0, "Beat grid estimator".to_string())]);
         // A page that exists only in Performance mode is found only there.
         assert!(search_settings("needle lock", ex).is_empty());
         assert_eq!(search_settings("needle lock", Mode::Performance), vec![(7, 0, "Needle Lock".to_string())]);

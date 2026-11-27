@@ -1,5 +1,5 @@
 //! Track analysis: waveform bands, tempo + beat grid, key and loudness.
-//! All algorithms are original DSP (see MECHANICS.md for the parameters).
+//! Native beat analysis supports Rekordbox-compatible and recordbox estimators.
 
 use crate::audio::{decode_file, Decoded};
 use crate::model::{BeatGrid, Waveform, WAVE_FPS};
@@ -11,6 +11,8 @@ pub struct AnalysisSettings {
     pub bpm_min: f64,
     pub bpm_max: f64,
     pub do_grid: bool,
+    /// Use recordbox’s original beat estimator instead of the Rekordbox-compatible detector.
+    pub use_recordbox_estimator: bool,
     pub high_precision: bool,
     /// Optional installed-model grid mode captured when this job is queued.
     pub model_grid_mode: u8,
@@ -27,10 +29,11 @@ pub mod dynamic;
 mod precision;
 pub mod mp3_timebase;
 pub mod rb_hp;
+pub mod rb_beat1;
 
 impl Default for AnalysisSettings {
     fn default() -> Self {
-        AnalysisSettings { bpm_min: 70.0, bpm_max: 180.0, do_grid: true, high_precision: false,
+        AnalysisSettings { bpm_min: 70.0, bpm_max: 180.0, do_grid: true, use_recordbox_estimator: false, high_precision: false,
             model_grid_mode: rb_hp::mode_from_preferences(false, 0), do_key: true, target_lufs: -10.0, dynamic: false, vocal: false }
     }
 }
@@ -65,6 +68,12 @@ pub struct AnalysisResult {
     pub vocal: Option<Vec<u8>>,
 }
 
+/// `PREPDECK_BEAT=own`: use recordbox's own tempo/grid estimator instead of the port of
+/// rekordbox's beat library.
+pub fn own_beat_engine() -> bool {
+    std::env::var("PREPDECK_BEAT").map(|v| v == "own").unwrap_or(false)
+}
+
 pub fn analyze_file(path: &str, s: &AnalysisSettings) -> Result<AnalysisResult> {
     let dec = decode_file(path)?;
     Ok(analyze_decoded(&dec, s))
@@ -80,16 +89,39 @@ pub(super) fn analyze_file_on_worker(path: &str, s: &AnalysisSettings) -> Result
     Ok(analyze_passes(&dec, s, true))
 }
 
-fn analyze_grid(mono: &[f32], sr: f64, settings: &AnalysisSettings) -> (f64, Option<BeatGrid>) {
-    if !settings.do_grid { return (0.0, None); }
-    let detect = if settings.dynamic { dynamic::tempo_and_grid_dynamic } else { tempo_and_grid };
-    let (bpm, mut grid) = detect(mono, sr, settings.bpm_min, settings.bpm_max);
-    if settings.high_precision {
-        if let Some(grid) = &mut grid {
-            precision::refine(mono, sr, grid, settings.bpm_min, settings.bpm_max);
-        }
+fn analyze_grid(dec: &Decoded, mono: &[f32], settings: &AnalysisSettings) -> (f64, Option<BeatGrid>) {
+    let (lo, hi) = (settings.bpm_min, settings.bpm_max);
+    if !settings.do_grid || dec.sr == 0 || !(1.0..=1000.0).contains(&lo) || !(lo..=1000.0).contains(&hi)
+        || !mono.iter().all(|v| v.is_finite()) {
+        return (0.0, None);
     }
-    (grid.as_ref().map_or(bpm, BeatGrid::first_bpm), grid)
+    let sr = f64::from(dec.sr);
+    let ported = if settings.use_recordbox_estimator || own_beat_engine() {
+        None
+    } else {
+        rb_beat1::tempo_and_grid(&dec.samples, dec.sr, settings.dynamic, lo, hi)
+            .filter(|(_, grid)| grid.is_some())
+    };
+    let using_port = ported.is_some();
+    let (bpm, mut grid) = ported.unwrap_or_else(|| {
+        let detect = if settings.dynamic { dynamic::tempo_and_grid_dynamic } else { tempo_and_grid };
+        let (bpm, grid) = detect(mono, sr, lo, hi);
+        (grid.as_ref().map_or(bpm, BeatGrid::first_bpm), grid)
+    });
+    if let Some(g) = grid.as_mut().filter(|_| settings.high_precision) {
+        precision::refine(mono, sr, g, lo, hi);
+        // A dynamic detection reports the track tempo as well as local anchor tempi.
+        // Refining a local anchor must not replace the overall track tempo.
+        if !settings.dynamic || !using_port { return (g.first_bpm(), grid); }
+    }
+    (bpm, grid)
+}
+
+#[cfg(test)]
+fn grid_from_mono(mono: &[f32], sr: f64, settings: &AnalysisSettings) -> (f64, Option<BeatGrid>) {
+    let dec = Decoded { sr: sr as u32, samples: mono.iter().flat_map(|&v| [v, v]).collect(),
+        raw_frames: mono.len(), damaged: 0, truncated: false };
+    analyze_grid(&dec, mono, settings)
 }
 
 fn analyze_passes(dec: &Decoded, s: &AnalysisSettings, parallel: bool) -> AnalysisResult {
@@ -98,7 +130,7 @@ fn analyze_passes(dec: &Decoded, s: &AnalysisSettings, parallel: bool) -> Analys
     // Key detection uses the measured tempo/grid. The waveform and loudness passes
     // are independent and only borrow the decoded samples.
     let timing = || {
-        let (bpm, grid) = analyze_grid(&mono, sr, s);
+        let (bpm, grid) = analyze_grid(dec, &mono, s);
         let (bpm, grid) = rb_hp::dispatch(dec, s, bpm, grid);
         let key = if s.do_key { crate::key::detect_key_stereo(&dec.samples, dec.sr, bpm, grid.as_ref()) } else { -1 };
         (bpm, grid, key)
@@ -376,8 +408,8 @@ pub fn tempo_and_grid(mono: &[f32], sr: f64, bpm_min: f64, bpm_max: f64) -> (f64
 
     // 2) Refine with a phase-aligned comb on a 0.01 BPM grid.
     let mut best = (coarse, 0.0, -1.0);
-    let mut b = coarse - 0.5;
-    while b <= coarse + 0.5 {
+    let mut b = (coarse - 0.5).max(bpm_min);
+    while b <= (coarse + 0.5).min(bpm_max) {
         let p = 60.0 * fps / b;
         let (ph, sc) = comb_score(&env, p);
         if sc > best.2 {
@@ -388,7 +420,7 @@ pub fn tempo_and_grid(mono: &[f32], sr: f64, bpm_min: f64, bpm_max: f64) -> (f64
     let mut bpm = (best.0 * 100.0).round() / 100.0;
     // Prefer a whole BPM when it explains the beats nearly as well.
     let whole = bpm.round();
-    if (whole - bpm).abs() > 1e-6 && (whole - bpm).abs() < 0.35 {
+    if (bpm_min..=bpm_max).contains(&whole) && (whole - bpm).abs() > 1e-6 && (whole - bpm).abs() < 0.35 {
         let (_, sc) = comb_score(&env, 60.0 * fps / whole);
         if sc >= best.2 * 0.97 {
             bpm = whole;
@@ -971,14 +1003,41 @@ mod tests {
     }
 
     #[test]
+    fn default_and_alternate_estimators_use_the_selected_grid() {
+        let sr = 44_100;
+        let mono = click_track(128.0, 30.0, f64::from(sr), 0.31);
+        let dec = Decoded { sr, samples: mono.iter().flat_map(|&v| [v, v]).collect(),
+            raw_frames: mono.len(), damaged: 0, truncated: false };
+        let settings = AnalysisSettings::default();
+        assert!(!settings.use_recordbox_estimator);
+        let (native_bpm, native_grid) = rb_beat1::tempo_and_grid(&dec.samples, sr, false, 70.0, 180.0).unwrap();
+        assert!((native_bpm - 128.0).abs() < 0.1 && native_grid.is_some());
+        let (own_bpm, own_grid) = tempo_and_grid(&mono, f64::from(sr), 70.0, 180.0);
+        let own = (own_grid.as_ref().map_or(own_bpm, BeatGrid::first_bpm), own_grid);
+        let expected = if own_beat_engine() { own.clone() } else { (native_bpm, native_grid) };
+        assert_eq!(analyze_grid(&dec, &mono, &settings), expected);
+        assert_eq!(analyze_grid(&dec, &mono, &AnalysisSettings { use_recordbox_estimator: true, ..settings }), own);
+    }
+
+    #[test]
+    fn unsupported_native_input_retries_the_recordbox_estimator() {
+        let sr = 6_000.0;
+        let mono = click_track(128.0, 24.0, sr, 0.31);
+        let settings = AnalysisSettings::default();
+        let fallback = grid_from_mono(&mono, sr, &settings);
+        assert!((fallback.0 - 128.0).abs() < 0.1 && fallback.1.is_some());
+        assert_eq!(fallback, grid_from_mono(&mono, sr, &AnalysisSettings { use_recordbox_estimator: true, ..settings }));
+    }
+
+    #[test]
     fn high_precision_tracks_fractional_tempo_and_attack_times() {
         for (sr, bpm, offset) in [(44_100.0, 127.137, 0.2137), (48_000.0, 121.043, 0.0573)] {
             let seconds = 64.0;
             let music = click_track(bpm, seconds, sr, offset);
-            let mut settings = AnalysisSettings::default();
-            let (_, standard) = analyze_grid(&music, sr, &settings);
+            let mut settings = AnalysisSettings { use_recordbox_estimator: true, ..Default::default() };
+            let (_, standard) = grid_from_mono(&music, sr, &settings);
             settings.high_precision = true;
-            let (found, precise) = analyze_grid(&music, sr, &settings);
+            let (found, precise) = grid_from_mono(&music, sr, &settings);
             let precise = precise.unwrap();
             let (base, beats) = (standard.unwrap().beats(seconds), precise.beats(seconds));
             let error = |grid: &[crate::model::Beat]| {

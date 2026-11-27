@@ -7,7 +7,7 @@
 //! - `cue_markers_on_preview`: the Preview column in ui_browser.rs.
 //! - `wave_half`: the enlarged and overview waveforms in ui_player.rs.
 //! - `color_names`: every colour menu, through `Prefs::color_name`; the device colour table.
-//! - `refine_beatgrid_transients`, `analysis_mode`: the analysis code.
+//! - `use_recordbox_estimator`, `refine_beatgrid_transients`, `use_installed_beatgrid_model`, `analysis_mode`: the beat grid analysis settings.
 //! - `memory_cue_first_beat`: `App::apply_analysis` calls `memory_cue_at_first_beat`.
 //! - `audio_buffer`, `audio_rate`, `audio_channel`: the output stream (audio.rs).
 //! - `device_bg_color`, `delete_history_after_import`: the USB code.
@@ -572,7 +572,7 @@ pub fn stem_click(on: [bool; 4], srcs: &[usize], solo: bool) -> [bool; 4] {
 pub fn stem_part_click(app: &mut App, srcs: &[usize]) {
     let (have, on) = {
         let s = app.player.state.lock();
-        (s.stems.is_some(), s.stem_on)
+        (s.has_playable_stems(), s.stem_on)
     };
     if !have {
         // rekordbox's status line for a part pressed before its data exists. recordbox also

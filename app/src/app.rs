@@ -326,7 +326,9 @@ pub struct Prefs {
     pub wave_half: bool,
     /// View > Color > Customize Color Comments: names of the 8 track colours (Pink..Purple).
     pub color_names: [String; 8],
-    /// Analysis: "Use high precision BeatGrid analysis".
+    /// Select the earlier recordbox estimator for both Normal and Dynamic analysis.
+    pub use_recordbox_estimator: bool,
+    /// Refine the selected detector's grid against transient attacks in the audio.
     pub refine_beatgrid_transients: bool,
     /// Additional model-based beat grid analysis, requested by the user.
     pub use_installed_beatgrid_model: bool,
@@ -496,6 +498,23 @@ impl Shortcut {
 }
 
 impl Prefs {
+    /// Snapshot the settings shared by manual analysis, automatic analysis and device export.
+    pub fn analysis_settings(&self) -> AnalysisSettings {
+        let (lo, hi) = BPM_RANGES[self.bpm_range.min(BPM_RANGES.len() - 1)];
+        AnalysisSettings {
+            bpm_min: lo,
+            bpm_max: hi,
+            do_grid: self.analyze_grid,
+            use_recordbox_estimator: self.use_recordbox_estimator,
+            high_precision: self.refine_beatgrid_transients,
+            model_grid_mode: crate::analysis::rb_hp::mode_from_preferences(self.use_installed_beatgrid_model, self.analysis_mode),
+            dynamic: self.analysis_mode == 1,
+            vocal: self.vocal_analysis,
+            do_key: self.analyze_key,
+            target_lufs: self.target_lufs,
+        }
+    }
+
     /// The shortcut assigned to an action (the user's choice, else the default).
     pub fn shortcut_for(&self, action: &str) -> Option<Shortcut> {
         let name = self.keymap.get(action).cloned().or_else(|| ACTIONS.iter().find(|a| a.0 == action).map(|a| a.2.to_string()))?;
@@ -644,6 +663,28 @@ mod prefs_tests {
         assert!(!old.use_installed_beatgrid_model);
         let saved: super::Prefs = serde_json::from_str(r#"{"refine_beatgrid_transients":true}"#).unwrap();
         assert!(saved.refine_beatgrid_transients);
+    }
+
+    #[test]
+    fn analysis_jobs_snapshot_the_saved_estimator_independently_of_mode_and_refinement() {
+        let old: super::Prefs = serde_json::from_str(r#"{"analysis_mode":1,"refine_beatgrid_transients":true}"#).unwrap();
+        let job = old.analysis_settings();
+        assert!(!job.use_recordbox_estimator && job.dynamic && job.high_precision);
+        let defaults = super::Prefs::default().analysis_settings();
+        assert!(!defaults.use_recordbox_estimator && !defaults.dynamic && !defaults.high_precision);
+
+        for mode in [0, 1] {
+            for classic in [false, true] {
+                let prefs = super::Prefs { analysis_mode: mode, use_recordbox_estimator: classic, use_installed_beatgrid_model: true, ..super::Prefs::default() };
+                let saved: super::Prefs = serde_json::from_str(&serde_json::to_string(&prefs).unwrap()).unwrap();
+                let job = saved.analysis_settings();
+                assert_eq!(job.use_recordbox_estimator, classic);
+                assert_eq!(job.dynamic, mode == 1);
+                assert!(!job.high_precision);
+                assert!(saved.use_installed_beatgrid_model);
+                assert_eq!(job.model_grid_mode, crate::analysis::rb_hp::mode_from_preferences(true, mode));
+            }
+        }
     }
 
     #[test]
@@ -1030,6 +1071,7 @@ impl Default for Prefs {
             cue_markers_on_preview: true,
             wave_half: false,
             color_names: crate::prefs_ext::default_color_names(),
+            use_recordbox_estimator: false,
             refine_beatgrid_transients: false,
             use_installed_beatgrid_model: false,
             memory_cue_first_beat: false,
@@ -2246,23 +2288,8 @@ impl App {
         self.toasts.push(Toast { text: s.into(), until: Instant::now() + std::time::Duration::from_secs(8), error: true });
     }
 
-    /// Tracks queued with "Analyze Track (Normal)" / "(Dynamic)" override the preference once.
-    pub fn analysis_dynamic(&self) -> bool {
-        self.prefs.analysis_mode == 1
-    }
     pub fn analysis_settings(&self) -> AnalysisSettings {
-        let (lo, hi) = BPM_RANGES[self.prefs.bpm_range.min(BPM_RANGES.len() - 1)];
-        AnalysisSettings {
-            bpm_min: lo,
-            bpm_max: hi,
-            do_grid: self.prefs.analyze_grid,
-            high_precision: self.prefs.refine_beatgrid_transients,
-            model_grid_mode: crate::analysis::rb_hp::mode_from_preferences(self.prefs.use_installed_beatgrid_model, self.prefs.analysis_mode),
-            vocal: self.prefs.vocal_analysis,
-            do_key: self.prefs.analyze_key,
-            target_lufs: self.prefs.target_lufs,
-            dynamic: self.analysis_dynamic(),
-        }
+        self.prefs.analysis_settings()
     }
 
     // ------------------------------------------------------------------ loading
