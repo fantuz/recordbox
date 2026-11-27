@@ -316,7 +316,7 @@ jobs:
       - name: Collection, import, phrase analysis and controller regressions
         shell: bash
         run: |
-          for test_filter in backup::tests collection_cleanup:: db::sqlcipher_tests:: mp3_timeline_tests export::device_import::tests:: \
+          for test_filter in backup::tests collection_cleanup:: db::sqlcipher_tests:: db::track_ids::tests:: mp3_timeline_tests export::device_import::tests:: \
             export::pdb::tests:: export::anlz::tests:: export::usb_target::tests:: \
             phrase_rb::unit:: midi::routing::tests:: sampler_ext::tests::concurrent_captures_preserve_all_three_files \
             rbimport::snapshot_tests:: rbimport::schema_tests:: rbimport::merge::tests:: rbimport::writeback:: \
@@ -328,7 +328,8 @@ jobs:
         if: runner.os == 'Linux'
         shell: bash
         run: |
-          for test_filter in opus_quad analysis::rb_hp::tempo::tests:: analysis::rb_hp::focus2::tests:: \
+          for test_filter in opus_quad midi_map::tests:: midi::grv6_groove_tests:: midi::performance::tests:: \
+            midi::tests::hires_feedback midi::tests::channel_meter_segments analysis::rb_hp::tempo::tests:: analysis::rb_hp::focus2::tests:: \
             analysis::rb_hp::model_grid_tests:: fx_echo_plus::tests:: fx::tests::prepared_rack \
             fx::tests::first_use_allocation; do
             cargo test --manifest-path app/Cargo.toml --release --locked --bin recordbox "$test_filter" -- --test-threads=1 | tee "$RUNNER_TEMP/integration-tests.log"

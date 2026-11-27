@@ -538,11 +538,14 @@ fn append_device_vocals(ex2: &mut Vec<Vec<u8>>, ov: &Overrides) {
     let first = existing.next();
     // A later format can add fields or use more than one section. Carry the
     // complete original bytes in their order instead of substituting local data.
-    if first.is_some_and(|s| vocal_payload(s).is_none()) || existing.clone().next().is_some() {
+    if existing.clone().next().is_some() || first.is_some_and(|s| vocal_payload(s).is_none()) {
         ex2.extend(first.into_iter().chain(existing).cloned());
         return;
     }
-    if let Some(source) = ov.sections.get("PVDI").or(first).or(ov.pvdi.as_ref()) {
+    // Only native sections carry opaque extensions worth preserving. Emit a
+    // newly synthesized section only when it contains valid measured levels.
+    if let Some(source) = ov.sections.get("PVDI").or(first)
+        .or_else(|| ov.pvdi.as_ref().filter(|s| vocal_payload(s).is_some())) {
         let mut section = source.clone();
         if matches!(vocal_payload(source), Some((false, _))) {
             for (i, b) in section[24..].iter_mut().enumerate() { *b ^= vocal_mask(i); }
@@ -938,6 +941,11 @@ mod tests {
         wrongly_marked[12] = 0x80;
         assert!(parse_pvdi(&wrongly_marked).is_none());
         assert!(parse_pvdi(&plain[..plain.len() - 1]).is_none());
+        let invalid_local = Overrides { sections: Default::default(), grid_same: false, pssi: None,
+            device: Default::default(), pvdi: Some(pvdi(&[42])) };
+        let mut levels = vec![];
+        append_device_vocals(&mut levels, &invalid_local);
+        assert!(levels.is_empty());
 
         let mut ov = Overrides { sections: [("PVDI".into(), plain.clone())].into(),
             grid_same: false, pssi: None, device: Default::default(), pvdi: None };
