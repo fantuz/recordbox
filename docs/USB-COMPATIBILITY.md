@@ -62,6 +62,8 @@ A CDJ-2000NXS2 user reported multiple analysis directories for some tracks after
 
 ## What has been checked
 
+For vocal activity, recordbox reads both desktop and USB `PVDI` sections with the verified version-0 layout. Each byte represents a level from 0 to 4 over 1,024 samples at 22,050 Hz. In a classic USB `.2EX` export, the payload uses Rekordbox’s repeating 19-byte mask and the version becomes `0x8000`. Refreshing an existing USB file preserves unrecognized vocal sections. The byte-level regression uses upstream’s known output from Rekordbox 7.2.19. Physical player display remains unverified. [Upstream vocal-level format and reference bytes](https://github.com/adamsardo/recordbox/commit/9dac7589c5c31eace36d94b40d1abfdf9788b31e)
+
 The public regression cases pair each track’s catalog entry with its analysis files. They copy USB metadata into a temporary directory, compare DAT/EXT/2EX audio-path tags with the catalog, read grids and cues, then apply a single classic rating change. Reopening the device checks the new rating, track references and playlist membership. Hash comparisons cover the other device files, including OneLibrary on the mixed drive. The published trees contain metadata without playable audio. [Public regression tests](../app/src/export/public_device_tests.rs)
 
 A separate compatibility run exercised the classic parser on 14 distinct public main or extended catalog files from rbox, pyrekordbox, rekordcrate and vdj-ui. The largest catalog held 3,886 tracks. These checks cover file and analysis path strings, track lookups, playlists and My Tag references. [DeviceSQL parser](../app/src/export/pdb.rs)

@@ -493,10 +493,69 @@ pub fn pvdi(levels: &[u8]) -> Vec<u8> {
     section(b"PVDI", &h, levels)
 }
 
+// The 7.2.19 USB writer uses this mask for the level payload of every track.
+// It starts five characters into the key and repeats after nineteen bytes.
+fn vocal_mask(i: usize) -> u8 {
+    const KEY: &[u8; 19] = b"Kanzen-niRikaishita";
+    KEY[(i % KEY.len() + 5) % KEY.len()].wrapping_add(b'0') ^ 0x80
+}
+
+/// Recognize the measured fixed-hop mono layout. An unknown revision, extended
+/// header or differently shaped payload remains opaque when refreshing a device.
+fn vocal_payload(section: &[u8]) -> Option<(bool, &[u8])> {
+    if section.get(..4)? != b"PVDI" || section.get(4..8)? != 24u32.to_be_bytes()
+        || u32::from_be_bytes(section.get(8..12)?.try_into().ok()?) as usize != section.len()
+        || section.get(14..20)? != [0x04, 0, 0x56, 0x22, 0, 1] {
+        return None;
+    }
+    let encoded = match u16::from_be_bytes(section.get(12..14)?.try_into().ok()?) {
+        0 => false,
+        0x8000 => true,
+        _ => return None,
+    };
+    let count = u32::from_be_bytes(section.get(20..24)?.try_into().ok()?) as usize;
+    let levels = section.get(24..)?;
+    if count != levels.len() || levels.iter().enumerate().any(|(i, &byte)| {
+        (if encoded { byte ^ vocal_mask(i) } else { byte }) > 4
+    }) {
+        return None;
+    }
+    Some((encoded, levels))
+}
+
+pub(crate) fn parse_pvdi(section: &[u8]) -> Option<std::sync::Arc<(f64, Vec<u8>)>> {
+    let (encoded, levels) = vocal_payload(section)?;
+    let mut levels = levels.to_vec();
+    if encoded {
+        for (i, level) in levels.iter_mut().enumerate() { *level ^= vocal_mask(i); }
+    }
+    Some(std::sync::Arc::new((1024.0 / 22_050.0, levels)))
+}
+
+fn append_device_vocals(ex2: &mut Vec<Vec<u8>>, ov: &Overrides) {
+    let mut existing = ov.device.get("2EX").into_iter().flatten()
+        .filter(|(tag, _)| tag == "PVDI").map(|(_, section)| section);
+    let first = existing.next();
+    // A later format can add fields or use more than one section. Carry the
+    // complete original bytes in their order instead of substituting local data.
+    if first.is_some_and(|s| vocal_payload(s).is_none()) || existing.clone().next().is_some() {
+        ex2.extend(first.into_iter().chain(existing).cloned());
+        return;
+    }
+    if let Some(source) = ov.sections.get("PVDI").or(first).or(ov.pvdi.as_ref()) {
+        let mut section = source.clone();
+        if matches!(vocal_payload(source), Some((false, _))) {
+            for (i, b) in section[24..].iter_mut().enumerate() { *b ^= vocal_mask(i); }
+            section[12..14].copy_from_slice(&0x8000u16.to_be_bytes());
+        }
+        ex2.push(section);
+    }
+}
+
 /// Section tags Recordbox writes itself (or deliberately drops when the grid changed).
 const KNOWN_TAGS: [&str; 16] = ["PPTH", "PVBR", "PQTZ", "PWAV", "PWV2", "PCOB", "PWV3", "PCO2", "PQT2", "PWV5", "PWV4", "PSSI", "PWV7", "PWV6", "PWVC", "PVDI"];
 /// Sections that depend only on the audio, so a copy already on the drive stays valid.
-const AUDIO_TAGS: [&str; 10] = ["PVBR", "PWAV", "PWV2", "PWV3", "PWV4", "PWV5", "PWV6", "PWV7", "PWVC", "PVDI"];
+const AUDIO_TAGS: [&str; 9] = ["PVBR", "PWAV", "PWV2", "PWV3", "PWV4", "PWV5", "PWV6", "PWV7", "PWVC"];
 
 /// Every top-level section of an ANLZ file in order, including repeated tags.
 pub fn read_section_list(path: &std::path::Path) -> Vec<(String, Vec<u8>)> {
@@ -801,16 +860,14 @@ pub fn build_with(usb_path: &str, beats: &[Beat], wave: &Waveform, cues: &[Cue],
         ext.push(s);
     }
     let mut ex2 = vec![ppth(usb_path), or("PWV7", &|| pwv7(&frames)), or("PWV6", &|| pwv6(wave)), or("PWVC", &pwvc)];
-    if let Some(s) = take("PVDI").or_else(|| ov.and_then(|o| o.pvdi.clone())) {
-        ex2.push(s);
-    }
+    if let Some(o) = ov { append_device_vocals(&mut ex2, o); }
     let mut dat = dat;
     // Sections a newer rekordbox (or another tool) wrote that Recordbox doesn't know stay in
     // their file, after Recordbox's own.
     if let Some(o) = ov {
         for (ext_name, list) in [("DAT", &mut dat), ("EXT", &mut ext), ("2EX", &mut ex2)] {
             for (tag, bytes) in o.device.get(ext_name).into_iter().flatten() {
-                if !KNOWN_TAGS.contains(&tag.as_str()) {
+                if !KNOWN_TAGS.contains(&tag.as_str()) || (tag == "PVDI" && ext_name != "2EX") {
                     list.push(bytes.clone());
                 }
             }
@@ -838,6 +895,62 @@ pub fn anlz_folder(usb_path: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn vocal_levels_match_the_usb_oracle_and_survive_a_second_export() {
+        // ConvUSB_ScrambleVocalDetect in Rekordbox 7.2.19, upstream 9dac758:
+        // two periods of the measured output for plain zero levels.
+        let oracle = [0x1e, 0xdd, 0x1e, 0x19, 0x02, 0x19, 0x1b, 0x11, 0x19, 0x23,
+            0x18, 0x19, 0x24, 0x11, 0xfb, 0x11, 0x1e, 0x2a, 0x15];
+        let levels: Vec<u8> = (0..42).map(|i| if i < 38 { 0 } else { (i - 37) as u8 }).collect();
+        let plain = pvdi(&levels);
+        let mut ov = Overrides { sections: Default::default(), grid_same: false, pssi: None,
+            device: Default::default(), pvdi: Some(plain.clone()) };
+        let export = |ov: &Overrides| section_list(&build_with("/Contents/test.wav", &[], &Waveform::default(), &[], 0, 44_100, Some(ov)).ex2)
+            .into_iter().find(|(tag, _)| tag == "PVDI").unwrap().1;
+        let wire = export(&ov);
+        assert_eq!(&wire[..12], &plain[..12]);
+        assert_eq!(&wire[12..14], &[0x80, 0]);
+        assert_eq!(&wire[14..24], &plain[14..24]);
+        assert_eq!(&wire[24..43], &oracle);
+        assert_eq!(&wire[43..62], &oracle);
+        assert_eq!(&wire[62..], &[oracle[0] ^ 1, oracle[1] ^ 2, oracle[2] ^ 3, oracle[3] ^ 4]);
+        assert_eq!(parse_pvdi(&wire), parse_pvdi(&plain));
+        assert_eq!(parse_pvdi(&wire).unwrap().1, levels);
+        ov.pvdi = None;
+        ov.device.insert("2EX", vec![("PVDI".into(), wire.clone())]);
+        assert_eq!(export(&ov), wire);
+    }
+
+    #[test]
+    fn vocal_levels_reject_unknown_or_invalid_layouts_and_keep_opaque_device_bytes() {
+        let plain = pvdi(&[1, 2, 3]);
+        for (offset, value) in [(0, b'X'), (7, 23), (11, 26), (12, 0x7f), (13, 1),
+            (15, 1), (17, 0), (19, 0), (19, 2), (23, 2), (24, 5), (24, 255)] {
+            let mut damaged = plain.clone();
+            damaged[offset] = value;
+            assert!(parse_pvdi(&damaged).is_none(), "field {offset}");
+        }
+        let mut future = plain.clone();
+        future[12..14].copy_from_slice(&0x8001u16.to_be_bytes());
+        assert!(parse_pvdi(&future).is_none());
+        let mut wrongly_marked = plain.clone();
+        wrongly_marked[12] = 0x80;
+        assert!(parse_pvdi(&wrongly_marked).is_none());
+        assert!(parse_pvdi(&plain[..plain.len() - 1]).is_none());
+
+        let mut ov = Overrides { sections: [("PVDI".into(), plain.clone())].into(),
+            grid_same: false, pssi: None, device: Default::default(), pvdi: None };
+        for originals in [vec![future.clone()], vec![plain.clone(), future.clone()]] {
+            ov.device.insert("2EX", originals.iter().map(|s| ("PVDI".into(), s.clone())).collect());
+            ov.device.insert("EXT", vec![("PVDI".into(), future.clone())]);
+            let files = build_with("/Contents/test.wav", &[], &Waveform::default(), &[], 0, 44_100, Some(&ov));
+            let vocals = |bytes: &[u8]| section_list(bytes).into_iter().filter(|(tag, _)| tag == "PVDI").map(|(_, bytes)| bytes).collect::<Vec<_>>();
+            assert_eq!(vocals(&files.ex2), originals);
+            assert_eq!(vocals(&files.ext), [future.clone()]);
+        }
+    }
+
 
     #[test]
     fn unknown_printable_sections_survive_but_invalid_identifiers_are_rejected() {

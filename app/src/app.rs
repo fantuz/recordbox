@@ -913,7 +913,7 @@ mod pvdi_tests {
         let v = super::parse_pvdi(&s).unwrap();
         assert!((v.0 - 1024.0 / 22050.0).abs() < 1e-9);
         assert_eq!(v.1, vec![0, 2, 4, 1]);
-        // Scrambled (negative discriminator) and truncated sections are refused.
+        // Unknown versions and truncated sections are refused.
         let mut neg = s.clone();
         neg[12] = 0xff;
         assert!(super::parse_pvdi(&neg).is_none());
@@ -5721,23 +5721,7 @@ pub fn grid_jump(beats: &[Beat], p: f64, n: f64) -> Option<f64> {
     Some(at(k) + frac * (at(k + 1) - at(k)))
 }
 
-/// A PVDI section: header 24 bytes (u16 discriminator at 12, hop at 14, sample rate at 16,
-/// stride at 18, count at 20), then count × stride bytes. Scrambled sections (negative
-/// discriminator) are not readable yet.
-pub fn parse_pvdi(s: &[u8]) -> Option<std::sync::Arc<(f64, Vec<u8>)>> {
-    let u16at = |o: usize| -> Option<u16> { Some(u16::from_be_bytes(s.get(o..o + 2)?.try_into().ok()?)) };
-    let hlen = u32::from_be_bytes(s.get(4..8)?.try_into().ok()?) as usize;
-    if (u16at(12)? as i16) < 0 {
-        return None;
-    }
-    let (hop, sr, stride) = (u16at(14)? as f64, u16at(16)? as f64, u16at(18)?.max(1) as usize);
-    let n = u32::from_be_bytes(s.get(20..24)?.try_into().ok()?) as usize;
-    if hop <= 0.0 || sr <= 0.0 {
-        return None;
-    }
-    let body = s.get(hlen..hlen + n.checked_mul(stride)?)?;
-    Some(std::sync::Arc::new((hop / sr, body.chunks_exact(stride).map(|c| c[0]).collect())))
-}
+pub(crate) use crate::export::anlz::parse_pvdi;
 
 pub fn fmt_time(secs: f64, tenths: bool) -> String {
     let s = secs.max(0.0);
