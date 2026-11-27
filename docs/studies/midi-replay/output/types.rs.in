@@ -1,0 +1,35 @@
+// No worker thread or MIDI hardware. All timed methods use the real parking_lot locks,
+// real map and app feedback methods. Only the two tagged fixture actions need IDs.
+mod midir { pub struct MidiOutputConnection; }
+struct Registry;
+fn registry() -> Registry { Registry }
+impl Registry {
+    fn tag(&self, name: &str) -> u32 {
+        match name { "PlayPause" => 1, "Cue" => 2, _ => 0 }
+    }
+}
+fn output_acts(name: &str, _: Kind) -> bool {
+    NAMED_OUTPUTS.contains(&name) || registry().tag(name) != 0
+}
+struct Device {
+    map: Mutex<MidiMap>,
+    out_index: Mutex<HashMap<(u32, u8), Vec<Entry>>>,
+    leds: Mutex<HashMap<(u32, u8), Led>>,
+    interval_ms: AtomicU64,
+    NAMED_FIELDS
+    out: Mutex<OutState>,
+    out_cv: Condvar,
+}
+impl Device {
+    fn new(map: MidiMap) -> Self {
+        let device = Self {
+            map: Mutex::new(map), out_index: Default::default(), leds: Default::default(),
+            interval_ms: Default::default(), NAMED_INIT
+            out: Mutex::new(OutState { queue: OutQueue::default(), blink: Blinker::default(),
+                blinking: HashMap::new(), conn: None }), out_cv: Condvar::new(),
+        };
+        device.reindex();
+        device
+    }
+    fn named_value(&self, name: &'static str, deck: u8, value: u16) { INVOKE }
+}
