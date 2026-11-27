@@ -17,7 +17,7 @@
 mod metal_fast;
 
 use candle_core::{DType, Device, Module, Result, Tensor};
-#[cfg(any(target_os = "macos", feature = "directml"))]
+#[cfg(any(test, target_os = "macos", feature = "directml"))]
 use anyhow::Context as _;
 use rustfft::{num_complex::Complex, FftPlanner};
 use std::collections::HashMap;
@@ -748,6 +748,10 @@ static GPU: std::sync::Mutex<()> = std::sync::Mutex::new(());
 /// Returns planar [source][channel][frame] (4 × 2 × len), or [channel][frame] of the one
 /// source asked for. The callback reports completed chunks and is also polled between model layers.
 pub fn separate(graph: &Graph, device: &Device, audio: &[f32], len: usize, opts: &Options, progress: &mut dyn FnMut(usize, usize) -> bool) -> anyhow::Result<Vec<f32>> {
+    separate_publishing(graph, device, audio, len, opts, progress, None)
+}
+
+pub(super) fn separate_publishing(graph: &Graph, device: &Device, audio: &[f32], len: usize, opts: &Options, progress: &mut dyn FnMut(usize, usize) -> bool, publication: Option<super::live::Publication<'_>>) -> anyhow::Result<Vec<f32>> {
     if len == 0 || audio.len() != 2 * len {
         anyhow::bail!("empty or malformed input")
     }
@@ -757,7 +761,7 @@ pub fn separate(graph: &Graph, device: &Device, audio: &[f32], len: usize, opts:
     if !progress(0, 1) { anyhow::bail!("stopped"); }
     #[cfg(target_os = "macos")]
     if let Some(fast) = &graph.fast {
-        return separate_accelerated(audio, len, opts, 2, progress, |spec, wave, source| {
+        return separate_accelerated(audio, len, opts, 2, progress, publication, |spec, wave, source| {
             let (freq, frames, segment) = (NFFT/2, Stft::frames(TRAINING_FRAMES), TRAINING_FRAMES);
             let x = Tensor::from_vec(spec, (4, freq, frames), device)?;
             let xt = Tensor::from_vec(wave, (2, 1, segment), device)?;
@@ -771,7 +775,7 @@ pub fn separate(graph: &Graph, device: &Device, audio: &[f32], len: usize, opts:
     }
     #[cfg(feature = "directml")]
     if let Some(engine) = &graph.directml {
-        return separate_accelerated(audio, len, opts, engine.buffered_segments(), progress, |spec, wave, source| {
+        return separate_accelerated(audio, len, opts, engine.buffered_segments(), progress, publication, |spec, wave, source| {
             engine.forward(spec, wave, source)
         });
     }
@@ -802,6 +806,9 @@ pub fn separate(graph: &Graph, device: &Device, audio: &[f32], len: usize, opts:
         for i in 0..chunk_len {
             sums[offset + i] += weight[i];
         }
+        if let Some(publish) = publication {
+            publish.advance(&out, &sums, offsets.get(k + 1).copied().unwrap_or(len));
+        }
         if !progress(k + 1, offsets.len()) {
             anyhow::bail!("stopped")
         }
@@ -823,7 +830,7 @@ fn mean_std(x: &[f32]) -> (f32, f32) {
 }
 
 /// One segment ready for the GPU: normalised spectrogram and waveform with their statistics.
-#[cfg(any(target_os = "macos", feature = "directml"))]
+#[cfg(any(test, target_os = "macos", feature = "directml"))]
 struct Prepared {
     offset: usize,
     spec: Vec<f32>,
@@ -833,7 +840,7 @@ struct Prepared {
 }
 
 /// The network's two outputs for one segment, still normalised.
-#[cfg(any(target_os = "macos", feature = "directml"))]
+#[cfg(any(test, target_os = "macos", feature = "directml"))]
 struct Raw {
     offset: usize,
     spec: Vec<f32>,
@@ -844,8 +851,8 @@ struct Raw {
 /// The accelerated path: three stages run side by side so the GPU never waits for the CPU. A
 /// thread prepares segments (normalisation and the forward transform), this thread runs the
 /// network, and a third does the inverse transform and the overlap-add.
-#[cfg(any(target_os = "macos", feature = "directml"))]
-fn separate_accelerated(audio: &[f32], len: usize, opts: &Options, buffered_segments: usize, progress: &mut dyn FnMut(usize, usize) -> bool,
+#[cfg(any(test, target_os = "macos", feature = "directml"))]
+fn separate_accelerated(audio: &[f32], len: usize, opts: &Options, buffered_segments: usize, progress: &mut dyn FnMut(usize, usize) -> bool, publication: Option<super::live::Publication<'_>>,
     mut forward: impl FnMut(Vec<f32>, Vec<f32>, Option<usize>) -> anyhow::Result<(Vec<f32>, Vec<f32>)>) -> anyhow::Result<Vec<f32>> {
     let segment = TRAINING_FRAMES;
     let freq = NFFT / 2;
@@ -888,7 +895,7 @@ fn separate_accelerated(audio: &[f32], len: usize, opts: &Options, buffered_segm
         });
         let out = &mut out;
         let post = scope.spawn(move || {
-            for raw in rx_out {
+            for (index, raw) in rx_out.into_iter().enumerate() {
                 let chunk_len = (len - raw.offset).min(segment);
                 let crop = (segment - chunk_len) / 2;
                 let raw = &raw;
@@ -907,6 +914,9 @@ fn separate_accelerated(audio: &[f32], len: usize, opts: &Options, buffered_segm
                         });
                     }
                 });
+                if let Some(publish) = publication {
+                    publish.advance_segments(out, offsets.get(index + 1).copied().unwrap_or(len), offsets, weight);
+                }
             }
         });
         let mut run = || -> anyhow::Result<()> {
@@ -972,6 +982,33 @@ mod tests {
         }
     }
 
+    #[test]
+    fn published_overlap_add_matches_final_accelerated_output_without_a_gpu() {
+        let len = TRAINING_FRAMES + 97;
+        let audio: Vec<_> = (0..2 * len).map(|i| (i % 17) as f32 * 0.01).collect();
+        let live = super::super::live::Live::with_len(len).unwrap();
+        let prior = vec![0.25; 6 * len];
+        let publish = super::super::live::Publication { live: &live, previous: &prior };
+        let mut segments = 0;
+        let out = separate_accelerated(
+            &audio, len, &Options { source: Some(3), ..Default::default() }, 0,
+            &mut |_, _| true, Some(publish), |mut spec, mut wave, _| {
+                // Distinct adjacent segments exercise the normalization at the overlap.
+                segments += 1;
+                spec.fill(0.0);
+                wave.fill(segments as f32);
+                Ok((spec, wave))
+            },
+        ).unwrap();
+        assert_eq!(segments, 2);
+        assert_eq!(live.ready_frames(), len);
+        for i in 0..len {
+            assert_eq!(live.sample(5, i), Some(0.25));
+            assert_eq!(live.sample(6, i), Some(out[i]));
+            assert_eq!(live.sample(7, i), Some(out[len + i]));
+        }
+    }
+
     #[cfg(feature = "directml")]
     #[test]
     fn driver_failure_on_second_segment_keeps_the_cause_and_returns_no_partial_stems() {
@@ -979,7 +1016,7 @@ mod tests {
         let audio = vec![0.; 2 * len];
         let mut calls = 0;
         let result = separate_accelerated(&audio, len, &Options { source: Some(3), ..Default::default() },
-            0, &mut |_, _| true, |spec, wave, _| {
+            0, &mut |_, _| true, None, |spec, wave, _| {
                 calls += 1;
                 if calls == 2 { return Err(crate::stems::DirectMlFailure("simulated provider error".into()).into()); }
                 Ok((spec, wave))
@@ -990,7 +1027,7 @@ mod tests {
         assert_eq!(calls, 2);
 
         let stopped = separate_accelerated(&audio, len, &Default::default(), 0,
-            &mut |_, _| false, |_, _, _| panic!("Cancelled work called the provider")).unwrap_err();
+            &mut |_, _| false, None, |_, _, _| panic!("Cancelled work called the provider")).unwrap_err();
         assert!(!stopped.is::<crate::stems::DirectMlFailure>());
     }
 

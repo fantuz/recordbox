@@ -18,7 +18,10 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-pub const FORMAT: u32 = 1;
+// Format 1 uses the original sample clock. Old readers will reject format 2,
+// so a Rekordbox-clock collection cannot silently replace a legacy collection.
+pub const FORMAT: u32 = 2;
+const LEGACY_FORMAT: u32 = 1;
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
 pub struct Manifest {
@@ -108,7 +111,7 @@ fn write_backup_to(db_path: &Path, artwork_dir: &Path, tmp: &Path, with_music: b
         }
     }
     let _cleanup = Cleanup(snap.clone());
-    let (schema, tracks, prefs): (i64, Vec<String>, Option<String>) = {
+    let (schema, tracks, prefs, format) = {
         let c = rusqlite::Connection::open(db_path)?;
         c.busy_timeout(std::time::Duration::from_secs(10))?;
         c.execute("VACUUM INTO ?1", [snap.to_string_lossy().to_string()])?;
@@ -116,9 +119,10 @@ fn write_backup_to(db_path: &Path, artwork_dir: &Path, tmp: &Path, with_music: b
         let s = rusqlite::Connection::open(&snap)?;
         let schema = s.query_row("PRAGMA user_version", [], |r| r.get(0))?;
         let mut st = s.prepare("SELECT path FROM tracks ORDER BY id")?;
-        let tracks = st.query_map([], |r| r.get::<_, String>(0))?.filter_map(|x| x.ok()).collect();
+        let tracks: Vec<String> = st.query_map([], |r| r.get::<_, String>(0))?.filter_map(|x| x.ok()).collect();
         let prefs = s.query_row("SELECT value FROM settings WHERE key='prefs'", [], |r| r.get::<_, String>(0)).ok();
-        (schema, tracks, prefs)
+        let rekordbox_clock: bool = s.query_row("SELECT EXISTS(SELECT 1 FROM settings WHERE key='mp3_timeline' AND value='rekordbox')", [], |r| r.get(0))?;
+        (schema, tracks, prefs, if rekordbox_clock { FORMAT } else { LEGACY_FORMAT })
     };
     cancelled(cancel)?;
     let art: Vec<PathBuf> = std::fs::read_dir(artwork_dir).map(|d| d.flatten().map(|e| e.path()).filter(|p| p.is_file()).collect()).unwrap_or_default();
@@ -165,7 +169,7 @@ fn write_backup_to(db_path: &Path, artwork_dir: &Path, tmp: &Path, with_music: b
             }
         }
     }
-    let m = Manifest { app: "recordbox".into(), format: FORMAT, created: chrono::Local::now().to_rfc3339(), schema, tracks: tracks.len(), artwork_files, music: map, music_missing: missing };
+    let m = Manifest { app: "recordbox".into(), format, created: chrono::Local::now().to_rfc3339(), schema, tracks: tracks.len(), artwork_files, music: map, music_missing: missing };
     zw.start_file("manifest.json", stored())?;
     zw.write_all(&serde_json::to_vec_pretty(&m)?)?;
     let f = zw.finish()?;
@@ -213,6 +217,10 @@ fn read_archive_manifest(za: &mut zip::ZipArchive<std::fs::File>) -> Result<Mani
     }
     if m.format > FORMAT {
         bail!("This backup was made by a newer version of recordbox.");
+    }
+    let clock = if m.format == FORMAT { crate::audio::Mp3Timeline::Rekordbox } else { crate::audio::Mp3Timeline::Legacy };
+    if clock != crate::audio::mp3_timeline() {
+        bail!("This backup uses the {} MP3 timeline. Restart with --mp3-timeline {} to restore it into its matching collection.", clock.name(), clock.name());
     }
     if za.by_name("library.db").is_err() {
         bail!("The backup has no database file.");
@@ -657,7 +665,7 @@ mod tests {
             zw.start_file("library.db", stored()).unwrap();
             zw.write_all(&vec![0x55u8; 4096]).unwrap();
             zw.start_file("manifest.json", stored()).unwrap();
-            zw.write_all(&serde_json::to_vec(&Manifest { app: "recordbox".into(), format: FORMAT, ..Default::default() }).unwrap()).unwrap();
+            zw.write_all(&serde_json::to_vec(&Manifest { app: "recordbox".into(), format: LEGACY_FORMAT, ..Default::default() }).unwrap()).unwrap();
             zw.finish().unwrap();
         }
         assert!(stage_restore(&bad, &d.join("w3"), &art, true, &|_, _, _| {}, &never).is_err());

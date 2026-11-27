@@ -1246,6 +1246,7 @@ impl App {
             s.loop_range = None;
             s.metronome = None;
             s.stems = None;
+            s.stem_preview = None;
             s.stem_on = [true; 4];
             s.search = 0.0;
         }

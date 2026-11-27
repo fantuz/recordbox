@@ -1472,6 +1472,14 @@ pub(crate) fn stem_model_card(app: &mut App, ui: &mut Ui) {
         if let Some((d, t)) = app.stem.downloading {
             kit::line(ui, &if t > 0 { format!("Downloading… {:.0}%", d as f64 / t as f64 * 100.0) } else { "Downloading…".into() });
         }
+        let model = crate::stems::spec(&cur);
+        let preview_supported = app.stem.hw.as_ref().zip(model).is_some_and(|(hw, model)|
+            crate::stems::Live::supported(hw, model, app.manual_stem_device())
+        );
+        if preview_supported {
+            toggle(ui, &mut app.prefs.stems_progressive_preview, "Preview finished sections during new separations");
+            note(ui, "Mute and solo work in finished sections, up to the first 6 min 20 s. Later sections play the original until separation completes. Fine-tuned parts become available during the final pass.");
+        }
         let automatic_available = !crate::app::MANUAL_STEMS_PREVIEW && crate::stems::backend_hold().is_none();
         ui.add_enabled_ui(automatic_available, |ui| {
             toggle(ui, &mut app.prefs.stems_auto_separate, "Separate tracks when they are loaded");

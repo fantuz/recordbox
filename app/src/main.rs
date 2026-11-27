@@ -933,8 +933,16 @@ mod launch_tests {
 fn main() -> eframe::Result<()> {
     let args: Vec<String> = std::env::args().collect();
     if args.iter().skip(1).any(|arg| arg == "--help" || arg == "-h") {
-        println!("Usage: recordbox [--disable-load] [--disable-play] [--screenshot FILE] [--stems-cpu] [--stems-status | --stems-device | --compare-stems FILE]\n\n  --disable-load  Disable loading tracks into decks for this session.\n  --disable-play  Disable audio playback and previews for this session.\n  --screenshot    Save a picture of the window to FILE and exit.\n  --stems-cpu     Use CPU separation for this session.\n  --stems-status  Show build, system memory and local model status without starting inference.\n  --stems-device  Check the selected separation device and exit.\n  --compare-stems FILE  Compare GPU and CPU separation of one local track and exit.");
+        println!("Usage: recordbox [--disable-load] [--disable-play] [--mp3-timeline legacy|rekordbox] [--screenshot FILE] [--stems-cpu] [--stems-status | --stems-device | --compare-stems FILE]\n\n  --disable-load  Disable loading tracks into decks for this session.\n  --disable-play  Disable audio playback and previews for this session.\n  --mp3-timeline legacy|rekordbox\n                  Select the MP3 sample clock for this session. Legacy opens your usual library.\n                  Rekordbox uses a separate collection and a different MP3 time origin.\n                  Audition imported cues and grids before export or write-back.\n  --screenshot    Save a picture of the window to FILE and exit.\n  --stems-cpu     Use CPU separation for this session.\n  --stems-status  Show build, system memory and local model status without starting inference.\n  --stems-device  Check the selected separation device and exit.\n  --compare-stems FILE  Compare GPU and CPU separation of one local track and exit.");
         return Ok(());
+    }
+    let timeline = audio::Mp3Timeline::from_args(&args[1..]).unwrap_or_else(|error| {
+        eprintln!("{error}");
+        std::process::exit(2);
+    });
+    timeline.initialize();
+    if timeline == audio::Mp3Timeline::Rekordbox {
+        eprintln!("MP3 timeline: rekordbox. Separate collection: {}", db::data_dir_for_inspection().join("library.db").display());
     }
     if args.iter().any(|a| a == "--stems-status") {
         println!("{}", stems::status_report());

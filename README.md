@@ -61,13 +61,16 @@ To open the installed macOS app bundle, run `open "$(brew --prefix fantuz/record
 ## Prepare and play
 
 - **Build a collection.** Import local tracks and folders, M3U playlists or a rekordbox XML collection. Rate and tag tracks, organise playlists, and back up or restore your recordbox library.
-- **Prepare a track in EXPORT.** Analyse BPM, key and waveforms, edit the beat grid, and set loops, memory cues and hot cues. Optional high-precision analysis refines beat timing for both steady and changing tempos.
+- **Prepare a track in EXPORT.** Analyse BPM, key and waveforms, edit the beat grid, and set loops, memory cues and hot cues. New analysis uses the Rekordbox-compatible beat detector. Choose **recordbox classic** in **Preferences → Analysis → Beat grid estimator** to use the earlier detector. Optional high-precision refinement works with either choice.
   By default, press **1–8** to set or recall hot cues A–H. Hold **Shift** and press the same number to clear that slot.
-- **Mix in PERFORMANCE.** Choose a two- or four-deck horizontal layout. Use the on-screen mixer, crossfader, Beat FX and sampler to rehearse transitions.
-- **Use the library on a second screen.** The overlapping-windows button at the far right of the top bar detaches the browser in either mode. Your playlist, search, selection and scroll position follow it. Close the library window to reattach it.
+- **Mix in PERFORMANCE.** Use the performance layouts, MIDI mappings, mixer, Beat FX and sampler to rehearse transitions or record a set.
+- **Edit an arrangement.** Use the EDIT timeline to arrange, audition and render a local track. WAV, AIFF and FLAC are available across platforms. M4A uses the macOS AAC encoder.
+- **Use the library on a second screen.** The overlapping-windows button at the far right of the top bar detaches the library browser. Your playlist, search, selection and scroll position follow it. Close the library window to reattach it.
   **F11** toggles fullscreen for both windows together. **Space** plays or pauses the active deck when you’re outside a text field.
 - **Separate a track into STEMS.** In **Preferences → Extensions → STEMS**, download HTDemucs for speed or HTDemucs fine-tuned for sound quality. Both save drums, bass, instruments and vocals as four stereo parts. Completed separations are available across decks and restarts.
   Saved parts from both models share a 20 GB budget by default. Choose **Keep all saved stems** to retain completed results without a size limit. [STEMS storage and backups](docs/LIBRARY-SYNC.md#how-much-separation-is-saved)
+
+See the [integration report](docs/UPSTREAM-INTEGRATION.md) for measured beat timing, live STEMS availability and the separate MP3 timing trial.
 
 ## Working with AlphaTheta libraries and USB drives
 

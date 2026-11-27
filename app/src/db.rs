@@ -2,6 +2,7 @@
 //! It never opens or writes rekordbox's library, and never writes to audio files.
 
 use crate::model::*;
+use crate::audio::{mp3_timeline, Mp3Timeline};
 use crate::smart::SmartRule;
 use anyhow::Result;
 use rusqlite::{params, Connection, OptionalExtension};
@@ -16,17 +17,37 @@ fn data_locations() -> (PathBuf, Option<PathBuf>) {
 }
 
 /// Locate existing files without creating or migrating the application's data directory.
-pub fn data_dir_for_inspection() -> PathBuf {
+pub fn shared_data_dir_for_inspection() -> PathBuf {
     let (path, legacy) = data_locations();
     legacy.filter(|old| !path.exists() && old.is_dir()).unwrap_or(path)
 }
 
-pub fn data_dir() -> PathBuf {
+pub fn shared_data_dir() -> PathBuf {
+    if mp3_timeline() == Mp3Timeline::Rekordbox {
+        // An audition must not move an existing PrepDeck library to a new location.
+        return shared_data_dir_for_inspection();
+    }
     let (path, legacy) = data_locations();
     // The app was called PrepDeck before: its library folder moves over once, unchanged.
     if let Some(old) = legacy.filter(|old| !path.exists() && old.is_dir()) {
         let _ = std::fs::rename(old, &path);
     }
+    path
+}
+
+pub(crate) fn collection_dir(base: PathBuf, timeline: Mp3Timeline) -> PathBuf {
+    match timeline {
+        Mp3Timeline::Legacy => base,
+        Mp3Timeline::Rekordbox => base.join("mp3-timeline-rekordbox"),
+    }
+}
+
+pub fn data_dir_for_inspection() -> PathBuf {
+    collection_dir(shared_data_dir_for_inspection(), mp3_timeline())
+}
+
+pub fn data_dir() -> PathBuf {
+    let path = collection_dir(shared_data_dir(), mp3_timeline());
     let _ = std::fs::create_dir_all(&path);
     path
 }
@@ -35,6 +56,63 @@ pub fn artwork_dir() -> PathBuf {
     let p = data_dir().join("artwork");
     let _ = std::fs::create_dir_all(&p);
     p
+}
+
+#[cfg(test)]
+mod mp3_timeline_tests {
+    use super::*;
+    use std::sync::atomic::AtomicBool;
+
+    #[test]
+    fn opt_in_collection_and_backups_are_isolated() -> Result<()> {
+        // Launch the other clock in a child so the test also exercises the
+        // session-wide selection without changing the running test process.
+        let cancel = AtomicBool::new(false);
+        if std::env::var_os("RECORDBOX_TEST_MP3_TIMELINE_CHILD").is_some() {
+            Mp3Timeline::Rekordbox.initialize();
+            let root = PathBuf::from(std::env::var_os("PREPDECK_DATA").unwrap());
+            assert_eq!(data_dir_for_inspection(), root.join("mp3-timeline-rekordbox"));
+            assert!(!data_dir_for_inspection().exists());
+            let path = data_dir().join("library.db");
+            let db = Db::open(&path)?;
+            assert!(db.setting("test-cue").is_none());
+            db.set_setting_checked("test-cue", "alternate collection")?;
+            assert!(Db::open(&root.join("library.db")).err().unwrap().to_string().contains("--mp3-timeline legacy"));
+            assert_eq!(crate::stems::models_dir(), root.join("models"));
+            assert_eq!(crate::stems::stems_dir(), data_dir().join("stems"));
+            let cache = crate::stems::cache_path("same-file.flac", "htdemucs");
+            let original_cache = root.join("stems").join(cache.file_name().unwrap());
+            std::fs::create_dir_all(original_cache.parent().unwrap())?;
+            std::fs::write(&original_cache, b"cached")?;
+            assert_eq!(crate::stems::existing_cache_path(&cache), Some(original_cache.clone()));
+            crate::stems::clear_cache()?;
+            assert!(original_cache.exists());
+            let work = data_dir().join("restore-work");
+            let legacy = root.join("legacy.zip");
+            assert!(crate::backup::stage_restore(&legacy, &work, &artwork_dir(), false, &|_, _, _| {}, &cancel).is_err());
+            assert!(!work.exists());
+            let archive = root.join("alternate.zip");
+            crate::backup::write_backup(&path, &artwork_dir(), &archive, false, &|_, _, _| {}, &cancel)?;
+            assert_eq!(crate::backup::read_manifest(&archive)?.format, 2);
+            crate::backup::stage_restore(&archive, &work, &artwork_dir(), false, &|_, _, _| {}, &cancel)?;
+            return Ok(());
+        }
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("library.db");
+        let legacy = Db::open(&path)?;
+        legacy.set_setting_checked("test-cue", "original collection")?;
+        let archive = dir.path().join("legacy.zip");
+        crate::backup::write_backup(&path, &dir.path().join("artwork"), &archive, false, &|_, _, _| {}, &cancel)?;
+        assert_eq!(crate::backup::read_manifest(&archive)?.format, 1);
+        let result = std::process::Command::new(std::env::current_exe()?)
+            .args(["--exact", "db::mp3_timeline_tests::opt_in_collection_and_backups_are_isolated", "--nocapture"])
+            .env("PREPDECK_DATA", dir.path()).env("RECORDBOX_TEST_MP3_TIMELINE_CHILD", "1").output()?;
+        assert!(result.status.success(), "{}{}", String::from_utf8_lossy(&result.stdout), String::from_utf8_lossy(&result.stderr));
+        assert_eq!(legacy.setting("test-cue").as_deref(), Some("original collection"));
+        assert!(Db::open(&dir.path().join("mp3-timeline-rekordbox/library.db")).err().unwrap().to_string().contains("--mp3-timeline rekordbox"));
+        assert!(crate::backup::read_manifest(&dir.path().join("alternate.zip")).unwrap_err().to_string().contains("--mp3-timeline rekordbox"));
+        Ok(())
+    }
 }
 
 pub struct Db {
@@ -54,12 +132,25 @@ impl Db {
     }
 
     pub fn open(path: &std::path::Path) -> Result<Db> {
+        Self::open_for_timeline(path, mp3_timeline())
+    }
+
+    fn open_for_timeline(path: &std::path::Path, timeline: Mp3Timeline) -> Result<Db> {
         // Refuse a library from a newer Recordbox; back up an older one before upgrading it.
         let existed = path.metadata().map(|m| m.len() > 0).unwrap_or(false);
         if existed {
-            let probe = Connection::open(path)?;
+            let probe = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
             let v: i64 = probe.query_row("PRAGMA user_version", [], |r| r.get(0))?;
             let has_tables: bool = probe.query_row("SELECT count(*) FROM sqlite_master WHERE name='tracks'", [], |r| r.get::<_, i64>(0)).map(|n| n > 0)?;
+            if has_tables {
+                let has_settings: bool = probe.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='settings')", [], |r| r.get(0))?;
+                let marker: Option<String> = if has_settings {
+                    probe.query_row("SELECT value FROM settings WHERE key='mp3_timeline'", [], |r| r.get(0)).optional()?
+                } else { None };
+                let clock = marker.as_deref().unwrap_or("legacy");
+                anyhow::ensure!(clock == timeline.name(),
+                    "This library uses the {clock} MP3 timeline. Start recordbox with --mp3-timeline {clock} to use it.");
+            }
             drop(probe);
             if v > SCHEMA_VERSION {
                 anyhow::bail!("This library was written by a newer version of recordbox (schema {v}); update recordbox to open it. It was not changed.");
@@ -143,6 +234,9 @@ impl Db {
             // The key's imported spelling (shown as is).
             if conn.prepare("SELECT key_text FROM tracks LIMIT 0").is_err() {
                 conn.execute_batch("ALTER TABLE tracks ADD COLUMN key_text TEXT DEFAULT '';")?;
+            }
+            if timeline == Mp3Timeline::Rekordbox {
+                conn.execute("INSERT OR IGNORE INTO settings(key,value) VALUES('mp3_timeline', ?1)", [timeline.name()])?;
             }
             conn.execute_batch(&format!("PRAGMA user_version = {SCHEMA_VERSION};"))?;
             Ok(())

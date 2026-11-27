@@ -6,6 +6,8 @@
 //! rekordbox's own (vendor) models are never used.
 
 pub mod htdemucs;
+mod live;
+pub use live::Live;
 #[cfg(test)]
 mod bench;
 mod backend;
@@ -83,7 +85,7 @@ pub fn status_report() -> String {
                 else { format!("Missing packaged runtime files: {}", missing.join(", ")) });
         }
     }
-    let models = crate::db::data_dir_for_inspection().join("models");
+    let models = crate::db::shared_data_dir_for_inspection().join("models");
     let recommended = choose(&hw);
     for model in &CATALOG {
         let count = model.files.iter().filter(|file|
@@ -320,7 +322,7 @@ pub fn spec(id: &str) -> Option<&'static ModelSpec> {
 }
 
 pub fn models_dir() -> PathBuf {
-    let d = crate::db::data_dir().join("models");
+    let d = crate::db::shared_data_dir().join("models");
     let _ = std::fs::create_dir_all(&d);
     d
 }
@@ -456,17 +458,26 @@ pub fn separate(m: &ModelSpec, samples: &[f32], sr: u32, progress: &mut dyn FnMu
 }
 
 pub fn separate_with_device(m: &ModelSpec, samples: &[f32], sr: u32, progress: &mut dyn FnMut(f32) -> bool, execution: SeparationDevice) -> Result<Stems> {
+    separate_with_live(m, samples, sr, progress, execution, None)
+}
+
+/// A preview uses the same weighted segment results as the final cached output.
+/// All callers without a preview keep the completed-output path.
+pub fn separate_with_live(m: &ModelSpec, samples: &[f32], sr: u32, progress: &mut dyn FnMut(f32) -> bool, execution: SeparationDevice, live: Option<&Live>) -> Result<Stems> {
+    anyhow::ensure!(sr > 0 && !samples.is_empty() && samples.len() % 2 == 0, "expected nonempty interleaved stereo and a positive sample rate");
     if !progress(0.0) { anyhow::bail!("stopped"); }
     let device = execution.device()?;
     let _job = execution.reserve_gpu(progress)?;
     let (planar, len) = planar_44k(samples, sr);
+    let live = live.filter(|live| live.len() == len && execution != SeparationDevice::Cpu && !device.is_cpu());
     let n_models = m.files.len();
     let run = |progress: &mut dyn FnMut(f32) -> bool| -> Result<Vec<f32>> {
         if !m.per_source {
             if !progress(0.0) { anyhow::bail!("stopped"); }
             let g = graph(m.files[0], execution)?;
             let mut cb = |done: usize, total: usize| progress(done as f32 / total as f32);
-            return htdemucs::separate(&g, &device, &planar, len, &htdemucs::Options { overlap: OVERLAP, source: None }, &mut cb);
+            let publish = live.map(|live| live::Publication { live, previous: &[] });
+            return htdemucs::separate_publishing(&g, &device, &planar, len, &htdemucs::Options { overlap: OVERLAP, source: None }, &mut cb, publish);
         }
         // Model k is the specialist for source k (upstream's weights matrix is the identity),
         // so only that source is taken from it.
@@ -475,7 +486,9 @@ pub fn separate_with_device(m: &ModelSpec, samples: &[f32], sr: u32, progress: &
             if !progress(k as f32 / n_models as f32) { anyhow::bail!("stopped"); }
             let g = graph(f, execution)?;
             let mut cb = |done: usize, total: usize| progress((k as f32 + done as f32 / total as f32) / n_models as f32);
-            out.extend(htdemucs::separate(&g, &device, &planar, len, &htdemucs::Options { overlap: OVERLAP, source: Some(k) }, &mut cb)?);
+            let publish = live.filter(|_| k == 3).map(|live| live::Publication { live, previous: &out });
+            let channel_pair = htdemucs::separate_publishing(&g, &device, &planar, len, &htdemucs::Options { overlap: OVERLAP, source: Some(k) }, &mut cb, publish)?;
+            out.extend(channel_pair);
         }
         Ok(out)
     };
@@ -645,6 +658,22 @@ mod vocal_bench {
 /// Cache file for a track's stems: keyed by the audio file's path, size and modification time
 /// and the model, so a replaced file or another model is separated again.
 pub fn cache_path(track_path: &str, model: &str) -> PathBuf {
+    stems_dir().join(cache_file_name(track_path, model, crate::audio::mp3_timeline()))
+}
+
+/// Same-clock MP3 and all non-MP3 cache keys are compatible. A read can reuse
+/// that key across collections; writes and quota enforcement stay in the
+/// active collection even if the read fails.
+pub fn existing_cache_path(destination: &Path) -> Option<PathBuf> {
+    if destination.is_file() { return Some(destination.to_owned()); }
+    use crate::audio::Mp3Timeline::{Legacy, Rekordbox};
+    let other = match crate::audio::mp3_timeline() { Legacy => Rekordbox, Rekordbox => Legacy };
+    let base = crate::db::shared_data_dir_for_inspection();
+    let candidate = crate::db::collection_dir(base, other).join("stems").join(destination.file_name()?);
+    candidate.is_file().then_some(candidate)
+}
+
+fn cache_file_name(track_path: &str, model: &str, timeline: crate::audio::Mp3Timeline) -> String {
     let meta = std::fs::metadata(track_path).ok();
     let mut h = Sha256::new();
     h.update(track_path.as_bytes());
@@ -652,8 +681,29 @@ pub fn cache_path(track_path: &str, model: &str) -> PathBuf {
     if let Some(t) = meta.and_then(|m| m.modified().ok()).and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()) {
         h.update(t.as_secs().to_le_bytes());
     }
+    if timeline == crate::audio::Mp3Timeline::Rekordbox && crate::audio::is_mp3(track_path) {
+        h.update(b"\0mp3-rekordbox-timeline-v1");
+    }
     let key = format!("{:x}", h.finalize());
-    stems_dir().join(format!("{}-{model}.stems", &key[..24]))
+    format!("{}-{model}.stems", &key[..24])
+}
+
+#[cfg(test)]
+#[test]
+fn mp3_timeline_only_changes_opt_in_mp3_cache_names() {
+    use crate::audio::Mp3Timeline::{Legacy, Rekordbox};
+    let dir = tempfile::tempdir().unwrap();
+    let mp3 = dir.path().join("track.MP3");
+    let mp3 = mp3.to_str().unwrap();
+    let flac = dir.path().join("track.flac");
+    let flac = flac.to_str().unwrap();
+    let mut original = Sha256::new();
+    original.update(mp3.as_bytes());
+    original.update(0u64.to_le_bytes()); // missing file, as in the historical cache key
+    let digest = format!("{:x}", original.finalize());
+    assert_eq!(cache_file_name(mp3, "model", Legacy), format!("{}-model.stems", &digest[..24]));
+    assert_ne!(cache_file_name(mp3, "model", Legacy), cache_file_name(mp3, "model", Rekordbox));
+    assert_eq!(cache_file_name(flac, "model", Legacy), cache_file_name(flac, "model", Rekordbox));
 }
 
 const MAGIC: &[u8; 8] = b"PDSTEMS1";

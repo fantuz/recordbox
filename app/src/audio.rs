@@ -2,7 +2,7 @@
 
 use anyhow::{anyhow, Result};
 use parking_lot::Mutex;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use symphonia::core::audio::SampleBuffer;
 use symphonia::core::codecs::{DecoderOptions, CODEC_TYPE_NULL};
 use symphonia::core::formats::FormatOptions;
@@ -34,6 +34,59 @@ impl Decoded {
     }
 }
 
+/// One clock per process: a decode worker, a playback deck and a cache lookup
+/// must all interpret a sample position the same way.
+#[derive(PartialEq, Eq, Clone, Copy, Debug, Default)]
+pub enum Mp3Timeline {
+    #[default]
+    Legacy,
+    Rekordbox,
+}
+
+static MP3_TIMELINE: OnceLock<Mp3Timeline> = OnceLock::new();
+
+impl Mp3Timeline {
+    pub fn from_args(args: &[String]) -> Result<Self> {
+        let mut selected = None;
+        let mut args = args.iter().map(String::as_str);
+        while let Some(arg) = args.next() {
+            let value = if arg == "--mp3-timeline" {
+                args.next().unwrap_or("")
+            } else if let Some(value) = arg.strip_prefix("--mp3-timeline=") {
+                value
+            } else {
+                continue;
+            };
+            anyhow::ensure!(selected.is_none(), "Specify --mp3-timeline only once.");
+            selected = Some(match value {
+                "legacy" => Self::Legacy,
+                "rekordbox" => Self::Rekordbox,
+                _ => anyhow::bail!("Expected --mp3-timeline legacy or --mp3-timeline rekordbox."),
+            });
+        }
+        Ok(selected.unwrap_or_default())
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Legacy => "legacy",
+            Self::Rekordbox => "rekordbox",
+        }
+    }
+
+    pub fn initialize(self) {
+        MP3_TIMELINE.set(self).expect("initialize MP3 timeline only at startup");
+    }
+}
+
+pub fn mp3_timeline() -> Mp3Timeline {
+    MP3_TIMELINE.get().copied().unwrap_or_default()
+}
+
+pub fn is_mp3(path: &str) -> bool {
+    std::path::Path::new(path).extension().is_some_and(|ext| ext.eq_ignore_ascii_case("mp3"))
+}
+
 #[derive(PartialEq, Eq, Clone, Copy, Debug)]
 pub enum Mp3Timing {
     NotMp3,
@@ -48,7 +101,7 @@ pub const MP3_UNTAGGED_SKIP: usize = 1152;
 /// Look at the first MP3 frame for a LAME-style info tag and its encoder name.
 pub fn mp3_timing_class(path: &str) -> Mp3Timing {
     use std::io::Read;
-    if !path.to_ascii_lowercase().ends_with(".mp3") {
+    if !is_mp3(path) {
         return Mp3Timing::NotMp3;
     }
     let Ok(mut f) = std::fs::File::open(path) else { return Mp3Timing::NotMp3 };
@@ -92,6 +145,10 @@ pub fn decode_file(path: &str) -> Result<Decoded> {
 }
 
 pub fn decode_until(path: &str, cancelled: impl Fn() -> bool) -> Result<Decoded> {
+    decode_with_timeline(path, mp3_timeline(), cancelled)
+}
+
+fn decode_with_timeline(path: &str, timeline: Mp3Timeline, cancelled: impl Fn() -> bool) -> Result<Decoded> {
     if cancelled() { anyhow::bail!("stopped"); }
     let file = std::fs::File::open(path)?;
     let mss = MediaSourceStream::new(Box::new(file), Default::default());
@@ -99,12 +156,15 @@ pub fn decode_until(path: &str, cancelled: impl Fn() -> bool) -> Result<Decoded>
     if let Some(ext) = std::path::Path::new(path).extension().and_then(|e| e.to_str()) {
         hint.with_extension(ext);
     }
-    // MP3 start alignment follows the original's timeline (measured against its own grids,
-    // see MECHANICS.md): LAME-tagged files keep the encoder lead-in, ffmpeg-tagged files have it
-    // removed, untagged files lose one frame.
-    let class = mp3_timing_class(path);
-    // Existing cues, saved grids, waveforms and cached stems share this decode timeline.
-    let gapless = class == Mp3Timing::Ffmpeg;
+    // Earlier recordbox collections used an encoder-name heuristic. The optional
+    // Rekordbox clock keeps decoder delay and counts a matching leading Info frame.
+    let (gapless, trim_untagged, lead) = match timeline {
+        Mp3Timeline::Legacy => {
+            let class = mp3_timing_class(path);
+            (class == Mp3Timing::Ffmpeg, class == Mp3Timing::Untagged, 0)
+        }
+        Mp3Timeline::Rekordbox => (false, false, crate::analysis::mp3_timebase::lead_frames(path)),
+    };
     let probed = symphonia::default::get_probe().format(&hint, mss, &FormatOptions { enable_gapless: gapless, ..Default::default() }, &MetadataOptions::default())?;
     let mut format = probed.format;
     let track = format
@@ -116,7 +176,7 @@ pub fn decode_until(path: &str, cancelled: impl Fn() -> bool) -> Result<Decoded>
     let mut decoder = symphonia::default::get_codecs().make(&track.codec_params, &DecoderOptions::default())?;
     let track_id = track.id;
     let mut sr = track.codec_params.sample_rate.unwrap_or(44100);
-    let mut out: Vec<f32> = Vec::new();
+    let mut out = vec![0.0; lead * 2];
     let declared_frames = track.codec_params.n_frames;
     let time_base = track.codec_params.time_base;
     if let Some(n) = track.codec_params.n_frames {
@@ -202,7 +262,7 @@ pub fn decode_until(path: &str, cancelled: impl Fn() -> bool) -> Result<Decoded>
             }
         }
     }
-    let decoded_frames = out.len() / 2;
+    let decoded_frames = out.len() / 2 - lead;
     // Compared in seconds: some containers (MP4) count the declared length in their own time
     // units rather than sample frames.
     let declared_secs = declared_frames.map(|n| match time_base {
@@ -213,18 +273,56 @@ pub fn decode_until(path: &str, cancelled: impl Fn() -> bool) -> Result<Decoded>
         None => n as f64 / sr.max(1) as f64,
     });
     let truncated = declared_secs.map(|d| decoded_frames as f64 / sr.max(1) as f64 + 1.0 < d).unwrap_or(false);
-    let mut raw_frames = decoded_frames;
-    if class == Mp3Timing::Ffmpeg {
+    let mut raw_frames = decoded_frames + lead;
+    if gapless {
         raw_frames += track.codec_params.delay.unwrap_or(0) as usize + track.codec_params.padding.unwrap_or(0) as usize;
     }
-    if class == Mp3Timing::Untagged {
+    if trim_untagged {
         let drop = (MP3_UNTAGGED_SKIP * 2).min(out.len());
         out.drain(..drop);
     }
-    if out.is_empty() {
+    if decoded_frames == 0 || out.is_empty() {
         return Err(anyhow!("no audio decoded"));
     }
     Ok(Decoded { sr, samples: out, raw_frames, damaged, truncated })
+}
+
+#[cfg(test)]
+mod mp3_timeline_tests {
+    use super::*;
+
+    #[test]
+    fn legacy_remains_default_and_invalid_or_repeated_clocks_are_rejected() {
+        let parse = |args: &[&str]| Mp3Timeline::from_args(&args.iter().copied().map(String::from).collect::<Vec<_>>());
+        assert_eq!(parse(&[]).unwrap(), Mp3Timeline::Legacy);
+        assert_eq!(parse(&["--mp3-timeline", "legacy"]).unwrap(), Mp3Timeline::Legacy);
+        assert_eq!(parse(&["--disable-load", "--mp3-timeline=rekordbox"]).unwrap(), Mp3Timeline::Rekordbox);
+        assert!(parse(&["--mp3-timeline"]).is_err());
+        assert!(parse(&["--mp3-timeline", "other"]).is_err());
+        assert!(parse(&["--mp3-timeline=rekordbox", "--mp3-timeline=legacy"]).is_err());
+    }
+
+    #[test]
+    fn untagged_mp3_keeps_its_first_frame_only_on_the_rekordbox_clock() -> Result<()> {
+        // Eight MPEG-1 Layer III frames at 320 kbps, 44.1 kHz, with silent granules.
+        let mut frame = vec![0; 1044];
+        frame[..4].copy_from_slice(&[0xff, 0xfb, 0xe0, 0x64]);
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("silent.MP3");
+        std::fs::write(&path, frame.repeat(8))?;
+        let path = path.to_str().unwrap();
+        let legacy = decode_with_timeline(path, Mp3Timeline::Legacy, || false)?;
+        let rb = decode_with_timeline(path, Mp3Timeline::Rekordbox, || false)?;
+        assert_eq!(rb.raw_frames, legacy.raw_frames);
+        assert_eq!(rb.frames(), legacy.frames() + MP3_UNTAGGED_SKIP);
+        assert_eq!(legacy.samples, rb.samples[MP3_UNTAGGED_SKIP * 2..]);
+        let polls = std::cell::Cell::new(0);
+        assert!(decode_with_timeline(path, Mp3Timeline::Rekordbox, || {
+            polls.set(polls.get() + 1);
+            polls.get() == 3
+        }).err().is_some_and(|error| error.to_string() == "stopped"));
+        Ok(())
+    }
 }
 
 /// Shared playback state read by the audio callback.
@@ -240,6 +338,7 @@ pub struct PlayState {
     /// Separated stems of the loaded track (44.1 kHz) and which are audible, in source order
     /// drums, bass, other, vocals. With all on (or no stems) the original mix plays.
     pub stems: Option<Arc<crate::stems::Stems>>,
+    pub stem_preview: Option<Arc<crate::stems::Live>>,
     pub stem_on: [bool; 4],
     /// STEM ISO gain of each source (same order): 0 kills it, 1 leaves it, up to +6 dB
     /// (`stem_iso_gain` turns a knob position into this).
@@ -311,6 +410,13 @@ pub struct PlayState {
 
 pub const DEFAULT_VOLUME: f32 = 0.9;
 
+impl PlayState {
+    /// Mute and solo become available as soon as a playable prefix exists.
+    pub fn has_playable_stems(&self) -> bool {
+        self.stems.is_some() || self.stem_preview.as_ref().is_some_and(|p| p.ready_frames() >= 4)
+    }
+}
+
 impl Default for PlayState {
     fn default() -> Self {
         PlayState {
@@ -323,6 +429,7 @@ impl Default for PlayState {
             metronome: None,
             metronome_vol: 0.5,
             stems: None,
+            stem_preview: None,
             stem_on: [true; 4],
             stem_iso: [1.0; 4],
             search: 0.0,
@@ -751,6 +858,7 @@ struct Src<'a> {
     audio: &'a Decoded,
     frames: usize,
     stems: Option<&'a crate::stems::Stems>,
+    preview: Option<(&'a crate::stems::Live, usize)>,
     /// Gains for this frame: the original, then drums, bass, other, vocals.
     g: std::cell::Cell<[f32; 5]>,
     stem_ratio: f64,
@@ -771,25 +879,49 @@ impl Src<'_> {
         let ii = i as isize;
         let (ol, or) = (cubic(at(ii - 1, 0), at(ii, 0), at(ii + 1, 0), at(ii + 2, 0), fr), cubic(at(ii - 1, 1), at(ii, 1), at(ii + 1, 1), at(ii + 2, 1), fr));
         let g = self.g.get();
-        let st = match self.stems {
-            Some(st) if st.len > 1 && (g[1] != 0.0 || g[2] != 0.0 || g[3] != 0.0 || g[4] != 0.0) => st,
+        if g == [1.0, 0.0, 0.0, 0.0, 0.0] {
+            return (ol, or);
+        }
+        let sp = p * self.stem_ratio;
+        let (len, ready) = match (self.stems, self.preview) {
+            (Some(st), _) => (st.len, st.len),
+            (None, Some((live, ready))) => (live.len(), ready),
             _ => return (ol * g[0], or * g[0]),
         };
-        let sp = p * self.stem_ratio;
-        let si = (sp as usize).min(st.len - 2);
+        if len < 2 { return (ol, or); }
+        let sp = sp.min((len - 1) as f64);
+        let si = sp as usize;
         let sf = (sp - si as f64) as f32;
-        let n = st.len as isize;
-        let k = si as isize;
-        let part = |src: usize| -> (f32, f32) {
-            let lb = src * 2 * st.len;
-            let rb = lb + st.len;
-            let at = |base: usize, k: isize| st.data[base + k.clamp(0, n - 1) as usize];
-            (cubic(at(lb, k - 1), at(lb, k), at(lb, k + 1), at(lb, k + 2), sf), cubic(at(rb, k - 1), at(rb, k), at(rb, k + 1), at(rb, k + 2), sf))
+        let taps = [si.saturating_sub(1), si, (si+1).min(len-1), (si+2).min(len-1)];
+        if taps[3] >= ready {
+            // A seek, loop or jog can immediately reach an unfinished portion of the track.
+            return (ol, or);
+        }
+        let plane = |index: usize| -> Option<f32> {
+            if let Some(st) = self.stems {
+                let row = &st.data[index*len..(index+1)*len];
+                return Some(cubic(row[taps[0]], row[si], row[taps[2]], row[taps[3]], sf));
+            }
+            let live = self.preview?.0;
+            let first = taps[0];
+            if let Some(span) = live.plane_span(index, first, taps[3]+1) {
+                return Some(cubic(span[0], span[si-first], span[taps[2]-first], span[taps[3]-first], sf));
+            }
+            // Interpolating across the boundary between two finished slabs.
+            Some(cubic(live.sample(index, first)?, live.sample(index, si)?, live.sample(index, taps[2])?, live.sample(index, taps[3])?, sf))
         };
-        let (d, b, v) = (part(0), part(1), part(3));
+        let part = |src: usize| Some((plane(2*src)?, plane(2*src+1)?));
+        let (Some(d), Some(b), Some(v)) = (part(0), part(1), part(3)) else { return (ol, or) };
         // Instruments: the mix less drums, bass and vocals.
         let o = (ol - d.0 - b.0 - v.0, or - d.1 - b.1 - v.1);
-        (g[0] * ol + g[1] * d.0 + g[2] * b.0 + g[3] * o.0 + g[4] * v.0, g[0] * or + g[1] * d.1 + g[2] * b.1 + g[3] * o.1 + g[4] * v.1)
+        let mixed = (g[0] * ol + g[1] * d.0 + g[2] * b.0 + g[3] * o.0 + g[4] * v.0, g[0] * or + g[1] * d.1 + g[2] * b.1 + g[3] * o.1 + g[4] * v.1);
+        if ready < len {
+            // Blend into the original over the last 3.3 ms of a growing prefix.
+            let wet = (((ready - 1) as f64 - sp) / (STEM_RAMP_SECS as f64 * crate::stems::htdemucs::SAMPLE_RATE as f64)).clamp(0.0, 1.0) as f32;
+            (ol + wet * (mixed.0 - ol), or + wet * (mixed.1 - or))
+        } else {
+            mixed
+        }
     }
     /// Left + right of whole source frame `i` (for aligning grains).
     #[inline]
@@ -819,7 +951,7 @@ impl ClipReader {
     /// output frame; `pitch_step`: source frames per output frame the sound is read at.
     #[inline]
     pub fn frame(&mut self, audio: &Decoded, pos: f64, step: f64, pitch_step: f64, hop: usize) -> (f32, f32) {
-        let src = Src { audio, frames: audio.frames(), stems: None, g: std::cell::Cell::new([1.0, 0.0, 0.0, 0.0, 0.0]), stem_ratio: 1.0 };
+        let src = Src { audio, frames: audio.frames(), stems: None, preview: None, g: std::cell::Cell::new([1.0, 0.0, 0.0, 0.0, 0.0]), stem_ratio: 1.0 };
         if (step - pitch_step).abs() > 1e-9 {
             // A grain reads on at the pitch's rate while the position moves at `step`, so its
             // sound falls behind (or runs ahead) by up to hop x (step - pitch) frames before
@@ -1352,22 +1484,26 @@ pub fn render_deck_cue(s: &mut PlayState, out: &mut [f32], cue: &mut [f32], chan
     let vol = if s.muted { 0.0 } else { s.volume * s.gain * if searching { 0.7 } else { 1.0 } };
     let click_len = (rate as f64 * 0.03) as usize;
     let stems = s.stems.clone();
+    let live = s.stem_preview.clone();
+    let preview = live.as_deref().map(|p| (p, p.ready_frames()));
+    let stem_ratio = crate::stems::htdemucs::SAMPLE_RATE as f64 / audio.sr.max(1) as f64;
+    let preview_here = preview.is_some_and(|(p, ready)| ready >= 4 && (ready == p.len() || s.pos.max(0.0) * stem_ratio + 2.0 < ready as f64));
     // Where the gains of the original and the parts are heading. The parts are used only
     // while one of them is muted or off unity; until then the original plays untouched.
-    let use_parts = stems.is_some() && (0..4).any(|i| !s.stem_on[i] || s.stem_iso[i] != 1.0);
+    let use_parts = (stems.is_some() || preview_here) && (0..4).any(|i| !s.stem_on[i] || s.stem_iso[i] != 1.0);
     let mut stem_target = [if use_parts { 0.0 } else { 1.0 }, 0.0, 0.0, 0.0, 0.0];
     if use_parts {
         for i in 0..4 {
             stem_target[1 + i] = if s.stem_on[i] { s.stem_iso[i].clamp(0.0, 10.0) } else { 0.0 };
         }
     }
-    if stems.is_none() {
+    if stems.is_none() && !preview_here {
         s.dsp.stem_g = [1.0, 0.0, 0.0, 0.0, 0.0];
     }
     // A full on/off change takes 3.3 ms (rekordbox's `udsp::GainController`: 145.53 frames
     // at 44.1 kHz), at a constant slope, so smaller moves are proportionally quicker.
     let stem_k = 1.0 / (STEM_RAMP_SECS * rate as f32);
-    let src = Src { audio: &audio, frames, stems: stems.as_deref(), g: std::cell::Cell::new(s.dsp.stem_g), stem_ratio: crate::stems::htdemucs::SAMPLE_RATE as f64 / audio.sr.max(1) as f64 };
+    let src = Src { audio: &audio, frames, stems: stems.as_deref(), preview, g: std::cell::Cell::new(s.dsp.stem_g), stem_ratio };
     let metro = if searching { None } else { s.metronome.clone() };
     // Search grains: 60 ms, or the length the deck asks for (rekordbox's scan: 133 ms).
     let grain = if s.dk.scan_grain > 0.0 { ((s.dk.scan_grain * rate as f64) as usize).max(1) } else { search_grain(rate) };
@@ -2283,6 +2419,32 @@ mod dsp_tests {
 #[cfg(test)]
 mod stem_mix_tests {
     use super::*;
+
+    #[test]
+    fn progressive_stems_play_only_the_published_prefix() {
+        let (mut player, original, parts) = deck();
+        let completed = player.stems.take().unwrap();
+        let preview = crate::stems::Live::test_prefix(completed.len, &completed.data, 16384);
+        player.stem_preview = Some(preview.clone());
+        assert!(player.has_playable_stems());
+        let src = Src {
+            audio: player.audio.as_ref().unwrap(),
+            frames: original.len(),
+            stems: None,
+            preview: Some((&preview, preview.ready_frames())),
+            g: std::cell::Cell::new([0.0, 1.0, 0.0, 0.0, 0.0]),
+            stem_ratio: 1.0,
+        };
+        for frame in [1000, 8191, 8192, 12000] {
+            assert_eq!(src.at(frame as f64), (parts[0][frame], parts[0][frame]));
+        }
+        // Forward seek past the completed prefix and a cubic read straddling its end.
+        for frame in [16383, 20000] {
+            assert_eq!(src.at(frame as f64), (original[frame], original[frame]));
+        }
+        player.stem_preview = None;
+        assert!(!player.has_playable_stems());
+    }
 
     /// A track whose parts are known: original = drums + bass + other + vocals, where the
     /// stored "other" is deliberately wrong (the instruments are taken as the residual).

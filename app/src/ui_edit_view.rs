@@ -1151,7 +1151,7 @@ fn palette_row(app: &mut App, ui: &mut Ui, r: Rect, id: u32, index: usize, del: 
     if pal_playing {
         let x = wr.min.x + (pal_pos * ppb) as f32;
         p.rect_filled(Rect::from_min_max(pos2(x - 0.5, wr.min.y), pos2(x + 0.5, wr.max.y)), 0.0, WHITE);
-        ui.ctx().request_repaint();
+        app.repaint_playback(ui.ctx());
     }
     let wresp = ui.interact(wr, ui.id().with(("edit_pal_wave", id)), Sense::click_and_drag());
     app.edit.map.rects.insert(format!("pal_wave{index}"), wr);

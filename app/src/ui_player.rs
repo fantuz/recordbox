@@ -1356,8 +1356,10 @@ fn stems_strip(app: &mut App, ui: &mut Ui, s: Rect, main: Rect) {
     let p = ui.painter().clone();
     let y = s.min.y + 24.0;
     let at = |x: f32, w: f32| Rect::from_center_size(pos2(sx(main, x), y), vec2(w, 26.0));
-    let have = app.player.state.lock().stems.is_some();
-    let on = app.player.state.lock().stem_on;
+    let (have, on, preview_frames) = {
+        let player = app.player.state.lock();
+        (player.stems.is_some(), player.stem_on, player.stem_preview.as_ref().map_or(0, |p| p.ready_frames()))
+    };
     let loaded = app.deck.track.is_some();
     // (label, source indices, colour). Three parts put bass with the instruments. Colours as
     // measured from rekordbox 7.2.19 (reference set, stems/13).
@@ -1401,10 +1403,15 @@ fn stems_strip(app: &mut App, ui: &mut Ui, s: Rect, main: Rect) {
     } else if loading {
         "Loading saved stems…".to_owned()
     } else if let Some(status) = app.stem.separation_status() {
-        if app.stem.separating.map(|(id, _)| id) == app.deck.track {
-            status
+        if app.separating_stems() {
+            if preview_frames > 0 {
+                let secs = preview_frames / crate::stems::htdemucs::SAMPLE_RATE as usize;
+                format!("{status} · Preview to {}:{:02}", secs / 60, secs % 60)
+            } else {
+                status
+            }
         } else {
-            "Separating another track…".to_owned()
+            "Separating another track or model…".to_owned()
         }
     } else if retry_cpu {
         "GPU separation failed · Click to copy details".to_owned()

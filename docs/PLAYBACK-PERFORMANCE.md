@@ -29,6 +29,31 @@ RustFFT and Candle's matrix backend already select supported SIMD at runtime.
 Public builds retain their existing CPU compatibility, dependencies and
 numerical backends. The changes keep the existing floating-point mode.
 
+## Auditioning Rekordbox MP3 timing
+
+Ordinary launches and `recordbox --mp3-timeline legacy` open your usual
+collection. Start `recordbox --mp3-timeline rekordbox` to audition the MP3
+clock traced from AlphaTheta Rekordbox 7.2.19. It retains the encoder delay
+and counts a leading MP3 info frame when its header matches the following
+audio frames. Depending on the encoder and headers, a saved cue can land at
+a different sound on this clock. Other audio formats decode as before.
+
+The option opens a second collection at `mp3-timeline-rekordbox/library.db`
+inside your recordbox data folder (or inside `PREPDECK_DATA` when set). The
+startup message and the library footer show the path. Add files or import a
+Rekordbox snapshot into this collection. Listen to a known native cue and
+check the downbeat against its transient before exporting or approving any
+write-back. Each collection keeps its own cues, grids, waveforms, analysis
+and preferences. The application retains their saved times and restores
+library backups into the collection with the matching clock.
+
+Both collections share downloaded separation models. Each MP3 clock has a
+separate STEMS cache entry for a track and model. Other audio formats can
+reuse stems saved by either collection. Each collection clears or prunes
+only its own folder. Restart with the same
+option to continue this collection, or start normally to return to the
+original one.
+
 ## Linux deck loading and playback
 
 The published 0.5.3 Linux build can start HTDemucs when an already-analyzed

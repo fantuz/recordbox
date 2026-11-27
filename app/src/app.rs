@@ -273,6 +273,8 @@ pub struct Prefs {
     pub stems_auto_separate: bool,
     /// Also start uncached model inference on Load when no accelerator is available.
     pub stems_auto_cpu: bool,
+    /// Preview finalized sections during eligible GPU jobs started after this preference is set.
+    pub stems_progressive_preview: bool,
     /// Storage budget in decimal GB. At zero, each new save keeps only its own result.
     pub stem_cache_gb: u32,
     /// Skip automatic eviction and retain the budget in case the user switches back.
@@ -1045,6 +1047,7 @@ impl Default for Prefs {
             ch_fader_curve: 1,
             stems_auto_separate: true,
             stems_auto_cpu: false,
+            stems_progressive_preview: false,
             stem_cache_gb: 20,
             keep_all_stems: false,
             import_device_history: true,
@@ -1167,6 +1170,7 @@ pub enum StemMsg {
     Download(u64, u64),
     DownloadDone(Result<(), String>),
     Progress(i64, f32),
+    Preview(StemCacheKey, Arc<crate::stems::Live>),
     CacheWrite(StemCacheKey, Result<(), String>),
     Cached(StemCacheKey, anyhow::Result<Arc<crate::stems::Stems>>),
     Done(i64, anyhow::Result<std::sync::Arc<crate::stems::Stems>>),
@@ -1196,6 +1200,7 @@ pub struct StemState {
     cache_limit: Arc<parking_lot::Mutex<Option<u64>>>,
     pub(crate) cache_usage: Option<Arc<std::sync::OnceLock<std::io::Result<u64>>>>,
     active_key: Option<StemCacheKey>,
+    preview: Option<Arc<crate::stems::Live>>,
     pub execution: crate::stems::SeparationDevice,
     /// Track to separate as soon as the model download finishes.
     pending: Option<(StemCacheKey, crate::stems::SeparationDevice)>,
@@ -1306,7 +1311,7 @@ impl StemState {
 
     pub fn new() -> Self {
         let (tx, rx) = crossbeam_channel::unbounded();
-        StemState { hw: None, model: None, active_key: None, model_ready: false, downloading: None, separating: None, loading: HashMap::new(), errors: HashMap::new(), last_cache_warning: None, cache_limit: Default::default(), cache_usage: None, execution: crate::stems::SeparationDevice::Selected, pending: None, cancel: Default::default(), download_cancel: Default::default(), tx, rx }
+        StemState { hw: None, model: None, active_key: None, preview: None, model_ready: false, downloading: None, separating: None, loading: HashMap::new(), errors: HashMap::new(), last_cache_warning: None, cache_limit: Default::default(), cache_usage: None, execution: crate::stems::SeparationDevice::Selected, pending: None, cancel: Default::default(), download_cancel: Default::default(), tx, rx }
     }
 }
 
@@ -3214,7 +3219,9 @@ impl App {
             if self.stem.errors.get(&Some(key.track)).is_some_and(|error| error.retry_model.is_none()) {
                 self.stem.errors.remove(&Some(key.track));
             }
-            self.player.state.lock().stems = None;
+            let mut player = self.player.state.lock();
+            player.stems = None;
+            player.stem_preview = None;
             self.deck.x.stem_wave = None;
             self.deck.x.stem_wave_rx = None;
         }
@@ -3224,17 +3231,22 @@ impl App {
             self.player.state.lock().stems = Some(parts);
             return true;
         }
+        if self.stem.active_key.as_ref() == Some(key) && !self.stem.cancel.load(std::sync::atomic::Ordering::Relaxed) {
+            if let Some(preview) = &self.stem.preview {
+                self.player.state.lock().stem_preview = Some(preview.clone());
+            }
+        }
         if let Some(request) = self.stem.loading.get_mut(key) {
             if on_failure.is_some() { *request = on_failure; }
             return true;
         }
-        if !key.path.exists() { return false; }
+        let Some(saved) = crate::stems::existing_cache_path(&key.path) else { return false };
         let key = key.clone();
         self.stem.loading.insert(key.clone(), on_failure);
         let tx = self.stem.tx.clone();
         let ctx = self.ctx.clone();
         std::thread::spawn(move || {
-            let r = crate::stems::load(&key.path).map(Arc::new);
+            let r = crate::stems::load(&saved).map(Arc::new);
             let _ = tx.send(StemMsg::Cached(key, r));
             ctx.request_repaint();
         });
@@ -3289,6 +3301,9 @@ impl App {
         let cancel: std::sync::Arc<std::sync::atomic::AtomicBool> = Default::default();
         self.stem.cancel = cancel.clone();
         let audio = self.deck.audio.clone();
+        let preview_hw = self.stem.hw.as_ref().filter(|hw|
+            self.prefs.stems_progressive_preview && crate::stems::Live::supported(hw, m, execution)
+        ).cloned();
         let cache_limit = self.stem.cache_limit.clone();
         let worker = std::thread::Builder::new().name("rb-stems".into()).spawn(move || {
             let run = || -> anyhow::Result<std::sync::Arc<crate::stems::Stems>> {
@@ -3297,8 +3312,13 @@ impl App {
                     Some(audio) => audio,
                     None => Arc::new(crate::audio::decode_until(&t.path, cancelled)?),
                 };
+                let preview = preview_hw.and_then(|hw| crate::stems::Live::for_job(&hw, m, execution, dec.frames(), dec.sr));
+                if let Some(preview) = &preview {
+                    if cancelled() { anyhow::bail!("stopped"); }
+                    let _ = tx.send(StemMsg::Preview(key.clone(), preview.clone()));
+                }
                 let mut last_progress = 0.0;
-                let st = crate::stems::separate_with_device(m, &dec.samples, dec.sr, &mut |p| {
+                let st = crate::stems::separate_with_live(m, &dec.samples, dec.sr, &mut |p| {
                     if cancelled() { return false; }
                     if p > last_progress {
                         last_progress = p;
@@ -3306,7 +3326,7 @@ impl App {
                         ctx.request_repaint();
                     }
                     true
-                }, execution)?;
+                }, execution, preview.as_deref())?;
                 if cancelled() { anyhow::bail!("stopped"); }
                 let saved = match crate::stems::save(&key.path, &st) {
                     Ok(()) => {
@@ -3331,16 +3351,28 @@ impl App {
         }
     }
 
+    fn detach_stem_preview(&mut self) {
+        if let Some(preview) = self.stem.preview.take() {
+            for deck in &self.player.decks {
+                let mut player = deck.lock();
+                if player.stem_preview.as_ref().is_some_and(|p| Arc::ptr_eq(p, &preview)) {
+                    player.stem_preview = None;
+                }
+            }
+        }
+    }
+
     pub fn stop_separation(&mut self) {
         self.stem.pending = None;
         for request in self.stem.loading.values_mut() { *request = None; }
         self.stem.download_cancel.store(true, std::sync::atomic::Ordering::Relaxed);
         self.stem.cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+        self.detach_stem_preview();
     }
 
     /// Mute or unmute one part (source index: 0 drums, 1 bass, 2 other, 3 vocals).
     pub fn toggle_stem(&mut self, src: usize) {
-        let have = self.player.state.lock().stems.is_some();
+        let have = self.player.state.lock().has_playable_stems();
         if !have {
             self.separate_loaded();
             return;
@@ -3392,6 +3424,16 @@ impl App {
                     if let Err(warning) = &result { self.toast_err(warning.as_str()); }
                     self.stem.record_cache_write(key, result);
                 }
+                StemMsg::Preview(key, preview) => {
+                    if self.stem.active_key.as_ref() == Some(&key) && !self.stem.cancel.load(std::sync::atomic::Ordering::Relaxed) {
+                        self.stem.preview = Some(preview.clone());
+                        for n in 0..4 {
+                            if self.deck_of(n).stem_cache_key.as_ref() == Some(&key) {
+                                self.player.decks[n as usize].lock().stem_preview = Some(preview.clone());
+                            }
+                        }
+                    }
+                }
                 StemMsg::Progress(id, p) => {
                     // (Not for a separation that was stopped because its track left the deck.)
                     if self.stem.separating.map(|s| s.0) == Some(id) {
@@ -3420,6 +3462,7 @@ impl App {
                             self.apply_stems(&key, result);
                         }
                     }
+                    self.detach_stem_preview();
                     self.resume_pending_stems();
                 }
             }
@@ -3979,6 +4022,7 @@ impl App {
         {
             let mut st = self.player.state.lock();
             st.stems = None;
+            st.stem_preview = None;
             // Preferences > STEMS: "Reset the MUTE/SOLO state while loading".
             if self.prefs.stem_reset_on_load {
                 st.stem_on = [true; 4];

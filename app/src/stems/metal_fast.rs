@@ -17,6 +17,9 @@ use objc2_metal::{MTLResourceOptions, MTLSize};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
+#[path = "metal_tensor.rs"]
+mod metal_tensor;
+
 const KERNELS: &str = r#"
 #include <metal_stdlib>
 using namespace metal;
@@ -300,7 +303,7 @@ impl CustomOp2 for Gemm {
 }
 
 fn mm(a: &Tensor, b: &Tensor) -> Result<Tensor> {
-    a.apply_op2_no_bwd(b, &Gemm)
+    metal_tensor::multiply(a, b).unwrap_or_else(|| a.apply_op2_no_bwd(b, &Gemm))
 }
 
 /// a + b for contiguous tensors of the same shape.

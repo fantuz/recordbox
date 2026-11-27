@@ -48,8 +48,9 @@ impl Options {
     }
 }
 
-/// Play the whole score into memory at `rate` (interleaved stereo). None when cancelled.
-pub fn bounce(audio: Arc<Decoded>, score: Arc<ScoreSet>, rate: u32, progress: &AtomicU32, cancel: &AtomicBool) -> Option<Vec<f32>> {
+/// In-memory reference used to compare file renders with the live voice.
+#[cfg(test)]
+fn bounce(audio: Arc<Decoded>, score: Arc<ScoreSet>, rate: u32, progress: &AtomicU32, cancel: &AtomicBool) -> Option<Vec<f32>> {
     let len = score.len();
     let want = (score.len_ms() * 0.001 * rate as f64).round() as usize;
     let mut v = Voice::new();
@@ -73,13 +74,13 @@ pub fn bounce(audio: Arc<Decoded>, score: Arc<ScoreSet>, rate: u32, progress: &A
     Some(out)
 }
 
-pub fn to_i16(x: &[f32]) -> Vec<i16> {
+#[cfg(test)]
+fn to_i16(x: &[f32]) -> Vec<i16> {
     x.iter().map(|v| (v * 32767.0).round().clamp(-32768.0, 32767.0) as i16).collect()
 }
 
-pub fn wav_bytes(pcm: &[i16], rate: u32) -> Vec<u8> {
-    let data = pcm.len() as u32 * 2;
-    let mut o = Vec::with_capacity(44 + data as usize);
+fn wav_header(data: u32, rate: u32) -> Vec<u8> {
+    let mut o = Vec::with_capacity(44);
     o.extend_from_slice(b"RIFF");
     o.extend_from_slice(&(36 + data).to_le_bytes());
     o.extend_from_slice(b"WAVEfmt ");
@@ -92,9 +93,6 @@ pub fn wav_bytes(pcm: &[i16], rate: u32) -> Vec<u8> {
     o.extend_from_slice(&16u16.to_le_bytes());
     o.extend_from_slice(b"data");
     o.extend_from_slice(&data.to_le_bytes());
-    for s in pcm {
-        o.extend_from_slice(&s.to_le_bytes());
-    }
     o
 }
 
@@ -111,23 +109,19 @@ fn extended(rate: u32) -> [u8; 10] {
     o
 }
 
-pub fn aiff_bytes(pcm: &[i16], rate: u32) -> Vec<u8> {
-    let data = pcm.len() as u32 * 2;
-    let mut o = Vec::with_capacity(54 + data as usize);
+fn aiff_header(data: u32, rate: u32) -> Vec<u8> {
+    let mut o = Vec::with_capacity(54);
     o.extend_from_slice(b"FORM");
     o.extend_from_slice(&(4 + 26 + 16 + data).to_be_bytes());
     o.extend_from_slice(b"AIFFCOMM");
     o.extend_from_slice(&18u32.to_be_bytes());
     o.extend_from_slice(&2u16.to_be_bytes());
-    o.extend_from_slice(&(pcm.len() as u32 / 2).to_be_bytes());
+    o.extend_from_slice(&(data / 4).to_be_bytes());
     o.extend_from_slice(&16u16.to_be_bytes());
     o.extend_from_slice(&extended(rate));
     o.extend_from_slice(b"SSND");
     o.extend_from_slice(&(8 + data).to_be_bytes());
     o.extend_from_slice(&[0u8; 8]);
-    for s in pcm {
-        o.extend_from_slice(&s.to_be_bytes());
-    }
     o
 }
 
@@ -322,15 +316,16 @@ fn utf8_number(w: &mut Bits, v: u64) {
 
 /// 16-bit stereo FLAC. `level` 0..=8 sets how hard the encoder looks for the smallest form
 /// of each block (predictor order, mid/side, Rice partitions); every level is lossless.
-pub fn flac_bytes(pcm: &[i16], rate: u32, level: u8) -> Vec<u8> {
+fn write_flac(
+    out: &mut dyn Write, frames: usize, rate: u32, level: u8,
+    mut fill: impl FnMut(&mut [i16]) -> Result<(), String>,
+) -> Result<(), String> {
     let level = level.min(8) as usize;
     let block = if level < 3 { 1152 } else { 4096 };
     let max_order = [1, 2, 2, 3, 4, 4, 4, 4, 4][level];
     let max_po = [0, 0, 2, 2, 3, 4, 5, 6, 8][level];
     let try_ms = level >= 3;
-    let frames = pcm.len() / 2;
-    let mut out = Vec::with_capacity(pcm.len());
-    out.extend_from_slice(b"fLaC");
+    out.write_all(b"fLaC").map_err(|e| io_message(&e))?;
     let mut si = Bits::new();
     si.put(0x80, 8);
     si.put(34, 24);
@@ -342,8 +337,8 @@ pub fn flac_bytes(pcm: &[i16], rate: u32, level: u8) -> Vec<u8> {
     si.put(1, 3);
     si.put(15, 5);
     si.put(frames as u64, 36);
-    out.extend_from_slice(&si.out);
-    out.extend_from_slice(&[0u8; 16]);
+    out.write_all(&si.out).and_then(|()| out.write_all(&[0; 16])).map_err(|e| io_message(&e))?;
+    let mut samples = vec![0i16; 2 * block];
     let (mut l, mut r, mut m, mut s) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
     let mut number = 0u64;
     let mut at = 0usize;
@@ -353,8 +348,10 @@ pub fn flac_bytes(pcm: &[i16], rate: u32, level: u8) -> Vec<u8> {
         r.clear();
         m.clear();
         s.clear();
-        for i in at..at + n {
-            let (a, b) = (pcm[i * 2] as i32, pcm[i * 2 + 1] as i32);
+        let pcm = &mut samples[..2 * n];
+        fill(pcm)?;
+        for pair in pcm.chunks_exact(2) {
+            let (a, b) = (i32::from(pair[0]), i32::from(pair[1]));
             l.push(a);
             r.push(b);
             m.push((a + b) >> 1);
@@ -395,11 +392,11 @@ pub fn flac_bytes(pcm: &[i16], rate: u32, level: u8) -> Vec<u8> {
         w.align();
         let c = crc16(&w.out);
         w.put(c as u64, 16);
-        out.extend_from_slice(&w.out);
+        out.write_all(&w.out).map_err(|e| io_message(&e))?;
         number += 1;
         at += n;
     }
-    out
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------- files
@@ -415,9 +412,40 @@ fn io_message(e: &std::io::Error) -> String {
     }
 }
 
+/// Pull a block of score samples at a time. The encoder never holds the whole render in RAM.
+fn write_blocks(
+    out: &mut dyn Write, format: u8, frames: usize, rate: u32, flac_level: u8,
+    mut fill: impl FnMut(&mut [i16]) -> Result<(), String>,
+) -> Result<(), String> {
+    if format == 0 {
+        return write_flac(out, frames, rate, flac_level, fill);
+    }
+    let data = frames.checked_mul(4).and_then(|n| u32::try_from(n).ok())
+        .filter(|n| *n <= u32::MAX - 46)
+        .ok_or_else(|| "The render exceeds the 4 GiB limit of this audio container.".to_owned())?;
+    let aiff = format == 2;
+    let header = if aiff { aiff_header(data, rate) } else { wav_header(data, rate) };
+    out.write_all(&header).map_err(|e| io_message(&e))?;
+    let mut pcm = [0i16; 8192];
+    let mut bytes = [0u8; 16_384];
+    let mut remaining = frames * 2;
+    while remaining > 0 {
+        let n = remaining.min(pcm.len());
+        fill(&mut pcm[..n])?;
+        for (sample, pair) in pcm[..n].iter().zip(bytes.chunks_exact_mut(2)) {
+            pair.copy_from_slice(&if aiff { sample.to_be_bytes() } else { sample.to_le_bytes() });
+        }
+        out.write_all(&bytes[..2 * n]).map_err(|e| io_message(&e))?;
+        remaining -= n;
+    }
+    Ok(())
+}
+
 /// Encode into private staging files beside the destination. The caller publishes the
 /// completed file without replacing a file that appeared while the render was running.
-fn encode(path: &Path, pcm: &[i16], rate: u32, opt: &Options) -> Result<tempfile::NamedTempFile, String> {
+fn encode(
+    path: &Path, opt: &Options, write_audio: impl FnOnce(&mut std::fs::File, u8) -> Result<(), String>,
+) -> Result<tempfile::NamedTempFile, String> {
     let dir = path.parent().filter(|p| p.is_dir()).ok_or_else(|| MSG_NO_DEST.to_owned())?;
     let mut file = tempfile::NamedTempFile::new_in(dir).map_err(|e| io_message(&e))?;
     if opt.format == 3 {
@@ -430,7 +458,9 @@ fn encode(path: &Path, pcm: &[i16], rate: u32, opt: &Options) -> Result<tempfile
         let stage = tempfile::tempdir_in(dir).map_err(|e| io_message(&e))?;
         let wav = stage.path().join("input.wav");
         let encoded = stage.path().join("output.m4a");
-        std::fs::write(&wav, wav_bytes(pcm, rate)).map_err(|e| io_message(&e))?;
+        let mut input = std::fs::File::create_new(&wav).map_err(|e| io_message(&e))?;
+        write_audio(&mut input, 1)?;
+        drop(input);
         let result = std::process::Command::new(tool)
             .args(["-f", "m4af", "-d", "aac", "-b", &opt.aac_bps.to_string()])
             .arg(&wav).arg(&encoded).output()
@@ -441,21 +471,10 @@ fn encode(path: &Path, pcm: &[i16], rate: u32, opt: &Options) -> Result<tempfile
         let mut output = std::fs::File::open(encoded).map_err(|e| io_message(&e))?;
         std::io::copy(&mut output, &mut file).map_err(|e| io_message(&e))?;
     } else {
-        let bytes = match opt.format {
-            0 => flac_bytes(pcm, rate, opt.flac_level),
-            2 => aiff_bytes(pcm, rate),
-            _ => wav_bytes(pcm, rate),
-        };
-        file.write_all(&bytes).map_err(|e| io_message(&e))?;
+        write_audio(file.as_file_mut(), opt.format)?;
     }
     file.as_file().sync_all().map_err(|e| io_message(&e))?;
     Ok(file)
-}
-
-#[cfg(test)]
-pub fn write(path: &Path, pcm: &[i16], rate: u32, opt: &Options) -> Result<(), String> {
-    encode(path, pcm, rate, opt)?.persist_noclobber(path).map_err(|e| io_message(&e.error))?;
-    Ok(())
 }
 
 /// A render running on its own thread.
@@ -478,16 +497,37 @@ pub fn start(audio: Arc<Decoded>, score: Arc<ScoreSet>, path: PathBuf, opt: Opti
     let (p2, c2, path2) = (progress.clone(), cancel.clone(), path.clone());
     std::thread::spawn(move || {
         let rate = opt.out_rate(audio.sr);
-        let r = match bounce(audio, score, rate, &p2, &c2) {
-            None => Err(String::new()),
-            Some(pcm) => encode(&path2, &to_i16(&pcm), rate, &opt).and_then(|file| {
+        let frames = (score.len_ms() * 0.001 * rate as f64).round() as usize;
+        let mut voice = Voice::new();
+        voice.keep_pitch = score.song_grid.is_dynamic();
+        voice.audio = Some(audio);
+        voice.score = Some(score);
+        voice.instant = true;
+        voice.playing = true;
+        let r = encode(&path2, &opt, |file, format| {
+            let mut samples = [0.0f32; 8192];
+            let mut rendered = 0;
+            write_blocks(file, format, frames, rate, opt.flac_level, |pcm| {
                 if c2.load(Ordering::Relaxed) {
                     return Err(String::new());
                 }
-                file.persist_noclobber(&path2).map_err(|e| io_message(&e.error))?;
-                Ok(path2.clone())
-            }),
-        };
+                let block = &mut samples[..pcm.len()];
+                block.fill(0.0);
+                voice.render(block, 2, rate, 1.0);
+                for (dst, sample) in pcm.iter_mut().zip(block) {
+                    *dst = (*sample * 32767.0).round().clamp(-32768.0, 32767.0) as i16;
+                }
+                rendered += pcm.len() / 2;
+                p2.store((rendered as f64 * 1000.0 / frames.max(1) as f64) as u32, Ordering::Relaxed);
+                Ok(())
+            })
+        }).and_then(|file| {
+            if c2.load(Ordering::Relaxed) {
+                return Err(String::new());
+            }
+            file.persist_noclobber(&path2).map_err(|e| io_message(&e.error))?;
+            Ok(path2.clone())
+        });
         let _ = tx.send(r);
         if let Some(c) = ctx {
             c.request_repaint();
@@ -500,6 +540,21 @@ pub fn start(audio: Arc<Decoded>, score: Arc<ScoreSet>, path: PathBuf, opt: Opti
 mod tests {
     use super::*;
     use crate::edit_audio::tests::{beat_tones, score, SR};
+
+    fn write_samples(out: &mut dyn Write, format: u8, rate: u32, level: u8, mut pcm: &[i16]) -> Result<(), String> {
+        write_blocks(out, format, pcm.len() / 2, rate, level, |block| {
+            let (data, rest) = pcm.split_at(block.len());
+            block.copy_from_slice(data);
+            pcm = rest;
+            Ok(())
+        })
+    }
+
+    fn encoded_samples(format: u8, pcm: &[i16], rate: u32, level: u8) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        write_samples(&mut bytes, format, rate, level, pcm).unwrap();
+        bytes
+    }
 
     fn pcm_of(path: &Path) -> (u32, Vec<i16>) {
         let d = crate::audio::decode_file(&path.to_string_lossy()).unwrap();
@@ -529,7 +584,7 @@ mod tests {
         let mut pcm = noise_music(20000);
         pcm.extend(std::iter::repeat([32767i16, -32768]).take(300).flatten());
         pcm.extend(std::iter::repeat(0i16).take(1234));
-        for (name, bytes) in [("a.wav", wav_bytes(&pcm, 44100)), ("a.aiff", aiff_bytes(&pcm, 48000))] {
+        for (name, bytes) in [("a.wav", encoded_samples(1, &pcm, 44100, 0)), ("a.aiff", encoded_samples(2, &pcm, 48000, 0))] {
             let f = dir.join(name);
             std::fs::write(&f, bytes).unwrap();
             let (sr, back) = pcm_of(&f);
@@ -539,7 +594,7 @@ mod tests {
         let mut sizes = vec![];
         for level in [0u8, 2, 3, 5, 8] {
             let f = dir.join(format!("l{level}.flac"));
-            let bytes = flac_bytes(&pcm, 44100, level);
+            let bytes = encoded_samples(0, &pcm, 44100, level);
             sizes.push(bytes.len());
             std::fs::write(&f, bytes).unwrap();
             let (sr, back) = pcm_of(&f);
@@ -591,10 +646,40 @@ mod tests {
         let (sr, back) = pcm_of(&path);
         assert_eq!((sr, back.len()), (44100, 3 * 44100 * 2));
         assert_eq!(back, to_i16(&out));
+        for (format, filename) in [(0, "out.flac"), (2, "out.aiff")] {
+            let options = Options { format, flac_level: 0, ..opt.clone() };
+            let job = start(a.clone(), s.clone(), dir.join(filename), options, None).unwrap();
+            let path = job.rx.recv().unwrap().unwrap();
+            assert_eq!(pcm_of(&path).1, back, "{filename}");
+        }
         // A folder that is not there is reported with rekordbox's message.
         let job = start(a, s, dir.join("missing").join("out.wav"), opt, None).unwrap();
         assert_eq!(job.rx.recv().unwrap(), Err(MSG_NO_DEST.to_string()));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_long_render_can_stop_after_one_block_without_replacing_a_file() {
+        let dir = tempfile::tempdir().unwrap();
+        for format in [0, 1, 2] {
+            let dest = dir.path().join("existing");
+            std::fs::write(&dest, b"original recording").unwrap();
+            let opt = Options { format, rate: 44100, aac_bps: 192_000, flac_level: 0 };
+            let mut blocks = 0;
+            let result = encode(&dest, &opt, |file, kind| {
+                write_blocks(file, kind, 3 * 3600 * 44100, 44100, 0, |pcm| {
+                    assert!(pcm.len() <= 8192);
+                    blocks += 1;
+                    if blocks == 2 { return Err(String::new()); }
+                    pcm.fill(0);
+                    Ok(())
+                })
+            });
+            assert!(matches!(result, Err(ref message) if message.is_empty()));
+            assert_eq!(blocks, 2);
+            assert_eq!(std::fs::read(&dest).unwrap(), b"original recording");
+            assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+        }
     }
 
     #[test]
@@ -606,7 +691,9 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let pcm = noise_music(44100);
         let f = dir.join("a.m4a");
-        write(&f, &pcm, 44100, &Options { format: 3, rate: 44100, aac_bps: 192_000, flac_level: 5 }).unwrap();
+        let opt = Options { format: 3, rate: 44100, aac_bps: 192_000, flac_level: 5 };
+        encode(&f, &opt, |output, format| write_samples(output, format, 44100, 5, &pcm))
+            .unwrap().persist_noclobber(&f).unwrap();
         let d = crate::audio::decode_file(&f.to_string_lossy()).unwrap();
         assert_eq!(d.sr, 44100);
         assert!((d.duration() - 1.0).abs() < 0.1, "{}", d.duration());
