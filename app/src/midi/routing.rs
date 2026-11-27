@@ -299,7 +299,7 @@ mod tests {
     fn controller(name: &str) -> Arc<Device> {
         let text = format!("@file,1,{name}\r\nPlayPause,,Button,,900B,,,,,,,,,Fast;,\r\n");
         let map = MidiMap::load(name, None, Some(text.as_bytes())).unwrap();
-        Device::mapped(name, map, false, None)
+        Device::mapped(name, name.to_owned(), map, false, None)
     }
 
     fn press(h: &Hub, d: &Arc<Device>, name: &str, deck: u8, down: bool) {

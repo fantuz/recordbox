@@ -478,13 +478,21 @@ pub fn mapping_name(device: &str) -> String {
     format!("{}.midi.csv", file_stem(device))
 }
 
-/// Keep normal names interoperable. Lossy names use a separate namespace so an
-/// ordinary device named, for example, "Studio_A" cannot overwrite "Studio/A".
-pub fn local_file(dir: &Path, port: &str) -> PathBuf {
-    let stem = file_stem(port);
+fn hashed_file(dir: &Path, stem: &str, identity: &str) -> PathBuf {
     use sha2::{Digest, Sha256};
-    let hash = format!("{:x}", Sha256::digest(port.as_bytes()));
-    let distinct = dir.join("recordbox-overrides").join(format!("{stem}-{}.midi.csv", &hash[..24]));
+    let hash = format!("{:x}", Sha256::digest(identity.as_bytes()));
+    dir.join("recordbox-overrides").join(format!("{stem}-{}.midi.csv", &hash[..24]))
+}
+
+/// Keep ordinary port names interoperable, and namespace sanitized or ALSA names.
+pub fn local_file(dir: &Path, port: &str) -> PathBuf {
+    if let Some(endpoint) = alsa_key(port) {
+        // ALSA allocates the numeric client on connect. The labelled endpoint and
+        // its port number survive a reboot and distinguish a controller's ports.
+        return hashed_file(dir, &file_stem(&endpoint), &format!("ALSA\0{endpoint}"));
+    }
+    let stem = file_stem(port);
+    let distinct = hashed_file(dir, &stem, port);
     if stem != port || port.contains(',') || distinct.is_file() {
         return distinct;
     }
@@ -496,22 +504,70 @@ pub fn local_file(dir: &Path, port: &str) -> PathBuf {
         Ok(bytes) if CsvFile::parse(&bytes).is_ok_and(|csv| device_matches(port, &csv.device)) => standard,
         _ => distinct,
     }
-
 }
 
-fn alsa_endpoint(name: &str) -> Option<(&str, &str, &str)> {
+fn alsa_endpoint(name: &str) -> Option<(&str, &str, u16, u16)> {
     // midir ALSA: "client:port client_id:port_id". Remove an address only after
     // recognizing the whole form; numbers inside device names are significant.
     let (labels, address) = name.rsplit_once(' ')?;
     let (client_id, port_id) = address.split_once(':')?;
     let (client, port) = labels.split_once(':')?;
-    if client_id.parse::<u16>().is_err() || port_id.parse::<u16>().is_err() || client.is_empty() || port.is_empty() { return None; }
-    Some((client, port, client_id))
+    if client.is_empty() || port.is_empty() { return None; }
+    Some((client, port, client_id.parse().ok()?, port_id.parse().ok()?))
+}
+
+pub fn alsa_key(name: &str) -> Option<String> {
+    let (client, port, _, port_id) = alsa_endpoint(name)?;
+    Some(format!("{client}:{port} #{port_id}"))
+}
+
+/// Recover one local delta from versions that included the transient client number
+/// in its file name. A model-level header is insufficient to identify an old port.
+pub fn legacy_file(dir: &Path, device: &str) -> Option<PathBuf> {
+    let Some(key) = alsa_key(&header_name(device)) else {
+        let path = dir.join(format!("{}.midi.csv", legacy_stem(device)));
+        // Reserved names such as CON.midi.csv can open a device on Windows.
+        if cfg!(windows) && path.file_name()? != std::ffi::OsStr::new(&mapping_name(device)) { return None; }
+        return Some(path);
+    };
+    let old_dir = dir.join("recordbox-overrides");
+    let (labels, _) = device.rsplit_once(' ')?;
+    let prefix = file_stem(labels);
+    // With long names, the old hash filename's prefix can also include the address;
+    // the prefix before that address is always retained up to the truncation limit.
+    let legacy_prefix = legacy_stem(labels);
+    let mut found = None;
+    for folder in [dir, old_dir.as_path()] {
+        let Ok(entries) = std::fs::read_dir(folder) else { continue };
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let Some(name) = name.to_str() else { continue };
+            if !name.ends_with(".midi.csv") || !(name.starts_with(&prefix) || name.starts_with(&legacy_prefix)) { continue; }
+            if !entry.file_type().is_ok_and(|ty| ty.is_file()) { continue; }
+            let path = entry.path();
+            let Ok(bytes) = read_file(&path) else { continue };
+            let Ok(csv) = validate_import(device, &bytes) else { continue };
+            if bare_header(&csv) || alsa_key(&csv.device).as_ref() != Some(&key) { continue; }
+            // A previous imported file can carry a model-only header. Only a raw
+            // address header matching its historical filename identifies a port.
+            let Some((_, address)) = csv.device.rsplit_once(' ') else { continue };
+            let old_port = format!("{labels} {address}");
+            let old_path = if folder == dir {
+                dir.join(format!("{}.midi.csv", legacy_stem(&old_port)))
+            } else {
+                hashed_file(dir, &file_stem(&old_port), &old_port)
+            };
+            if path != old_path { continue; }
+            if found.is_some() { return None; }
+            found = Some(path);
+        }
+    }
+    found
 }
 
 fn names_for_mapping(port: &str) -> Vec<&str> {
     let mut names = vec![port];
-    if let Some((client, endpoint, _)) = alsa_endpoint(port) {
+    if let Some((client, endpoint, _, _)) = alsa_endpoint(port) {
         if endpoint.eq_ignore_ascii_case(client) || endpoint.strip_suffix(" MIDI 1").is_some_and(|p| p.eq_ignore_ascii_case(client)) ||
             endpoint == "MIDI 1" {
             names.push(client);
@@ -524,6 +580,7 @@ fn names_for_mapping(port: &str) -> Vec<&str> {
 
 pub fn device_matches(port: &str, header: &str) -> bool {
     names_for_mapping(port).iter().any(|name| header.eq_ignore_ascii_case(&header_name(name)))
+        || alsa_key(header).is_some_and(|key| Some(key) == alsa_key(&header_name(port)))
 }
 
 fn duplicate_base(name: &str) -> Option<&str> {
@@ -687,10 +744,10 @@ pub fn paired_output(input: &str, outputs: &[String]) -> Option<usize> {
     let exact: Vec<_> = outputs.iter().enumerate().filter_map(|(i, n)| (n == input).then_some(i)).collect();
     if !exact.is_empty() { return unique(exact.into_iter()); }
     let alsa = alsa_endpoint(input);
-    let other = counterpart(alsa.map(|(_, leaf, _)| leaf).unwrap_or(input))?;
+    let other = counterpart(alsa.map(|(_, leaf, _, _)| leaf).unwrap_or(input))?;
     unique(outputs.iter().enumerate().filter_map(|(i, n)| {
         let matched = match (alsa, alsa_endpoint(n)) {
-            (Some((client, _, id)), Some((out_client, leaf, out_id))) => id == out_id && client == out_client && leaf.eq_ignore_ascii_case(&other),
+            (Some((client, _, id, _)), Some((out_client, leaf, out_id, _))) => id == out_id && client == out_client && leaf.eq_ignore_ascii_case(&other),
             (None, None) => n.eq_ignore_ascii_case(&other),
             _ => false,
         };
@@ -887,12 +944,44 @@ mod tests {
     }
 
     #[test]
+    fn alsa_learned_file_survives_client_renumbering_and_distinguishes_ports() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path();
+        let old = "Deck:Deck MIDI 1 24:0";
+        let now = "Deck:Deck MIDI 1 43:0";
+        assert_eq!(local_file(dir, old), local_file(dir, now));
+        for different in ["Deck:Deck MIDI 1 43:1", "Deck:Knobs 43:0", "Other:Deck MIDI 1 43:0"] {
+            assert_ne!(local_file(dir, different), local_file(dir, now));
+            assert!(!device_matches(different, old));
+        }
+        let saved = format!("{}# recordbox local override\r\n", empty_user_file(old));
+        assert!(validate_import(now, saved.as_bytes()).is_ok());
+        let old_hash = hashed_file(dir, &file_stem(old), old);
+        std::fs::create_dir(old_hash.parent().unwrap()).unwrap();
+        std::fs::write(&old_hash, &saved).unwrap();
+        assert_eq!(legacy_file(dir, now).as_ref(), Some(&old_hash));
+        assert!(!local_file(dir, now).exists(), "recovery must be read-only");
+        let old_plain = dir.join(format!("{}.midi.csv", legacy_stem(old)));
+        for unusable in [empty_user_file(old), format!("{}broken", empty_user_file(old)),
+            format!("{}# generic model", empty_user_file("Deck"))] {
+            std::fs::write(&old_plain, unusable).unwrap();
+            assert_eq!(legacy_file(dir, now).as_ref(), Some(&old_hash));
+        }
+        std::fs::write(&old_plain, &saved).unwrap();
+        assert_eq!(legacy_file(dir, now), None, "two eligible histories are ambiguous");
+        assert_eq!(std::fs::read(&old_hash).unwrap(), saved.as_bytes());
+        assert_eq!(std::fs::read(&old_plain).unwrap(), saved.as_bytes());
+    }
+
+    #[test]
     fn midi_names_resolve_without_crossing_device_or_port_boundaries() {
         let names = |s: &[&str]| s.iter().map(|n| n.to_string()).collect::<Vec<_>>();
         assert_eq!(paired_output("DDJ-FLX4", &names(&["Other", "DDJ-FLX4"])), Some(1));
         assert_eq!(paired_output("Controller MIDI In", &names(&["Controller MIDI Out", "Other MIDI Out"])), Some(0));
         assert_eq!(paired_output("MIDIIN2 (Controller)", &names(&["MIDIOUT (Controller)", "MIDIOUT2 (Controller)"])), Some(1));
         assert_eq!(paired_output("Deck:Deck In 24:0", &names(&["Deck:Deck Out 25:0", "Deck:Deck Out 24:1"])), Some(1));
+        // Two midir virtual fixtures are separate ALSA clients even with identical labels.
+        assert_eq!(paired_output("test:recordbox controller 128:0", &names(&["test:recordbox controller 129:0"])), None);
         assert_eq!(paired_output("Deck In", &names(&["Deck Out", "DECK OUT"])), None);
         assert_eq!(paired_output("Deck", &names(&["Deck", "Deck"])), None);
         assert_eq!(paired_output("Deck", &names(&["Other"])), None);

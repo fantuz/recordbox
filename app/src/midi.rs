@@ -32,6 +32,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering::Relaxed};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+mod ports;
 mod routing;
 use routing::{Platter, Routing};
 pub(crate) use routing::change_mode;
@@ -668,9 +669,9 @@ pub enum Param {
 pub enum UiEvent {
     Control { device: String, tag: u32, deck: u8, val: Val, fast_done: bool, seq: u64 },
     /// A message seen while LEARN is armed.
-    Learn { device: String, msg: [u8; 3] },
+    Learn { device: std::sync::Weak<Device>, msg: [u8; 3] },
     /// A device came or went.
-    Ports,
+    Ports { removed: Vec<String>, paused: Vec<String> },
 }
 
 struct OutState {
@@ -684,6 +685,7 @@ struct OutState {
 /// One connected controller.
 pub struct Device {
     pub name: String,
+    input_id: String,
     pub map: Mutex<MidiMap>,
     /// The rekordbox installed here has a factory mapping for it.
     pub factory: bool,
@@ -711,10 +713,11 @@ pub struct Device {
 }
 
 impl Device {
-    fn mapped(name: &str, map: MidiMap, factory: bool, conn: Option<midir::MidiOutputConnection>) -> Arc<Self> {
+    fn mapped(name: &str, input_id: String, map: MidiMap, factory: bool, conn: Option<midir::MidiOutputConnection>) -> Arc<Self> {
         let cpr = jog_counts(name);
         let dev = Arc::new(Self {
             name: name.to_string(),
+            input_id,
             map: Mutex::new(map),
             factory,
             needs_auth: needs_auth(name),
@@ -945,6 +948,7 @@ pub fn needs_auth(name: &str) -> bool {
 pub struct Hub {
     playback_enabled: bool,
     routing: Mutex<Routing>,
+    paused_input_names: Mutex<Vec<String>>,
     mode_epoch: Arc<AtomicU64>,
     pub devices: Mutex<Vec<Arc<Device>>>,
     pub decks: [Arc<Mutex<PlayState>>; 4],
@@ -997,6 +1001,7 @@ impl Hub {
         let hub = Hub {
             playback_enabled,
             routing: Mutex::new(Routing::default()),
+            paused_input_names: Default::default(),
             mode_epoch: Arc::default(),
             devices: Mutex::new(vec![]),
             decks,
@@ -1052,12 +1057,11 @@ impl Hub {
     pub fn load_map(&self, device: &str) -> (MidiMap, bool) {
         let factory = self.factory_mapping(device);
         let local = self.user_file(device);
-        let legacy = self.user_dir.join(format!("{}.midi.csv", crate::midi_csv::legacy_stem(device)));
-        // An old reserved name (e.g. CON.midi.csv) can denote a device on Windows.
-        let legacy_allowed = !cfg!(windows) || legacy.file_name() == Some(std::ffi::OsStr::new(&crate::midi_csv::mapping_name(device)));
-        let legacy = (legacy != local && legacy_allowed).then_some(legacy);
-        let native = crate::midi_csv::native_user_files(&self.native_user_dirs, device);
-        let inputs = std::iter::once((local, true)).chain(legacy.map(|p| (p, true))).chain(native.into_iter().map(|p| (p, false)));
+        let legacy = || crate::midi_csv::legacy_file(&self.user_dir, device).filter(|path| *path != local);
+        let native = || crate::midi_csv::native_user_files(&self.native_user_dirs, device);
+        let inputs = std::iter::once((local.clone(), true))
+            .chain(std::iter::once_with(legacy).flatten().map(|p| (p, true)))
+            .chain(std::iter::once_with(native).flatten().map(|p| (p, false)));
         for (path, own) in inputs {
             if let Ok(data) = crate::midi_csv::read_file(&path) {
                 let Ok(csv) = crate::midi_csv::validate_import(device, &data) else { continue };
@@ -1093,43 +1097,44 @@ impl Hub {
     pub fn scan(self: &Arc<Self>) {
         let Ok(mut input) = midir::MidiInput::new("recordbox") else { return };
         input.ignore(midir::Ignore::None);
-        let ports: Vec<_> = input.ports().into_iter().filter_map(|port| input.port_name(&port).ok().map(|name| (port, name))).collect();
+        let Some(mut previous) = self.paused_input_names.try_lock() else { return };
         let ignore = self.ignore.lock().clone();
         let only = self.only.lock().clone();
-        // Gone: their threads end and their ports close.
-        let mut changed = false;
-        {
-            let mut devs = self.devices.lock();
-            devs.retain(|d| {
-                let there = ports.iter().any(|(_, name)| *name == d.name);
-                if !there {
-                    d.alive.store(false, Relaxed);
-                    d.in_conn.lock().take();
-                    d.out_cv.notify_all();
-                    changed = true;
-                }
-                there
-            });
+        let ports: Vec<_> = input.ports().into_iter().filter_map(|port| {
+            let name = input.port_name(&port).ok()?;
+            if name.is_empty() || name == "<error>" || name == "Arduino Leonardo" || ignore.contains(&name)
+                || only.as_ref().is_some_and(|allowed| !allowed.contains(&name)) {
+                return None;
+            }
+            let id = port.id();
+            Some((name, id, port))
+        }).collect();
+        let visible = ports::Inputs::inspect(ports.iter().map(|(name, id, _)| (name.as_str(), id.as_str())));
+        let mut changed = *previous != visible.paused;
+        let mut removed = Vec::new();
+        // Retire old workers before a replacement can send its first note.
+        let gone: Vec<_> = self.devices.lock().extract_if(.., |d| !visible.contains(&d.name, &d.input_id)).collect();
+        for device in gone {
+            device.alive.store(false, Relaxed);
+            device.in_conn.lock().take();
+            device.out_cv.notify_all();
+            self.release_device(&device);
+            removed.push(device.name.clone());
+            changed = true;
         }
-        for (port, name) in ports {
-            // rekordbox passes over its own port, "<error>" and "Arduino Leonardo".
-            if only.as_ref().is_some_and(|o| !o.contains(&name)) {
-                continue;
-            }
-            if ignore.contains(&name) || name == "<error>" || name == "Arduino Leonardo" || name.is_empty() || self.device(&name).is_some() {
-                continue;
-            }
-            if self.connect(&name, &port).is_some() {
+        for (name, id, port) in ports {
+            if visible.contains(&name, &id) && self.device(&name).is_none() && self.connect(&name, id, &port).is_some() {
                 changed = true;
             }
         }
         if changed {
-            let _ = self.tx.send(UiEvent::Ports);
+            let _ = self.tx.send(UiEvent::Ports { removed, paused: visible.paused.clone() });
             self.wake();
         }
+        *previous = visible.paused;
     }
 
-    fn connect(self: &Arc<Self>, name: &str, port: &midir::MidiInputPort) -> Option<Arc<Device>> {
+    fn connect(self: &Arc<Self>, name: &str, input_id: String, port: &midir::MidiInputPort) -> Option<Arc<Device>> {
         let (map, factory) = self.load_map(name);
         let conn = midir::MidiOutput::new("recordbox").ok().and_then(|out| {
             let ports: Vec<_> = out.ports().into_iter().filter_map(|p| out.port_name(&p).ok().map(|n| (n, p))).collect();
@@ -1137,7 +1142,7 @@ impl Hub {
             let index = crate::midi_csv::paired_output(name, &names)?;
             out.connect(&ports[index].1, "recordbox-out").ok()
         });
-        let dev = Device::mapped(name, map, factory, conn);
+        let dev = Device::mapped(name, input_id, map, factory, conn);
         // The callback only queues; the worker does the rest.
         let (tx, rx) = crossbeam_channel::unbounded();
         let device_epoch = dev.input_epoch.clone();
@@ -1193,7 +1198,7 @@ impl Hub {
         }
         dev.received.fetch_add(1, Relaxed);
         if dev.learning.load(Relaxed) {
-            let _ = self.tx.send(UiEvent::Learn { device: dev.name.clone(), msg });
+            let _ = self.tx.send(UiEvent::Learn { device: Arc::downgrade(dev), msg });
             self.wake();
             return;
         }
@@ -1642,6 +1647,7 @@ pub struct MidiState {
     pub win: crate::ui_midi::Win,
     /// Device names, as the MIDI setting window lists them.
     pub devices: Vec<String>,
+    pub paused_inputs: Vec<String>,
     /// The beat jump pads' page per deck (1..9; 5 puts 1 beat on the first pad).
     pub jump_page: [u8; 4],
     /// Instant Doubles asked for: (deck, source deck), waiting for the track to be read.
@@ -1660,7 +1666,7 @@ pub struct MidiState {
 
 impl Default for MidiState {
     fn default() -> MidiState {
-        MidiState { hub: None, rx: None, _keeper: None, win: Default::default(), devices: vec![], jump_page: [5; 4], pending_double: None, stub_log: vec![], last_tempo: [0.0; 4], last_iso: [false; 4], last_follow: [false; 4], started: false, handled: 0 }
+        MidiState { hub: None, rx: None, _keeper: None, win: Default::default(), devices: vec![], paused_inputs: vec![], jump_page: [5; 4], pending_double: None, stub_log: vec![], last_tempo: [0.0; 4], last_iso: [false; 4], last_follow: [false; 4], started: false, handled: 0 }
     }
 }
 
@@ -1819,11 +1825,22 @@ fn apply_pending(app: &mut App, hub: &Arc<Hub>) {
     let events: Vec<UiEvent> = app.midi.rx.as_ref().map(|r| r.try_iter().collect()).unwrap_or_default();
     for ev in events {
         match ev {
-            UiEvent::Ports => {
+            UiEvent::Ports { removed, paused } => {
+                if paused.iter().any(|name| !app.midi.paused_inputs.contains(name)) {
+                    app.toast_err(format!("MIDI input paused for controllers with conflicting port names ({}). Disconnect one or give their inputs distinct names.", paused.join(", ")));
+                }
+                app.midi.paused_inputs = paused;
                 app.midi.devices = hub.devices.lock().iter().map(|d| d.name.clone()).collect();
-                crate::ui_midi::devices_changed(app);
+                crate::ui_midi::devices_changed(app, &removed);
             }
-            UiEvent::Learn { device, msg } => crate::ui_midi::learn_message(app, &device, msg),
+            UiEvent::Learn { device, msg } => {
+                // Keep a same-name hotplug from replacing the selected device while its
+                // physical input is being committed to the map.
+                let _scan = hub.paused_input_names.lock();
+                if let Some(d) = device.upgrade().filter(|d| d.alive.load(Relaxed) && d.learning.load(Relaxed)) {
+                    crate::ui_midi::learn_message(app, &d.name, msg);
+                }
+            }
             UiEvent::Control { device, tag, deck, val, fast_done, seq } => {
                 if let Some(f) = registry().get(tag) {
                     app.midi.handled += 1;
@@ -2976,6 +2993,35 @@ mod tests {
     }
 
     #[test]
+    fn browsing_and_closing_midi_learn_preserves_native_updates_and_empty_devices() {
+        let temp = tempfile::tempdir().unwrap();
+        let native = temp.path().join("native");
+        let local = temp.path().join("recordbox");
+        std::fs::create_dir(&native).unwrap();
+        let contents = |code| format!("@file,1,Deck\r\nPlayPause,PlayPause,Button,{code:04X},,,,,,,,,,,\r\n");
+        let native_file = native.join("Deck.midi.csv");
+        std::fs::write(&native_file, contents(0x9010)).unwrap();
+        let decks = std::array::from_fn(|_| Arc::new(Mutex::new(PlayState::default())));
+        let (mut hub, _) = Hub::new(decks, local.clone(), true);
+        let h = Arc::get_mut(&mut hub).unwrap();
+        h.native_user_dirs = vec![native];
+        h.factory_dirs.clear();
+        for device in ["Deck", "Empty"] {
+            let (map, factory) = h.load_map(device);
+            h.devices.lock().push(Device::mapped(device, device.into(), map, factory, None));
+        }
+        let mut midi = MidiState { hub: Some(hub.clone()), ..Default::default() };
+        midi.win.open = true;
+        crate::ui_midi::select_device(&mut midi, "Deck");
+        crate::ui_midi::select_device(&mut midi, "Empty");
+        crate::ui_midi::close(&mut midi);
+        assert!(!local.exists(), "read-only navigation must never create a delta");
+        std::fs::write(native_file, contents(0x9011)).unwrap();
+        let updated = hub.load_map("Deck").0;
+        assert_eq!(updated.live_inputs().map(|i| i.e.code).collect::<Vec<_>>(), [0x9011]);
+    }
+
+    #[test]
     fn first_connection_reads_native_mappings_without_writing_and_local_edits_take_precedence() {
         let temp = tempfile::tempdir().unwrap();
         let native = temp.path().join("native");
@@ -3017,6 +3063,29 @@ mod tests {
         assert_eq!(std::fs::read(native.join(name)).unwrap(), original.as_bytes());
     }
 
+    #[test]
+    fn alsa_reconnect_reads_previous_assignment_and_only_saves_to_stable_file() {
+        let temp = tempfile::tempdir().unwrap();
+        let decks = std::array::from_fn(|_| Arc::new(Mutex::new(PlayState::default())));
+        let (mut hub, _) = Hub::new(decks, temp.path().to_owned(), true);
+        let h = Arc::get_mut(&mut hub).unwrap();
+        h.factory_dirs.clear();
+        h.native_user_dirs.clear();
+        let original = "Deck:Deck MIDI 1 24:0";
+        let reconnected = "Deck:Deck MIDI 1 42:0";
+        let csv = |port, code| format!("@file,1,{port}\r\nPlayPause,PlayPause,Button,{code:04X},,,,,,,,,,,\r\n");
+        let old_path = temp.path().join(format!("{}.midi.csv", crate::midi_csv::legacy_stem(original)));
+        let old_mapping = csv(original, 0x9012);
+        std::fs::write(&old_path, &old_mapping).unwrap();
+        let codes = |port| h.load_map(port).0.live_inputs().map(|i| i.e.code).collect::<Vec<_>>();
+        assert_eq!(codes(reconnected), [0x9012]);
+        assert!(codes("Deck:Deck MIDI 1 42:1").is_empty());
+        assert!(!h.user_file(reconnected).exists());
+        h.write_override(reconnected, csv(reconnected, 0x9013).as_bytes()).unwrap();
+        assert_eq!(codes("Deck:Deck MIDI 1 51:0"), [0x9013]);
+        assert_eq!(std::fs::read(old_path).unwrap(), old_mapping.as_bytes());
+    }
+
     fn tone(secs: f64) -> Arc<crate::audio::Decoded> {
         let n = (44100.0 * secs) as usize;
         Arc::new(crate::audio::Decoded { sr: 44100, samples: vec![0.0; n * 2], raw_frames: n, damaged: 0, truncated: false })
@@ -3040,7 +3109,7 @@ mod tests {
         assert!(!deck.playing);
     }
 
-    #[cfg(unix)]
+    #[cfg(target_os = "macos")]
     fn wait(what: &str, mut ok: impl FnMut() -> bool) {
         let t0 = Instant::now();
         while !ok() {
@@ -3053,7 +3122,7 @@ mod tests {
     /// that receives the LEDs) is found by name, its user mapping is loaded, notes and CCs
     /// change the decks and the mixer in the engine without any interface frame, and the
     /// LED messages come back out.
-    #[cfg(unix)]
+    #[cfg(target_os = "macos")]
     #[test]
     fn a_virtual_controller_plays_a_deck_moves_the_mixer_and_gets_its_leds() {
         use midir::os::unix::{VirtualInput, VirtualOutput};
@@ -3119,7 +3188,7 @@ mod tests {
         let dev = hub.device(&name).expect("the virtual controller is found by its port name");
         assert!(dev.has_output && !dev.factory && !dev.needs_auth);
         assert_eq!(dev.interval_ms.load(Relaxed), 2);
-        assert!(matches!(rx.try_recv(), Ok(UiEvent::Ports)));
+        assert!(matches!(rx.try_recv(), Ok(UiEvent::Ports { .. })));
         // A second scan does not connect it twice.
         hub.scan();
         assert_eq!(hub.devices.lock().iter().filter(|d| d.name == name).count(), 1);

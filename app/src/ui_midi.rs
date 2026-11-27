@@ -132,7 +132,7 @@ pub fn header_button(app: &mut App, ui: &mut Ui, r: Rect) {
     let enabled = app.midi.connected();
     // Without a controller the window closes (rekordbox: `updateMidiLearnButton`).
     if !enabled && app.midi.win.open {
-        close(app);
+        close(&mut app.midi);
     }
     let resp = ui.interact(r.expand2(vec2(2.0, 4.0)), ui.id().with("midi_button"), if enabled { Sense::click() } else { Sense::hover() });
     // Arial Bold, JUCE height 12. Disabled: #363636 as measured on the reference
@@ -141,10 +141,12 @@ pub fn header_button(app: &mut App, ui: &mut Ui, r: Rect) {
     ui.painter().text(r.center() + vec2(0.0, 0.5), Align2::CENTER_CENTER, "MIDI", caps(10.7), col);
     app.midi.win.at.insert("MIDI".into(), r.center());
     let base = "MIDI LEARN :\nSelect a function, enable LEARN, then move a control on the selected device. LEARN pauses its current mappings until you turn it off.";
-    let tip = if enabled { base.to_string() } else { format!("{base}\nThis can be used after a MIDI controller is connected.") };
+    let tip = if !app.midi.paused_inputs.is_empty() {
+        format!("{base}\nMIDI input is paused for {} because the names conflict. Disconnect one or give their inputs distinct names.", app.midi.paused_inputs.join(", "))
+    } else if enabled { base.to_string() } else { format!("{base}\nThis can be used after a MIDI controller is connected.") };
     if resp.on_hover_text(tip).clicked() && enabled {
         if app.midi.win.open {
-            close(app);
+            close(&mut app.midi);
         } else {
             app.midi.win.open = true;
         }
@@ -153,57 +155,55 @@ pub fn header_button(app: &mut App, ui: &mut Ui, r: Rect) {
 
 // ---------------------------------------------------------------------- window logic
 
-/// Close the window: learning stops and the mapping is saved.
-pub fn close(app: &mut App) {
-    set_learn(app, false);
-    save(app);
-    let w = &mut app.midi.win;
+/// Edits are saved when applied. Browsing and closing preserve the source mapping.
+pub fn close(midi: &mut MidiState) {
+    set_learn(midi, false);
+    let w = &mut midi.win;
     w.open = false;
     w.edit = None;
     w.alert = None;
     w.ask = None;
 }
 
-fn device(app: &App) -> Option<std::sync::Arc<Device>> {
-    app.midi.hub.as_ref()?.device(&app.midi.win.device)
+fn device(midi: &MidiState) -> Option<std::sync::Arc<Device>> {
+    midi.hub.as_ref()?.device(&midi.win.device)
 }
 
 fn save(app: &mut App) {
-    if let (Some(hub), Some(dev)) = (app.midi.hub.clone(), device(app)) {
+    if let (Some(hub), Some(dev)) = (app.midi.hub.clone(), device(&app.midi)) {
         if let Err(e) = hub.save_map(&dev) {
             app.toast_err(format!("The MIDI setting could not be saved: {e}"));
         }
     }
 }
 
-pub fn set_learn(app: &mut App, on: bool) {
-    let on = on && device(app).is_some();
-    app.midi.win.learn = on;
-    app.midi.win.filter.reset();
-    if let Some(hub) = app.midi.hub.as_ref() {
+pub fn set_learn(midi: &mut MidiState, on: bool) {
+    let on = on && device(midi).is_some();
+    midi.win.learn = on;
+    midi.win.filter.reset();
+    if let Some(hub) = midi.hub.as_ref() {
         let devices = hub.devices.lock().clone();
         for d in &devices {
-            hub.set_learning(d, on && d.name == app.midi.win.device);
+            hub.set_learning(d, on && d.name == midi.win.device);
         }
     }
 }
 
 /// Pick the device to edit (or none): learning stops, the table shows its mapping.
-pub fn select_device(app: &mut App, name: &str) {
-    set_learn(app, false);
-    save(app);
-    app.midi.win.device = name.to_string();
-    app.midi.win.edit = None;
-    rebuild_rows(app);
+pub fn select_device(midi: &mut MidiState, name: &str) {
+    set_learn(midi, false);
+    midi.win.device = name.to_string();
+    midi.win.edit = None;
+    rebuild_rows(midi);
 }
 
 /// The table of the selected device (`addMidiLearnTableData`): every input that is not
 /// read-only and whose function is one of the window's commands, with its output; then the
 /// outputs that have no input (indicators).
-pub fn rebuild_rows(app: &mut App) {
+pub fn rebuild_rows(midi: &mut MidiState) {
     let reg = registry();
     let mut rows: Vec<Vec<LearnRow>> = vec![vec![]; TABS.len()];
-    if let Some(dev) = device(app) {
+    if let Some(dev) = device(midi) {
         let map = dev.map.lock();
         let mut ins: Vec<&crate::midi_csv::Entry> = map.live_inputs().map(|i| &i.e).collect();
         ins.sort_by_key(|e| e.code);
@@ -236,24 +236,24 @@ pub fn rebuild_rows(app: &mut App) {
             }
         }
     }
-    let w = &mut app.midi.win;
+    let w = &mut midi.win;
     w.rows = rows;
     w.sel = vec![None; TABS.len()];
     w.sort = None;
 }
 
 /// The device list changed.
-pub fn devices_changed(app: &mut App) {
+pub fn devices_changed(app: &mut App, removed: &[String]) {
     let name = app.midi.win.device.clone();
-    if !name.is_empty() && !app.midi.devices.contains(&name) {
+    if !name.is_empty() && (removed.contains(&name) || !app.midi.devices.contains(&name)) {
         // The selected controller was unplugged.
         app.midi.win.learn = false;
         app.midi.win.device.clear();
         app.midi.win.edit = None;
-        rebuild_rows(app);
+        rebuild_rows(&mut app.midi);
     }
     if app.midi.devices.is_empty() && app.midi.win.open {
-        close(app);
+        close(&mut app.midi);
     }
 }
 
@@ -292,9 +292,9 @@ fn show_clash(app: &mut App) {
 fn commit_in(app: &mut App, r: usize, new: Option<u16>) -> bool {
     let tab = app.midi.win.tab;
     let Some(row) = app.midi.win.rows.get(tab).and_then(|v| v.get(r)).cloned() else { return false };
-    let Some(dev) = device(app) else { return false };
+    let Some(dev) = device(&app.midi) else { return false };
     if row.input == new {
-        return true;
+        return false;
     }
     let reg = registry();
     let res = dev.map.lock().change_input(&row.entry(), row.input, new, &|n| reg.learnable(n));
@@ -315,9 +315,9 @@ fn commit_in(app: &mut App, r: usize, new: Option<u16>) -> bool {
 fn commit_out(app: &mut App, r: usize, new: Option<u16>) -> bool {
     let tab = app.midi.win.tab;
     let Some(row) = app.midi.win.rows.get(tab).and_then(|v| v.get(r)).cloned() else { return false };
-    let Some(dev) = device(app) else { return false };
+    let Some(dev) = device(&app.midi) else { return false };
     if row.output == new {
-        return true;
+        return false;
     }
     let reg = registry();
     let res = dev.map.lock().change_output(&row.entry(), row.output, new, &|n| reg.learnable(n));
@@ -339,7 +339,8 @@ fn commit_out(app: &mut App, r: usize, new: Option<u16>) -> bool {
 fn commit_row(app: &mut App, r: usize) {
     let tab = app.midi.win.tab;
     let Some(row) = app.midi.win.rows.get(tab).and_then(|v| v.get(r)).cloned() else { return };
-    let Some(dev) = device(app) else { return };
+    let Some(dev) = device(&app.midi) else { return };
+    if row.input.is_none() && row.output.is_none() { return; }
     dev.map.lock().rewrite(&row.entry(), row.input, row.output);
     dev.reindex();
     save(app);
@@ -398,7 +399,8 @@ pub fn delete_row(app: &mut App) {
     }
     let row = app.midi.win.rows[tab].remove(r);
     app.midi.win.sel[tab] = None;
-    if let Some(dev) = device(app) {
+    if row.input.is_none() && row.output.is_none() { return; }
+    if let Some(dev) = device(&app.midi) {
         dev.map.lock().delete(row.input, row.output);
         dev.reindex();
     }
@@ -421,7 +423,7 @@ fn pick_file(save_name: Option<&str>) -> Option<std::path::PathBuf> {
 /// could not be written; None when no place was chosen.
 pub fn export(app: &mut App) -> Option<bool> {
     let hub = app.midi.hub.clone()?;
-    let dev = device(app)?;
+    let dev = device(&app.midi)?;
     let path = pick_file(Some(&crate::midi_csv::export_name(&dev.name)))?;
     let text = dev.map.lock().save_text();
     match hub.export_file(&path, text.as_bytes()) {
@@ -435,7 +437,7 @@ pub fn export(app: &mut App) -> Option<bool> {
 
 /// Import into the recordbox copy only after validating the selected file.
 pub fn import(app: &mut App) {
-    let (Some(hub), Some(dev)) = (app.midi.hub.clone(), device(app)) else { return };
+    let (Some(hub), Some(dev)) = (app.midi.hub.clone(), device(&app.midi)) else { return };
     let Some(path) = pick_file(None) else { return };
     if let Err(e) = crate::midi_csv::read_file(&path).and_then(|bytes| hub.write_override(&dev.name, &bytes)) {
         app.midi.win.alert = Some(("Cannot import the MIDI setting file".into(), e.to_string()));
@@ -443,19 +445,19 @@ pub fn import(app: &mut App) {
     }
     *dev.map.lock() = hub.load_map(&dev.name).0;
     dev.reindex();
-    rebuild_rows(app);
+    rebuild_rows(&mut app.midi);
 }
 
 /// Reset this recordbox device to its factory mapping, including when a native user map exists.
 pub fn reset_default(app: &mut App) {
-    let (Some(hub), Some(dev)) = (app.midi.hub.clone(), device(app)) else { return };
+    let (Some(hub), Some(dev)) = (app.midi.hub.clone(), device(&app.midi)) else { return };
     if let Err(e) = hub.write_override(&dev.name, crate::midi_csv::empty_user_file(&dev.name).as_bytes()) {
         app.midi.win.alert = Some(("MIDI settings could not be reset".into(), e.to_string()));
         return;
     }
     *dev.map.lock() = hub.load_map(&dev.name).0;
     dev.reindex();
-    rebuild_rows(app);
+    rebuild_rows(&mut app.midi);
 }
 
 fn sort_rows(w: &mut Win, col: usize) {
@@ -574,7 +576,7 @@ pub fn window(app: &mut App, ctx: &egui::Context) {
         return;
     }
     if app.midi.win.rows.len() != TABS.len() {
-        rebuild_rows(app);
+        rebuild_rows(&mut app.midi);
     }
     let origin = *app.midi.win.pos.get_or_insert(pos2(100.0, 128.0));
     let outer = Rect::from_min_size(origin - vec2(0.0, TITLE_H), vec2(W, H + TITLE_H));
@@ -618,7 +620,7 @@ pub fn window(app: &mut App, ctx: &egui::Context) {
         content(app, &mut child, origin, !modal);
     });
     if close_now {
-        close(app);
+        close(&mut app.midi);
         return;
     }
     dialogs(app, ctx);
@@ -627,7 +629,7 @@ pub fn window(app: &mut App, ctx: &egui::Context) {
 fn content(app: &mut App, ui: &mut Ui, o: Pos2, live: bool) {
     let p = ui.painter().clone();
     let at = |x: f32, y: f32, w: f32, h: f32| Rect::from_min_size(o + vec2(x, y), vec2(w, h));
-    let has_dev = device(app).is_some();
+    let has_dev = device(&app.midi).is_some();
     let tips = app.prefs.tooltips;
     let tip = move |r: egui::Response, t: &str| if tips { r.on_hover_text(t) } else { r };
 
@@ -643,11 +645,11 @@ fn content(app: &mut App, ui: &mut Ui, o: Pos2, live: bool) {
     let mut at_map = std::mem::take(&mut app.midi.win.at);
     if let Some(i) = menu_popup(ui, &cresp, ui.id().with("device_pop"), 208.0, &names, &mut at_map) {
         app.midi.win.at = at_map;
-        select_device(app, &names[i]);
+        select_device(&mut app.midi, &names[i]);
     } else {
         app.midi.win.at = at_map;
     }
-    if let Some(d) = device(app).filter(|d| d.needs_auth) {
+    if let Some(d) = device(&app.midi).filter(|d| d.needs_auth) {
         p.text(o + vec2(240.0, 52.0), Align2::LEFT_CENTER, format!("{}: rekordbox unlocks this model with a hardware handshake that recordbox does not have. It may not respond.", d.name), jf(13.0), hex(0xE04848));
     }
 
@@ -705,7 +707,7 @@ fn content(app: &mut App, ui: &mut Ui, o: Pos2, live: bool) {
     app.midi.win.at.insert("LEARN".into(), r.center());
     if tip(text_button(ui, r, "learn", "LEARN", app.midi.win.learn, en, (false, false)), "Click to enter the MIDI LEARN standby mode. \nUsing a MIDI controller, you can operate selected feature.").clicked() {
         let on = !app.midi.win.learn;
-        set_learn(app, on);
+        set_learn(&mut app.midi, on);
     }
     let r = at(176.0, by, 150.0, 24.0);
     app.midi.win.at.insert("ADD".into(), r.center());
@@ -942,10 +944,12 @@ fn table(app: &mut App, ui: &mut Ui, tr: Rect, live: bool) {
                 app.midi.win.sel[tab] = Some(r);
             }
             RowAct::Deck(d) => {
+                if app.midi.win.rows[tab][r].deck == d { continue; }
                 app.midi.win.rows[tab][r].deck = d;
                 commit_row(app, r);
             }
             RowAct::Type(t) => {
+                if app.midi.win.rows[tab][r].ty == t { continue; }
                 app.midi.win.rows[tab][r].ty = t;
                 commit_row(app, r);
             }
@@ -974,7 +978,9 @@ fn end_edit(app: &mut App, r: usize, c: usize, text: &str) {
     let tab = app.midi.win.tab;
     if c == 5 {
         // (A comma would end the field in the file.)
-        app.midi.win.rows[tab][r].comment = text.replace(',', " ");
+        let comment = text.replace(',', " ");
+        if app.midi.win.rows[tab][r].comment == comment { return; }
+        app.midi.win.rows[tab][r].comment = comment;
         commit_row(app, r);
         return;
     }
@@ -1199,11 +1205,11 @@ impl App {
             if !self.midi.win.open && frame > 10 && shot != "prefs" {
                 self.midi.win.open = true;
                 if shot != "empty" {
-                    select_device(self, TEST_NAME);
+                    select_device(&mut self.midi, TEST_NAME);
                     self.midi.win.sel[0] = Some(1);
                 }
                 if shot == "learn" {
-                    set_learn(self, true);
+                    set_learn(&mut self.midi, true);
                 }
                 if shot == "alert" {
                     self.midi.win.alert = Some((String::new(), "This MIDI code is already assigned.\n\nDECK: \nPlayPause\n\nMIDI IN: 900B\nMIDI OUT: 900B".into()));

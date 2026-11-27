@@ -1499,6 +1499,7 @@ pub fn run_export(mut req: ExportRequest, progress: &dyn Fn(Progress), cancel: &
         }
     }
     let n_todo = todo.len();
+    let mut inferred_phrases = 0;
     for (i, id) in todo.into_iter().enumerate() {
         if cancel.load(Relaxed) {
             return Err(anyhow!("Export was stopped. The device library was not changed."));
@@ -1518,6 +1519,7 @@ pub fn run_export(mut req: ExportRequest, progress: &dyn Fn(Progress), cancel: &
             let beats = grid.beats(d.duration());
             if let Some(st) = crate::phrase::analyze_audio(&d, &beats, req.classic_phrase_estimator, &stopped) {
                 phrases.insert(id, st);
+                inferred_phrases += 1;
             }
         }
     }
@@ -1922,6 +1924,9 @@ pub fn run_export(mut req: ExportRequest, progress: &dyn Fn(Progress), cancel: &
     report.playlists_on_device = lib.nodes.iter().filter(|n| !n.folder).count();
     progress(Progress::Report(report));
     let mut msg = format!("Export completed: {} tracks, {} playlists on the device", lib.tracks.len(), lib.nodes.iter().filter(|n| !n.folder).count());
+    if inferred_phrases < n_todo {
+        msg.push_str(&format!(". Generated phrases for {inferred_phrases} of {n_todo} tracks that needed them"));
+    }
     if layout == DeviceLayout::Mixed {
         msg.push_str(". Note: this drive also has OneLibrary (Device Library Plus). These edits apply to its classic device catalog. Recordbox preserved existing shared files and player settings.");
     }
