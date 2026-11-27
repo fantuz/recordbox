@@ -61,18 +61,11 @@ pub(super) fn protections(db: &Db) -> Result<Protections> {
         UNION ALL SELECT id FROM tracks WHERE EXISTS (
             SELECT 1 FROM settings WHERE key='phrase_edit:'||tracks.id AND value!='')")?;
     // DJs can remove a Matching Tracks pair while the edit or stem still links to its source.
-    let mut derived = db.conn.prepare(
-        "SELECT substr(key,9),value FROM settings WHERE key GLOB 'edit_of_*' OR key GLOB 'stem_of_*'",
-    )?;
-    let mut links = derived.query([])?;
-    while let Some(link) = links.next()? {
-        let child = link.get_ref(0)?.as_str()?;
-        let value = link.get_ref(1)?.as_str()?;
-        // EDIT stores the source ID. Stem exports append the part after a colon.
-        let source = value.split_once(':').map_or(value, |(id, _)| id);
-        prepared.insert(child.parse().context("Cannot verify a derived track ID")?);
-        prepared.insert(source.parse().context("Cannot verify a derived track's source ID")?);
-    }
+    crate::db::visit_derived_links(&db.conn, |child, source| {
+        prepared.insert(child.context("Cannot verify a derived track ID")?);
+        prepared.insert(source.context("Cannot verify a derived track's source ID")?);
+        Ok(())
+    })?;
     let mut paths = HashSet::new();
     if let Some(json) = db.setting_checked("hot_cue_banks")? {
         let banks: crate::export::hotcue_bank::Banks =
@@ -367,7 +360,10 @@ mod tests {
             let child = db.insert_track(&track(child_name)).unwrap();
             assert!(!protections(&db).unwrap().prepared.contains(&source));
             let (key, value) = if stem {
-                (crate::stem_export::link_key(child), format!("{source}:vocals"))
+                (
+                    crate::stem_export::link_key(child),
+                    format!("{source}:vocals"),
+                )
             } else {
                 (crate::ui_edit::edited_key(child), source.to_string())
             };

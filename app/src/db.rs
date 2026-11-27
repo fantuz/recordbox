@@ -7,6 +7,8 @@ use crate::smart::SmartRule;
 use anyhow::Result;
 use rusqlite::{params, Connection, OptionalExtension};
 use std::path::PathBuf;
+mod track_ids;
+pub(crate) use track_ids::visit_derived_links;
 
 fn data_locations() -> (PathBuf, Option<PathBuf>) {
     if let Ok(d) = std::env::var("PREPDECK_DATA") {
@@ -148,6 +150,14 @@ impl Db {
             let probe = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
             let v: i64 = probe.query_row("PRAGMA user_version", [], |r| r.get(0))?;
             let has_tables: bool = probe.query_row("SELECT count(*) FROM sqlite_master WHERE name='tracks'", [], |r| r.get::<_, i64>(0)).map(|n| n > 0)?;
+            if !has_tables {
+                let native: bool = probe.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='djmdContent' COLLATE NOCASE)
+                     OR (EXISTS(SELECT 1 FROM pragma_table_info('property') WHERE name='dbVersion' COLLATE NOCASE)
+                         AND EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='content' COLLATE NOCASE))",
+                    [], |r| r.get(0))?;
+                anyhow::ensure!(!native, "An AlphaTheta catalog cannot be opened as a private recordbox library.");
+            }
             if has_tables {
                 let has_settings: bool = probe.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='settings')", [], |r| r.get(0))?;
                 let marker: Option<String> = if has_settings {
@@ -244,6 +254,7 @@ impl Db {
             if timeline == Mp3Timeline::Rekordbox {
                 conn.execute("INSERT OR IGNORE INTO settings(key,value) VALUES('mp3_timeline', ?1)", [timeline.name()])?;
             }
+            track_ids::initialize(&conn)?;
             conn.execute_batch(&format!("PRAGMA user_version = {SCHEMA_VERSION};"))?;
             Ok(())
         })();
@@ -369,9 +380,17 @@ impl Db {
 
     /// Insert a track; returns its new id.
     pub fn insert_track(&self, t: &Track) -> Result<i64> {
+        // Allocate inside the INSERT so concurrent importers cannot choose the same ID.
+        // Only a legacy ID at SQLite's exact ceiling requires checking for a free gap.
         self.conn.execute(
-            "INSERT INTO tracks(path,title,artist,album,album_artist,genre,label,remixer,original_artist,composer,lyricist,mix_name,comment,grouping,message,year,track_no,disc_no,release_date,duration,sample_rate,bitrate,bit_depth,file_size,file_type,bpm,key,rating,color,date_added,date_created,play_count,analyzed,grid_locked,autoload_hotcue,gain_db,artwork,raw_samples,key_manual,key_text)
-             VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26,?27,?28,?29,?30,?31,?32,?33,?34,?35,?36,?37,?38,?39,?40)",
+            "WITH RECURSIVE ceiling(n) AS (SELECT max(coalesce((SELECT max(id) FROM tracks),0),
+                                                      coalesce((SELECT max(id) FROM retired_track_ids),0))),
+             candidates(id) AS (SELECT CASE n WHEN 9223372036854775807 THEN 1+(random() & 0x3fffffffffffffff) ELSE n+1 END FROM ceiling
+                                UNION ALL SELECT CASE id WHEN 9223372036854775807 THEN 1 ELSE id+1 END FROM candidates)
+             INSERT INTO tracks(path,title,artist,album,album_artist,genre,label,remixer,original_artist,composer,lyricist,mix_name,comment,grouping,message,year,track_no,disc_no,release_date,duration,sample_rate,bitrate,bit_depth,file_size,file_type,bpm,key,rating,color,date_added,date_created,play_count,analyzed,grid_locked,autoload_hotcue,gain_db,artwork,raw_samples,key_manual,key_text,id)
+             VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26,?27,?28,?29,?30,?31,?32,?33,?34,?35,?36,?37,?38,?39,?40,
+                    (SELECT id FROM candidates WHERE NOT EXISTS(SELECT 1 FROM tracks t WHERE t.id=candidates.id)
+                       AND NOT EXISTS(SELECT 1 FROM retired_track_ids r WHERE r.id=candidates.id) LIMIT 1))",
             params![
                 t.path, t.title, t.artist, t.album, t.album_artist, t.genre, t.label, t.remixer, t.original_artist, t.composer,
                 t.lyricist, t.mix_name, t.comment, t.grouping, t.message, t.year, t.track_no, t.disc_no, t.release_date,

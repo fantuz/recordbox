@@ -127,11 +127,14 @@ fn full_review_move_and_restore_in_isolated_profile() {
 
         // A newly linked stem source must also invalidate the earlier duplicate review.
         let link = crate::stem_export::link_key(protected);
-        db.set_setting_checked(&link, &format!("{duplicate}:vocals")).unwrap();
+        db.set_setting_checked(&link, &format!("{duplicate}:vocals"))
+            .unwrap();
         assert!(store::apply(&library, &report, &selected, true, "MOVE 2").is_err());
         assert!(db.trash_list().unwrap().is_empty());
         assert!(!home.join("private/cleanup-backups").exists());
-        db.conn.execute("DELETE FROM settings WHERE key=?1", [link]).unwrap();
+        db.conn
+            .execute("DELETE FROM settings WHERE key=?1", [link])
+            .unwrap();
 
         let archive = store::apply(&library, &report, &selected, true, "MOVE 2").unwrap();
         assert_eq!(crate::backup::read_manifest(&archive).unwrap().tracks, 4);
