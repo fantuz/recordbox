@@ -47,7 +47,8 @@ pub(super) fn initialize(db: &Connection) -> Result<()> {
     if !initialized {
         db.execute_batch(
             "CREATE TABLE retired_track_ids(id INTEGER PRIMARY KEY CHECK(id>0));
-             INSERT OR IGNORE INTO retired_track_ids SELECT track_id FROM trash WHERE track_id>0;",
+             INSERT OR IGNORE INTO retired_track_ids SELECT track_id FROM trash
+             WHERE typeof(track_id)='integer' AND track_id>0;",
         )?;
         let mut reserve = db.prepare("INSERT OR IGNORE INTO retired_track_ids VALUES(?1)")?;
         visit_derived_links(db, |child, source| {
@@ -115,6 +116,10 @@ mod tests {
         let db = Db::open(&path)?;
         let id = db.insert_track(&track("Recover.wav"))?;
         db.trash_track(id)?;
+        db.conn.execute_batch(
+            "INSERT INTO trash(track_id,path,title,artist,removed_at,json)
+             VALUES('invalid','corrupt','','',0,'{}');",
+        )?;
         db.conn.execute_batch(
             "DROP TRIGGER reserve_deleted_track_id; DROP TABLE retired_track_ids;",
         )?;
