@@ -2,6 +2,7 @@
 
 use anyhow::{anyhow, Result};
 use parking_lot::Mutex;
+use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, OnceLock};
 use symphonia::core::audio::SampleBuffer;
 use symphonia::core::codecs::{DecoderOptions, CODEC_TYPE_NULL};
@@ -1078,7 +1079,7 @@ fn mix_sampler(out: &mut [f32], cue: &mut [f32], channels: usize, rate: u32, rac
     if channels != 2 {
         return;
     }
-    if let Some(mut g) = lock_for_audio(&crate::sampler::SAMPLER) {
+    if let Some(mut g) = lock_for_audio(&crate::sampler::SAMPLER, &SAMPLER_LOCK_TIMEOUTS) {
         if let Some(e) = g.as_deref_mut() {
             let fx = rack.filter(|r| r.sampler_in_use());
             e.direct = fx.is_none();
@@ -1287,17 +1288,17 @@ impl DeckDsp {
     }
 }
 
-/// How often the audio callback found a deck's state held by the interface, and how often it
-/// had to give the buffer up (silence) because the state stayed held.
-pub static AUDIO_CONTENDED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-pub static AUDIO_DROPPED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+/// Failed first attempts and timed-out acquisitions, respectively. A callback
+/// can miss several deck locks and still render other decks into the same buffer.
+pub static AUDIO_CONTENDED: AtomicU64 = AtomicU64::new(0);
+pub static AUDIO_DROPPED: AtomicU64 = AtomicU64::new(0);
+pub static SAMPLER_LOCK_TIMEOUTS: AtomicU64 = AtomicU64::new(0);
+pub static DECK_LOCK_TIMEOUTS: AtomicU64 = AtomicU64::new(0);
+pub static RACK_LOCK_TIMEOUTS: AtomicU64 = AtomicU64::new(0);
 
-/// A deck's state for the audio callback. The interface holds it for well under a microsecond
-/// at a time (to read the position or set a control), but it does so many times per frame, so
-/// a single `try_lock` loses now and then, and losing means a whole buffer of silence: an
-/// audible click. Waiting out such a hold costs far less than a buffer, so the callback spins
-/// for it, and gives up only after a quarter of a millisecond (something is then really wrong).
-fn lock_for_audio<T>(m: &Mutex<T>) -> Option<parking_lot::MutexGuard<'_, T>> {
+/// Most UI holds are brief. Give the sampler, deck or effects rack a quarter
+/// of a millisecond to become available before skipping it in this callback.
+fn lock_for_audio<'a, T>(m: &'a Mutex<T>, site_timeouts: &AtomicU64) -> Option<parking_lot::MutexGuard<'a, T>> {
     use std::sync::atomic::Ordering::Relaxed;
     if let Some(g) = m.try_lock() {
         return Some(g);
@@ -1313,6 +1314,7 @@ fn lock_for_audio<T>(m: &Mutex<T>) -> Option<parking_lot::MutexGuard<'_, T>> {
         }
         if t.elapsed() > std::time::Duration::from_micros(250) {
             AUDIO_DROPPED.fetch_add(1, Relaxed);
+            site_timeouts.fetch_add(1, Relaxed);
             return None;
         }
     }
@@ -1378,7 +1380,7 @@ fn render_cue(states: &[Arc<Mutex<PlayState>>], out: &mut [f32], cue: &mut [f32]
     // read here where all positions belong to the same instant.
     let mut guards: [Option<parking_lot::MutexGuard<'_, PlayState>>; 4] = [None, None, None, None];
     for (g, st) in guards.iter_mut().zip(states.iter()) {
-        *g = lock_for_audio(st);
+        *g = lock_for_audio(st, &DECK_LOCK_TIMEOUTS);
     }
     // Lift the common master control before Mix Point Link applies its per-deck
     // SILENT region. The muted part of a linked deck must also be silent on REC.
@@ -1431,7 +1433,7 @@ fn render_cue(states: &[Arc<Mutex<PlayState>>], out: &mut [f32], cue: &mut [f32]
     // assigned to it (after its faders, as in rekordbox), then mixed; the master's effects
     // take the mix. Otherwise the decks go straight into the output.
     // (Waited for like the decks' state: the interface holds it only to copy the settings.)
-    let mut rack = lock_for_audio(&crate::fx::RACK);
+    let mut rack = lock_for_audio(&crate::fx::RACK, &RACK_LOCK_TIMEOUTS);
     match rack.as_deref_mut().and_then(|r| r.as_deref_mut()).filter(|r| r.active() && channels == 2) {
         Some(rack) => {
             rack.beat = [None; crate::fx::CHANNELS];
@@ -2120,6 +2122,20 @@ mod interp_tests {
 #[cfg(test)]
 mod deck_mix_tests {
     use super::*;
+
+    #[test]
+    fn audio_lock_counts_only_timed_out_acquisitions_at_the_selected_site() {
+        use std::sync::atomic::Ordering::Relaxed;
+        let state = Mutex::new(());
+        let first_site = AtomicU64::new(0);
+        let second_site = AtomicU64::new(0);
+        let held = lock_for_audio(&state, &first_site).unwrap();
+        assert!(lock_for_audio(&state, &second_site).is_none());
+        drop(held);
+        assert!(lock_for_audio(&state, &second_site).is_some());
+        assert_eq!(first_site.load(Relaxed), 0);
+        assert_eq!(second_site.load(Relaxed), 1);
+    }
 
     fn dc(level: f32, frames: usize) -> Arc<Decoded> {
         Arc::new(Decoded { sr: 44100, samples: vec![level; frames * 2], raw_frames: frames, damaged: 0, truncated: false })

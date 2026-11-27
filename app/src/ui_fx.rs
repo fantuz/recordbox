@@ -373,8 +373,8 @@ pub fn sync(app: &mut App) {
     // With RELEASE FX > Unit Number 1 the one RELEASE FX is the master's (FX1's panel).
     let master_release = app.prefs.fx.effect.release_units == 1;
     let stop = {
-        let mut g = fx::RACK.lock();
-        let rack = g.get_or_insert_with(|| Box::new(fx::Rack::new()));
+        let assigned = app.px.fx.each_ref().map(|unit| unit.params.assign);
+        let mut rack = fx::lock_prepared(&fx::RACK, assigned, pad_wanted, master_release && on, merge);
         rack.enabled = on;
         rack.master_cfx_set = master_cfx;
         for (u, ui) in rack.units.iter_mut().zip(app.px.fx.iter()) {
@@ -384,24 +384,17 @@ pub fn sync(app: &mut App) {
             if master_release {
                 p.release = None;
             }
-            u.prepare(&p.assign);
             u.params = p;
-        }
-        if master_release && on {
-            rack.prepare_master_release();
         }
         rack.master_release = if master_release && on { app.px.fx[0].params.release } else { None };
         rack.master_bpm = if app.px.fx[0].auto { bpm[fx::MASTER] } else { app.px.fx[0].tap_bpm };
         for d in 0..4 {
-            if pad_wanted[d] {
-                rack.prepare_pad(d);
-            }
             rack.pad_bpm[d] = bpm[d];
             rack.pad_quantize[d] = quantize[d];
         }
         rack.pad_set = pad_sets;
         if merge || rack.merge.is_some() {
-            crate::mfx::sync(app, rack, &bpm)
+            crate::mfx::sync(app, &mut rack, &bpm)
         } else {
             Vec::new()
         }

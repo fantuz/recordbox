@@ -30,7 +30,7 @@
 //! (state-variable sections at rekordbox's cutoffs), the soft clip in the delay lines, and the
 //! CrushCore inside the FX+ CRUSH buttons.
 
-use parking_lot::Mutex;
+use parking_lot::{MappedMutexGuard, Mutex, MutexGuard};
 
 /// Every Beat FX: rekordbox's 35 multi-mode effects and PITCH ECHO (single mode only, where
 /// multi mode has UP ECHO and DOWN ECHO).
@@ -2530,6 +2530,12 @@ struct PadChan {
     idle: u32,
 }
 
+impl PadChan {
+    fn new() -> Self {
+        Self { ch: Channel::one_slot(), cfx: crate::cfx::Cfx::new(), last: SlotParams::new(Kind::Delay), color: (0, 0.5), idle: u32::MAX }
+    }
+}
+
 /// Both FX units and the scratch buffers the decks are rendered into on their way through them.
 pub struct Rack {
     pub units: [Unit; 2],
@@ -2564,20 +2570,6 @@ impl Rack {
     pub fn new() -> Rack {
         let unit = || Unit { params: UnitParams::new(), channels: [None, None, None, None, None, None] };
         Rack { units: [unit(), unit()], scratch: std::array::from_fn(|_| vec![0.0; 16384]), enabled: false, master_cfx: crate::cfx::Cfx::new(), master_cfx_set: (0, 0.5, 0.5), sampler_cfx: crate::cfx::Cfx::new(), sampler_cfx_set: (0, 0.5, 0.5), beat: [None; CHANNELS], pads: [None, None, None, None], pad_set: [PadSet::NONE; 4], pad_bpm: [120.0; 4], pad_quantize: [false; 4], merge: None, master_release: None, master_bpm: 120.0, master_rel: None }
-    }
-
-    /// Make deck `ch`'s PAD FX unit (about 8 MB; called by the interface, never the audio thread).
-    pub fn prepare_pad(&mut self, ch: usize) {
-        if ch < 4 && self.pads[ch].is_none() {
-            self.pads[ch] = Some(Box::new(PadChan { ch: Channel::one_slot(), cfx: crate::cfx::Cfx::new(), last: SlotParams::new(Kind::Delay), color: (0, 0.5), idle: u32::MAX }));
-        }
-    }
-
-    /// Make the master's RELEASE FX state (about 6 MB; called by the interface).
-    pub fn prepare_master_release(&mut self) {
-        if self.master_rel.is_none() {
-            self.master_rel = Some(Box::new(Channel::new_without_slots()));
-        }
     }
 
     pub fn has_pad(&self, ch: usize) -> bool {
@@ -2679,6 +2671,60 @@ impl Rack {
 /// The rack, made when Performance mode first needs it (about 30 MB of delay lines).
 pub static RACK: Mutex<Option<Box<Rack>>> = Mutex::new(None);
 
+/// Allocate a missing buffer with the callback's mutex released. If another producer
+/// filled this slot meanwhile, keep the live state and free the unused buffer unlocked.
+fn prepare_box<R, T>(
+    guard: &mut MutexGuard<'_, R>,
+    slot: impl Fn(&mut R) -> &mut Option<Box<T>>,
+    make: impl FnOnce() -> T,
+) {
+    if slot(guard).is_some() {
+        return;
+    }
+    let made = MutexGuard::unlocked(guard, || Box::new(make()));
+    let dest = slot(guard);
+    if dest.is_none() {
+        *dest = Some(made);
+    } else {
+        MutexGuard::unlocked(guard, || drop(made));
+    }
+}
+
+/// The UI is the producer of these long-lived buffers. A normal settings update
+/// acquires the rack once. Only a newly requested buffer requires an unlock.
+pub fn lock_prepared(
+    shared: &Mutex<Option<Box<Rack>>>,
+    assigned: [[bool; CHANNELS]; 2],
+    pads: [bool; 4],
+    master_release: bool,
+    merge: bool,
+) -> MappedMutexGuard<'_, Rack> {
+    fn rack(slot: &mut Option<Box<Rack>>) -> &mut Rack {
+        slot.as_deref_mut().expect("rack initialized")
+    }
+    let mut guard = shared.lock();
+    prepare_box(&mut guard, |slot| slot, Rack::new);
+    for (u, channels) in assigned.iter().enumerate() {
+        for (ch, &wanted) in channels.iter().enumerate() {
+            if wanted {
+                prepare_box(&mut guard, |slot| &mut rack(slot).units[u].channels[ch], Channel::new);
+            }
+        }
+    }
+    for (ch, wanted) in pads.into_iter().enumerate() {
+        if wanted {
+            prepare_box(&mut guard, |slot| &mut rack(slot).pads[ch], PadChan::new);
+        }
+    }
+    if master_release {
+        prepare_box(&mut guard, |slot| &mut rack(slot).master_rel, Channel::new_without_slots);
+    }
+    if merge {
+        prepare_box(&mut guard, |slot| &mut rack(slot).merge, crate::mfx::Engine::new);
+    }
+    MutexGuard::map(guard, rack)
+}
+
 /// Tap tempo, as rekordbox's: gaps under 60 ms are ignored, over 1.5 s start again; the mean
 /// of up to 11 intervals; a tap more than 255 ms or 16.7 % off the mean starts again.
 pub struct Tap {
@@ -2743,6 +2789,38 @@ mod tests {
         p.slots[0] = SlotParams { on: true, level, value, ..SlotParams::new(kind) };
         p.bpm = [120.0; CHANNELS];
         p
+    }
+
+    #[test]
+    fn first_use_allocation_releases_the_lock_and_preserves_live_state() {
+        let shared = Mutex::new(None);
+        let mut guard = shared.lock();
+        prepare_box(&mut guard, |slot| slot, || {
+            let mut concurrent = shared.try_lock().expect("audio must be able to take the lock");
+            *concurrent = Some(Box::new(27));
+            10
+        });
+        assert_eq!(guard.as_deref(), Some(&27));
+        prepare_box(&mut guard, |slot| slot, || panic!("existing buffer was recreated"));
+    }
+
+    #[test]
+    fn prepared_rack_allocates_only_requested_buffers_and_keeps_channel_history() {
+        let shared = Mutex::new(None);
+        let mut assignment = [[false; CHANNELS]; 2];
+        assignment[0][2] = true;
+        {
+            let mut r = lock_prepared(&shared, assignment, [false; 4], false, false);
+            let ch = r.units[0].channels[2].as_deref_mut().unwrap();
+            ch.remember(&[0.125, -0.25]);
+            assert_eq!(ch.ring.w, 1);
+            assert!(r.units[1].channels.iter().all(Option::is_none));
+            assert!(r.pads.iter().all(Option::is_none) && r.master_rel.is_none() && r.merge.is_none());
+        }
+        let r = lock_prepared(&shared, assignment, [true, false, false, false], false, false);
+        assert!(r.has_pad(0) && !r.has_pad(1));
+        let ring = &r.units[0].channels[2].as_ref().unwrap().ring;
+        assert_eq!((ring.w, ring.at(0.0)), (1, (0.125, -0.25)));
     }
 
     #[test]
@@ -3662,7 +3740,7 @@ mod tests {
     #[test]
     fn pad_fx_unit_runs_what_its_pads_hold() {
         let mut rack = Rack::new();
-        rack.prepare_pad(0);
+        rack.pads[0] = Some(Box::new(PadChan::new()));
         assert!(rack.has_pad(0) && !rack.active());
         // A held ECHO pad (1/2 beat, LEVEL/DEPTH 30): the rack is in use and the echo is heard.
         rack.pad_set[0].beat = Some(SlotParams { on: true, level: 0.3, value: 0.5, ..SlotParams::new(Kind::Echo) });

@@ -241,6 +241,22 @@ This silent-gain case does not establish a cause for high CPU with untouched
 controls. Category savings depend on the expanded groups and library contents;
 100,000 distinct artists is a scaling stress case.
 
+### Diagnosing interruptions when enabling effects
+
+When you first assign Beat FX to a channel, enable PAD FX, master RELEASE FX,
+or MERGE FX, the interface prepares the requested audio buffers with the
+effects rack mutex released. The audio callback can keep using the previous
+settings during setup. Later assignments reuse the prepared buffers and their
+delay history.
+
+With a test track loaded, the screenshot benchmark can report how often the
+audio callback timed out waiting for the sampler, a deck, or the effects rack.
+On Linux, run `PREPDECK_BENCH=240 ./recordbox --screenshot fx-check.png`
+from the portable folder. The benchmark attempts muted playback and prints the
+counters to the terminal. A rack timeout can bypass effects for that callback.
+Several lock attempts can time out in the same callback. For audible dropouts,
+compare the counters with the audio driver's underrun report.
+
 ## Check sustained Linux process CPU
 
 In the usual Linux `top` display, 100% means one logical CPU. On a four-core

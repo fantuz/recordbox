@@ -820,9 +820,8 @@ pub fn toggle(app: &mut crate::app::App, u: usize, cancel: bool) {
     }
 }
 
-/// Once per frame (from `ui_fx::sync`, with the rack locked): make the engine when MERGE FX
-/// is enabled, hand it the units' settings, and report the decks whose drop has just
-/// happened and should stop.
+/// With the already prepared rack locked, hand the engine its settings and report
+/// decks whose drop has just happened and should stop.
 pub fn sync(app: &mut crate::app::App, rack: &mut crate::fx::Rack, bpm: &[f32; crate::fx::CHANNELS]) -> Vec<usize> {
     let mut stop = Vec::new();
     let p = &app.prefs.fx.mfx;
@@ -836,9 +835,6 @@ pub fn sync(app: &mut crate::app::App, rack: &mut crate::fx::Rack, bpm: &[f32; c
         }
         return stop;
     }
-    if rack.merge.is_none() {
-        rack.merge = Some(Box::new(Engine::new()));
-    }
     if !st.loaded && st.loading.is_none() {
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
@@ -846,7 +842,7 @@ pub fn sync(app: &mut crate::app::App, rack: &mut crate::fx::Rack, bpm: &[f32; c
         });
         st.loading = Some(rx);
     }
-    let m = rack.merge.as_deref_mut().unwrap();
+    let m = rack.merge.as_deref_mut().expect("MERGE FX engine prepared before settings update");
     if let Some(Ok(list)) = st.loading.as_ref().map(|rx| rx.try_recv()) {
         m.set_samples(&list);
         st.loaded = true;
