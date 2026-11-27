@@ -229,7 +229,11 @@ pub fn analyze_with_cancel(samples: &[f32], sr: u32, beats: &[Beat], key: i32, c
         return None;
     }
     let (bpm100, first_ms, first_bar) = grid_input(beats)?;
-    let estimated_beats = frames as f64 * f64::from(bpm100) / (6000.0 * f64::from(sr));
+    // The reference reader gives the classifier length minus one. Its eight-beat
+    // admission check starts at the first beat and excludes 32 filter frames.
+    let frames = frames - 1;
+    let beat_frames = frames as f64 - 32.0 - (f64::from(first_ms) * f64::from(sr) / 1000.0);
+    let estimated_beats = beat_frames * f64::from(bpm100) / (6000.0 * f64::from(sr));
     if !(8.0..=MAX_BEATS as f64).contains(&estimated_beats) {
         return None;
     }
@@ -241,7 +245,7 @@ pub fn analyze_with_cancel(samples: &[f32], sr: u32, beats: &[Beat], key: i32, c
         if let Some(lane) = ACTIVE.try_lock_for(std::time::Duration::from_millis(50)) { break lane; }
     };
     // An unmodelled structure must not strand a deck worker or fail an entire export.
-    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| analyze_blocks(samples, &inp, cancelled))).ok().flatten()
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| analyze_blocks(&samples[..2 * frames], &inp, cancelled))).ok().flatten()
 }
 
 fn analyze_blocks(samples: &[f32], inp: &Input, cancelled: &dyn Fn() -> bool) -> Option<RbResult> {
