@@ -1417,11 +1417,11 @@ impl App {
             return false;
         }
         let dir = crate::sampler_ext::capture_dir(&self.prefs.groove.capture_dir);
-        let path = crate::sampler_ext::capture_name(&dir, &track.display_title(), if from_stem { "_drum_capture" } else { "_capture" });
-        if std::fs::create_dir_all(&dir).and_then(|_| crate::player_ext::write_wav16(&path, sr, 2, &samples)).is_err() {
+        let suffix = if from_stem { "_drum_capture" } else { "_capture" };
+        let Ok(path) = crate::sampler_ext::save_capture(&dir, &track.display_title(), suffix, sr, &samples) else {
             self.toast_err("Error while saving");
             return false;
-        }
+        };
         // Loaded from what was written (16 bit), without reading the file back.
         let q: Vec<f32> = samples.iter().map(|s| (s.clamp(-1.0, 1.0) * 32767.0).round() / 32768.0).collect();
         let frames = q.len() / 2;

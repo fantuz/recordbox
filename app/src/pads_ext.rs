@@ -590,10 +590,6 @@ impl App {
         let title = t.map(|t| t.display_title()).unwrap_or_default();
         let bpm = self.current_bpm() as f32;
         let dir = crate::sampler_ext::capture_dir(&self.prefs.sampler.capture_dir);
-        if std::fs::create_dir_all(&dir).is_err() {
-            self.toast_err("The captured slices could not be written.");
-            return false;
-        }
         let sr = audio.sr as f64;
         let mut made = 0;
         for i in 0..8 {
@@ -603,11 +599,11 @@ impl App {
             if f1 <= f0 + 1 {
                 continue;
             }
-            let path = crate::sampler_ext::capture_name(&dir, &title, &format!("_capture_s{}", i + 1));
-            if crate::player_ext::write_wav16(&path, audio.sr, 2, &audio.samples[f0 * 2..f1 * 2]).is_err() {
+            let suffix = format!("_capture_s{}", i + 1);
+            let Ok(path) = crate::sampler_ext::save_capture(&dir, &title, &suffix, audio.sr, &audio.samples[f0 * 2..f1 * 2]) else {
                 self.toast_err("The captured slices could not be written.");
                 return false;
-            }
+            };
             let name = path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
             self.sampler_load_file(slots[i], path.to_string_lossy().to_string(), name, bpm);
             made += 1;

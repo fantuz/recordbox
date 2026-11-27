@@ -298,7 +298,7 @@ jobs:
         run: |
           for test_filter in backup::tests collection_cleanup:: db::sqlcipher_tests:: mp3_timeline_tests export::device_import::tests:: \
             export::pdb::tests:: export::anlz::tests:: export::usb_target::tests:: \
-            phrase_rb::unit:: midi::routing::tests:: \
+            phrase_rb::unit:: midi::routing::tests:: sampler_ext::tests::concurrent_captures_preserve_all_three_files \
             rbimport::snapshot_tests:: rbimport::schema_tests:: rbimport::merge::tests:: rbimport::writeback:: \
             export::usb_fix_test::a1_a_row_too_big_for_a_page_is_an_error_not_a_panic \
             export::usb_fix_test::a1_aligned_rows_paginate_at_row_group_boundaries_without_overlap; do
