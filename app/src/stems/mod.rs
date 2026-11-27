@@ -254,7 +254,9 @@ fn stage_quality_graphs<T>(
             Some((_, _, g)) => g.clone(),
             None => match load(file) {
                 Ok(g) => { missing -= 1; std::sync::Arc::new(g) }
-                Err(error) if !candidates.is_empty() && allocation_pressure(&error) => return Ok(None),
+                // The ordinary loader also evicts an old entry before allocating when
+                // the cache is full. It may recover even if the first candidate failed.
+                Err(error) if (!candidates.is_empty() || cache.len() >= files.len()) && allocation_pressure(&error) => return Ok(None),
                 Err(error) => return Err(error).with_context(|| format!("Loading {file}")),
             },
         };
