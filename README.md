@@ -26,7 +26,7 @@ This is the **fantuz/recordbox** fork of Adam Sardo’s original macOS app. It b
 <p align="center">
   <a href="https://github.com/fantuz/recordbox/releases/latest"><img src="https://img.shields.io/badge/Download-latest%20release-2e7d32?style=for-the-badge&logo=github" alt="Download the latest recordbox release" height="32"></a>
   <br>
-  <a href="#running-it">Installation details</a> · <a href="https://github.com/fantuz/recordbox/releases">All releases</a>
+  <a href="#running-it">Installation details</a> · <a href="docs/MACOS-FIRST-LAUNCH.md">First launch on macOS</a> · <a href="https://github.com/fantuz/recordbox/releases">All releases</a>
 </p>
 
 ## Project scope
@@ -36,11 +36,11 @@ recordbox focuses on local libraries and audio files you own or have permission 
 ## Running it
 
 Choose your package from the **Downloads** table on the latest release. Check its SHA-256 digest against `SHA256SUMS`, then extract the whole archive.
-The packages are unsigned, and macOS builds ship without Apple notarization. [Latest release and downloads](https://github.com/fantuz/recordbox/releases/latest) · [Runtime requirements and verification](docs/BUILD-AND-PACKAGING.md)
+The macOS downloads currently ship without Developer ID signing or Apple notarization. Windows downloads are unsigned. [Latest release and downloads](https://github.com/fantuz/recordbox/releases/latest) · [Runtime requirements and verification](docs/BUILD-AND-PACKAGING.md)
 
 | Platform | Start recordbox | STEMS processing |
 | --- | --- | --- |
-| macOS | Choose the Apple Silicon or Intel ZIP for your Mac and open `Recordbox.app`. | The standard app uses Metal when available. |
+| macOS | Choose the Apple Silicon or Intel ZIP for your Mac, extract it and move `Recordbox.app` to Applications. The app runs without Rust or Homebrew. If macOS blocks the first launch, check the warning against [Apple’s instructions for opening a trusted app](https://support.apple.com/en-us/102445). | The standard app uses Metal when available. |
 | Windows x64 | Run `recordbox.exe` from the extracted portable ZIP. | The standard ZIP uses the CPU. Choose the CUDA 12 preview for a compatible NVIDIA GPU such as the Quadro P2000, or the DirectML preview for a supported Radeon such as Vega 8. [CUDA and driver requirements](docs/CUDA12.md) · [Radeon drivers and setup](docs/DIRECTML.md) |
 | Linux x64 (experimental) | Run `./recordbox` from the extracted tarball. | The standard build uses the CPU. Optional builds offer CUDA 12 for compatible NVIDIA GPUs or Vulkan for partial GPU acceleration alongside the CPU. [CUDA setup](docs/CUDA12.md) · [Vulkan setup](docs/VULKAN.md) |
 

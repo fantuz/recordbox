@@ -22,6 +22,7 @@ from smoke_app import extract_archive, png_dimensions
 
 
 TARGETS = (("macos", "arm64"), ("macos", "x86_64"), ("windows", "x86_64"), ("linux", "x86_64"))
+MACOS_FIRST_LAUNCH = "docs/MACOS-FIRST-LAUNCH.md"
 
 
 def require(condition, message):
@@ -193,7 +194,7 @@ def get_commit_log(source, commit):
                           check=True, capture_output=True, text=True, encoding="utf-8").stdout
 
 
-def render_release_downloads(notes, repository, tag):
+def render_release_downloads(notes, repository, tag, *, has_macos_guide=False):
     """Refresh the complete Downloads section for this repository and version."""
     require(isinstance(repository, str) and re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repository),
             "Require a GitHub repository in owner/repo form")
@@ -212,7 +213,18 @@ def render_release_downloads(notes, repository, tag):
     base = f"https://github.com/{repository}"; download = f"{base}/releases/download/{quote(tag, safe='')}"
     def link(name):
         return f"[`{name}`]({download}/{quote(name, safe='')})"
-    rows = [start, "## Downloads", "", "| Platform | Archive |", "| --- | --- |"]
+    rows = [start, "## Downloads", ""]
+    if has_macos_guide:
+        rows.extend([
+            "**First launch on macOS.** The Mac ZIPs ship without Developer ID signing or Apple notarization. "
+            "Verify your ZIP against `SHA256SUMS`, extract it and open `Recordbox.app`. "
+            "If macOS cannot verify the developer and you trust this copy, choose "
+            "**System Settings → Privacy & Security → Open Anyway** for recordbox and confirm.",
+            f"[recordbox first-launch guide]({base}/blob/{quote(tag, safe='')}/{MACOS_FIRST_LAUNCH}) · "
+            "[Apple’s instructions](https://support.apple.com/en-us/102445)",
+            "",
+        ])
+    rows.extend(["| Platform | Archive |", "| --- | --- |"])
     labels = {("macos", "arm64"): "macOS Apple Silicon", ("macos", "x86_64"): "macOS Intel",
               ("windows", "x86_64"): "Windows x64" if build_archive.has_directml(version) else "Windows x64, experimental",
               ("linux", "x86_64"): "Linux x64, experimental"}
@@ -266,12 +278,15 @@ def prepare_release(input_root, output, source, commit, tag, repository):
             verified[name] = checksum
     notes = (source / f"docs/releases/{version}.md").read_text(encoding="utf-8").strip()
     require(bool(notes), "Release notes are empty")
-    notes = render_release_downloads(notes, repository, tag)
+    # Keep older tags reproducible and link only to a guide shipped by this release.
+    has_macos_guide = (source / MACOS_FIRST_LAUNCH).is_file()
+    notes = render_release_downloads(notes, repository, tag, has_macos_guide=has_macos_guide)
+    signing_note = "" if has_macos_guide else "Archives are unsigned and macOS builds are not notarized. "
     log = get_commit_log(source, commit); require(bool(log.strip()), "Commit log is empty")
     fence = "`" * max(3, 1 + max((len(run) for run in re.findall(r"`+", log)), default=0))
     body = (f"{notes}\n\n<!-- recordbox-release-source: {commit} -->\n\n"
             f"Source commit: `{commit}`. The four standard archives passed native screenshot checks. "
-            "Archives are unsigned and macOS builds are not notarized. Verify downloads with `SHA256SUMS`.\n\n"
+            f"{signing_note}Verify downloads with `SHA256SUMS`.\n\n"
             f"<details>\n<summary>Complete commit history</summary>\n\n{fence}text\n{log.rstrip()}\n{fence}\n\n</details>\n")
     output.parent.mkdir(parents=True, exist_ok=True)
     staging = Path(tempfile.mkdtemp(prefix=".recordbox-release-", dir=output.parent))
