@@ -153,7 +153,7 @@ fn review_style(ui: &mut Ui) {
     for (v, fill) in [(&mut w.inactive, surface), (&mut w.hovered, hover), (&mut w.active, active), (&mut w.open, active)] {
         v.fg_stroke.color = ink;
         v.bg_fill = fill;
-        v.bg_stroke = egui::Stroke::new(1.5, ink);
+        v.bg_stroke = egui::Stroke::new(1.5_f32, ink);
     }
 }
 
@@ -559,7 +559,7 @@ mod tests {
                     for clipped in &output.shapes {
                         match &clipped.shape {
                             Shape::Rect(r) if r.rect.width() > 400.0 && r.fill.a() == 255 => surface = Some(r.fill),
-                            Shape::Text(t) => labels.push((clipped, t)),
+                            Shape::Text(_) => labels.push(clipped),
                             Shape::Circle(c) if c.stroke.width > 0.0 => rings.push(c),
                             Shape::Circle(c) => dot = Some(c),
                             _ => {}
@@ -568,14 +568,15 @@ mod tests {
                     let surface = surface.expect("the window surface was painted");
                     assert_eq!(labels.len(), 2);
                     assert_eq!(rings.len(), 2);
-                    for (clipped, _) in &labels {
+                    for clipped in labels {
                         // Tessellation resolves both the fallback text color and any disabled tint.
-                        let mesh = ctx.tessellate(vec![(**clipped).clone()], output.pixels_per_point);
+                        let mesh = ctx.tessellate(vec![clipped.clone()], output.pixels_per_point);
                         let egui::epaint::Primitive::Mesh(triangles) = &mesh[0].primitive else { panic!("text mesh") };
                         assert!(triangles.vertices.iter().all(|v| contrast(v.color, surface) >= 4.5));
                     }
                     for ring in &rings {
                         assert!(contrast(ring.stroke.color, surface) >= 3.0);
+                        assert!(contrast(ring.stroke.color, ring.fill) >= 3.0);
                     }
                     assert_eq!(dot.is_some(), selected.is_some());
                     if let (Some(dot), Some(which)) = (dot, selected) {
