@@ -39,10 +39,23 @@ pub enum Kind {
     JogIndicator,
     JogIndicatorHiRes,
     Parameter,
-    Pad,
+    /// A pad: the LED family is the device's (`Pad`) or named by the type (`DdjRzPad` ...).
+    Pad(PadType),
 }
 
-const KINDS: [(Kind, &str, u8); 21] = [
+/// The pad family a `Pad` row's type names (rekordbox's switch types 29 to 33, `getSwitchType`
+/// 0x101ecc400): `Pad` leaves it to the device name.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
+pub enum PadType {
+    ByDevice,
+    Rz,
+    Rx,
+    Sz,
+    Sx2,
+    Sx,
+}
+
+const KINDS: [(Kind, &str, u8); 26] = [
     (Kind::Button, "Button", 0),
     (Kind::Toggle, "Toggle", 27),
     (Kind::Slider, "Slider", 4),
@@ -63,7 +76,12 @@ const KINDS: [(Kind, &str, u8); 21] = [
     (Kind::JogIndicator, "JogIndicator", 19),
     (Kind::JogIndicatorHiRes, "JogIndicatorHiRes", 20),
     (Kind::Parameter, "Parameter", 28),
-    (Kind::Pad, "Pad", 33),
+    (Kind::Pad(PadType::ByDevice), "Pad", 33),
+    (Kind::Pad(PadType::Rz), "DdjRzPad", 29),
+    (Kind::Pad(PadType::Rx), "DdjRxPad", 30),
+    (Kind::Pad(PadType::Sz), "DdjSzPad", 31),
+    (Kind::Pad(PadType::Sx2), "DdjSx2Pad", 32),
+    (Kind::Pad(PadType::Sx), "DdjSxPad", 33),
 ];
 
 impl Kind {
@@ -87,7 +105,7 @@ impl Kind {
     }
     /// The row can light something (rekordbox's mask 0x3E0460001 over the switch type).
     pub fn can_light(self) -> bool {
-        matches!(self, Kind::Button | Kind::Indicator | Kind::IndicatorHiRes | Kind::Pad)
+        matches!(self, Kind::Button | Kind::Indicator | Kind::IndicatorHiRes | Kind::Pad(_))
     }
 }
 
@@ -665,14 +683,10 @@ pub fn factory_dirs() -> Vec<PathBuf> {
     { Vec::new() }
 }
 
-/// Permit vendor comments and empty separators, but reject broken or mixed-device
-/// imports rather than replacing a working map with the few rows that happened to parse.
-pub fn validate_import(port: &str, bytes: &[u8]) -> std::io::Result<CsvFile> {
+/// A complete mapping has one device header and can contain comments or empty separators.
+pub fn parse_mapping(bytes: &[u8]) -> std::io::Result<CsvFile> {
     use std::io::{Error, ErrorKind::InvalidData};
     let file = CsvFile::parse(bytes).map_err(|_| Error::new(InvalidData, "Expected a version 1 MIDI mapping CSV."))?;
-    if !device_matches(port, &file.device) || file.device.is_empty() {
-        return Err(Error::new(InvalidData, "The mapping belongs to a different MIDI device."));
-    }
     let mut headers = 0;
     for line in &file.lines {
         if line.raw.split(',').next().is_some_and(|k| k.eq_ignore_ascii_case("@file")) {
@@ -681,7 +695,17 @@ pub fn validate_import(port: &str, bytes: &[u8]) -> std::io::Result<CsvFile> {
             return Err(Error::new(InvalidData, "The file contains an invalid MIDI mapping row."));
         }
     }
-    if headers != 1 { return Err(Error::new(InvalidData, "Expected one MIDI mapping header.")); }
+    if headers != 1 || file.device.trim().is_empty() {
+        return Err(Error::new(InvalidData, "Expected one MIDI mapping header with a device name."));
+    }
+    Ok(file)
+}
+
+pub fn validate_import(port: &str, bytes: &[u8]) -> std::io::Result<CsvFile> {
+    let file = parse_mapping(bytes)?;
+    if !device_matches(port, &file.device) {
+        return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "The mapping belongs to a different MIDI device."));
+    }
     Ok(file)
 }
 

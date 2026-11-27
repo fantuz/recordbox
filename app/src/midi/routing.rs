@@ -30,20 +30,23 @@ impl Platter {
     }
 
     pub(super) fn deadline(&self) -> Option<Instant> {
-        self.last_rotation
-            .map(|(_, at)| at + Duration::from_millis(61))
+        let (timestamp, at) = self.last_rotation?;
+        let remaining_ms = (self.jog.idle_deadline_ms()? - timestamp).max(0.0);
+        Some(at + Duration::from_micros((remaining_ms * 1000.0).ceil() as u64))
     }
 
     fn idle(&mut self, now: Instant) -> JogOut {
-        let Some((timestamp, at)) = self.last_rotation else {
-            return JogOut::Nothing;
-        };
-        let elapsed = now.saturating_duration_since(at);
-        if elapsed <= Duration::from_millis(60) {
-            return JogOut::Nothing;
+        let Some(deadline) = self.deadline() else { return JogOut::Nothing };
+        if now < deadline { return JogOut::Nothing; }
+        let (timestamp, at) = self.last_rotation.unwrap();
+        // Round forward if a hardware tick falls between representable host instants.
+        let in_clock = (timestamp + now.saturating_duration_since(at).as_secs_f64() * 1000.0)
+            .max(self.jog.idle_deadline_ms().unwrap());
+        let out = self.jog.idle(in_clock);
+        if self.jog.idle_deadline_ms().is_none() {
+            self.last_rotation = None;
         }
-        self.last_rotation = None;
-        self.jog.idle(timestamp + elapsed.as_secs_f64() * 1000.0)
+        out
     }
 
     fn reset(&mut self) {
@@ -74,6 +77,8 @@ pub(super) fn momentary(act: Act) -> bool {
             | Act::PitchBend(_)
             | Act::SamplerPad(..)
             | Act::FxReleaseOn(_)
+            | Act::FxTapLong(_)
+            | Act::FxAssignHold(..)
             | Act::Shift
             | Act::JogTouch
             | Act::Stub(Stub::PadFx(..) | Stub::SlicerPad(..) | Stub::SlipReverse)
@@ -93,6 +98,13 @@ pub(super) struct Routing {
 }
 
 impl Routing {
+    pub(super) fn search_held(&self, deck: u8) -> bool {
+        self.held.iter().any(|held| {
+            Some(held.event.deck) == deck.checked_add(1)
+                && registry().get(held.event.tag).is_some_and(|f| matches!(f.act, Act::Search(_)))
+        })
+    }
+
     // Multiple controllers may hold the same function. Only the last release stops
     // it. Different hot cues still retrigger, but share a deck's single cue gate.
     pub(super) fn hold(&mut self, dev: &Arc<Device>, event: &mut Event) -> bool {
@@ -216,6 +228,8 @@ impl Hub {
             }
         }
         if let Some(dev) = device {
+            dev.map.lock().reset_dual();
+            *dev.scan.lock() = Default::default();
             for jog in dev.jog.lock().iter_mut() {
                 jog.reset();
             }
@@ -231,6 +245,7 @@ impl Hub {
         if device.learning.swap(on, Relaxed) != on {
             device.input_epoch.fetch_add(1, Relaxed);
             if on {
+                device.clear_button_feedback();
                 self.release_holds(&mut route, Some(device));
             }
         }
@@ -252,6 +267,9 @@ pub(crate) fn change_mode(app: &mut App, mode: u8) {
             route.performance = false;
             hub.release_holds(&mut route, None);
             for dev in hub.devices.lock().iter() {
+                dev.clear_button_feedback();
+                dev.map.lock().reset_dual();
+                *dev.scan.lock() = Default::default();
                 for jog in dev.jog.lock().iter_mut() {
                     jog.reset();
                 }
@@ -457,5 +475,64 @@ mod tests {
             }
         }
         assert_eq!(hub.decks[0].lock().bend, 0.0);
+    }
+    #[test]
+    fn held_fx_mapping_survives_active_deck_changes_and_releases_on_disconnect() {
+        let (hub, rx) = hub();
+        hub.routing.lock().performance = true;
+        let csv = b"@file,1,Helper\nFX1Assign.CH1,Channel,Button,9210,,,,,,,,,,,\n";
+        let map = MidiMap::load("Helper", None, Some(csv)).unwrap();
+        let dev = Device::mapped("Helper", "helper".into(), map, false, None);
+        hub.input_message(&dev, [0x92, 0x10, 127], 1.0, 0, 0);
+        assert!(matches!(rx.try_recv(), Ok(UiEvent::Control {deck:0, val:Val::On(true, _), tag, ..})
+            if registry().get(tag).unwrap().act == Act::FxAssignHold(0, 0)));
+        hub.snap.lock().active = 1;
+        hub.release_device(&dev);
+        assert!(matches!(rx.try_recv(), Ok(UiEvent::Control {deck:0, val:Val::On(false, _), ..})));
+        assert!(hub.routing.lock().held.is_empty());
+    }
+
+    #[test]
+    fn dual_search_releases_both_actual_decks_after_the_host_switch_changes() {
+        let (hub, rx) = hub();
+        hub.routing.lock().performance = true;
+        hub.snap.lock().count = 4;
+        let csv = b"@file,1,DDJ-RX\nSearchFwd,Forward,Button,9010,0,1,2,3,,,,,,Dual;,\n";
+        let map = MidiMap::load("DDJ-RX", Some(csv), None).unwrap();
+        let dev = Device::mapped("DDJ-RX", "dual".into(), map, true, None);
+        hub.input_message(&dev, [0x96, 0x7c, 127], 1.0, 0, 0);
+        hub.input_message(&dev, [0x90, 0x10, 127], 2.0, 0, 0);
+        assert!(hub.routing.lock().search_held(0));
+        assert!(hub.routing.lock().search_held(2));
+        hub.input_message(&dev, [0x92, 0x3c, 127], 3.0, 0, 0);
+        hub.input_message(&dev, [0x80, 0x10, 65], 4.0, 0, 0);
+        assert!(hub.routing.lock().held.is_empty());
+        let events: Vec<_> = rx.try_iter().map(|e| match e {
+            UiEvent::Control { tag, deck, val, .. } => {
+                assert_eq!(registry().get(tag).unwrap().act, Act::Search(1));
+                (deck, val)
+            }
+            _ => panic!("expected a mapped search event"),
+        }).collect();
+        assert_eq!(events, [(1, Val::On(true, 127)), (3, Val::On(true, 127)),
+                            (1, Val::On(false, 0)), (3, Val::On(false, 0))]);
+    }
+
+    #[test]
+    fn scratch_carry_reschedules_again_in_the_controller_clock() {
+        let mut p = Platter::new(2300.0);
+        let now = Instant::now();
+        let timestamp = 80_000.0;
+        p.jog.touch(true, false);
+        p.rotate(1, timestamp, true, now);
+        let burst = now + Duration::from_millis(1);
+        assert_eq!(p.rotate(25, timestamp + 1.0, true, burst), JogOut::Scratch(8.0));
+        let step = p.deadline().unwrap();
+        assert!(step < burst + Duration::from_millis(5));
+        assert_eq!(p.idle(step), JogOut::Scratch(8.0));
+        let end = p.deadline().unwrap();
+        assert!(end > step && end < burst + Duration::from_millis(8));
+        assert_eq!(p.idle(end), JogOut::Scratch(0.0));
+        assert_eq!(p.deadline(), None);
     }
 }
