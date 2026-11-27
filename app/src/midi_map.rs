@@ -1306,6 +1306,54 @@ mod tests {
     }
 
     #[test]
+    fn opus_quad_replays_four_decks_and_the_mixer_and_ignores_display_packets() {
+        let csv = include_bytes!("midi/profiles/OPUS-QUAD.csv");
+        for port in ["OPUS-QUAD", "MIDIIN (OPUS-QUAD)", "OPUS-QUAD:OPUS-QUAD MIDI 1 24:0"] {
+            let mut m = MidiMap::load(port, None, Some(csv)).unwrap();
+            let names: Vec<_> = m.live_inputs().map(|i| i.e.name.clone()).collect();
+            assert_eq!(names.len(), 162);
+            m.tag_inputs(|name| names.iter().position(|n| n == name).unwrap() as u32 + 1);
+            let mut check = |msg: [u8; 3], name: &str, deck: u8, expected: Val| {
+                let ev = m.handle(&msg, 1.0).unwrap();
+                assert_eq!((&*names[ev.tag as usize - 1], ev.deck, ev.val), (name, deck, expected));
+            };
+            for deck in 1..=4 {
+                let n = deck - 1;
+                check([0x90 + n, 0, 127], "PlayPause", deck, Val::On(true, 127));
+                check([0x90 + n, 1, 0], "Cue", deck, Val::On(false, 0));
+                check([0x90 + n, 0x12, 127], "Vinyl", deck, Val::On(true, 127));
+                check([0xb0 + n, 0x22, 65], "JogScratch", deck, Val::Jog { delta: 1, t_ms: 1.0 });
+                check([0xb0 + n, 0x21, 63], "JogPitchBend", deck, Val::Jog { delta: -1, t_ms: 1.0 });
+                for (slot, (set, del)) in [(8, 10), (11, 12), (13, 14), (15, 20), (21, 22), (23, 24), (25, 26), (27, 28)].into_iter().enumerate() {
+                    check([0x90 + n, set, 127], &format!("PAD{}_HotCue", slot + 1), deck, Val::On(true, 127));
+                    check([0x90 + n, del, 127], &format!("PAD{}_HotCue+Shift", slot + 1), deck, Val::On(true, 127));
+                }
+            }
+            check([0xB0, 0x4f, 30], "Browse", 0, Val::Rel(30));
+            check([0xB0, 0x4f, 98], "Browse", 0, Val::Rel(-30));
+            for (deck, cc) in [3, 8, 15, 92].into_iter().enumerate() {
+                let ev = m.handle(&[0xB4, cc, 127], 2.0).unwrap();
+                assert_eq!((&*names[ev.tag as usize - 1], ev.deck, ev.val.unit()), ("EQMid", deck as u8 + 1, Some(1.0)));
+            }
+            for n in 0..4 {
+                assert!(m.handle(&[0xb0 + n, 0, 64], 3.0).is_none());
+                let ev = m.handle(&[0xb0 + n, 0x20, 1], 4.0).unwrap();
+                assert_eq!((ev.deck, ev.val), (n + 1, Val::Abs { v: 8193, lo: 0, mid: 8192, hi: 16383 }));
+                for note in [0, 1, 0x12] {
+                    let status = 0x90 + n;
+                    let entries = m.outputs_at(u16::from_be_bytes([status, note]));
+                    assert_eq!(entries.len(), 1);
+                    assert_eq!(m.led_message(&entries[0], 127), [status, note, 127]);
+                    assert_eq!(m.led_message(&entries[0], 0), [status, note, 0]);
+                }
+            }
+            assert_eq!(m.outputs.len(), 12);
+            assert!(m.handle(&[0xBB, 0x04, 72], 5.0).is_none());
+            assert!(m.handle(&[0x95, 0x00, 127], 6.0).is_none(), "RX3 pad packets must not route");
+        }
+    }
+
+    #[test]
     fn ddj_grv6_transport_outer_jog_and_channel_fader_follow_published_codes() {
         let csv = b"@file,1,DDJ-GRV6\nPlayPause,,Button,900B,0,1,2,3,900B,0,1,2,3,Fast;,\nCue,,Button,900C,0,1,2,3,900C,0,1,2,3,Fast;,\nWheelPitchBend,,JogRotate,B021,0,1,2,3,,,,,,RO;,\nChannelFader,,KnobSliderHiRes,B013,0,1,2,3,,,,,,Fast;,\n";
         let mut m = MidiMap::load("DDJ-GRV6:DDJ-GRV6 MIDI 1 24:0", None, Some(csv)).unwrap();

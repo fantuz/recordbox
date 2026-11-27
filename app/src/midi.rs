@@ -908,7 +908,7 @@ pub struct Device {
     input_id: String,
     pub map: Mutex<MidiMap>,
     /// A trial temporarily replaces only this connected port's map.
-    rx3_original: Mutex<Option<MidiMap>>,
+    profile_original: Mutex<Option<MidiMap>>,
     /// The rekordbox installed here has a factory mapping for it.
     pub factory: bool,
     native_mapping: AtomicBool,
@@ -943,7 +943,7 @@ impl Device {
             name: name.to_string(),
             input_id,
             map: Mutex::new(map),
-            rx3_original: Mutex::new(None),
+            profile_original: Mutex::new(None),
             factory,
             native_mapping: AtomicBool::new(false),
             needs_auth: needs_auth(name),
@@ -1013,8 +1013,8 @@ impl Device {
         }
     }
 
-    pub fn rx3_trial_active(&self) -> bool {
-        self.rx3_original.lock().is_some()
+    pub fn profile_trial_active(&self) -> bool {
+        self.profile_original.lock().is_some()
     }
 
     /// Whether the selected user delta came from the installed AlphaTheta application.
@@ -1355,9 +1355,9 @@ impl Hub {
 
     pub fn write_override(&self, device: &str, bytes: &[u8]) -> std::io::Result<()> {
         let controller = self.device(device);
-        let original = controller.as_ref().map(|d| d.rx3_original.lock());
+        let original = controller.as_ref().map(|d| d.profile_original.lock());
         if original.as_ref().is_some_and(|saved| saved.is_some()) {
-            return Err(std::io::Error::other("Stop the XDJ-RX3 profile trial before changing a mapping."));
+            return Err(std::io::Error::other("Stop the controller profile trial before changing a mapping."));
         }
         let csv = crate::midi_csv::validate_import(device, bytes)?;
         let path = self.user_file(device);
@@ -1376,9 +1376,9 @@ impl Hub {
 
     pub fn save_map(&self, dev: &Device) -> std::io::Result<()> {
         let text = {
-            let original = dev.rx3_original.lock();
+            let original = dev.profile_original.lock();
             if original.is_some() {
-                return Err(std::io::Error::other("Stop the XDJ-RX3 profile trial before saving a mapping."));
+                return Err(std::io::Error::other("Stop the controller profile trial before saving a mapping."));
             }
             dev.map.lock().save_text()
         };
@@ -3643,7 +3643,7 @@ mod tests {
         let native = connect();
         assert!(native.from_rekordbox() && native.factory);
         assert_eq!(native.map.lock().live_inputs().count(), 2);
-        hub.set_rx3_trial(&native, true);
+        hub.set_profile_trial(&native, true);
         hub.set_learning(&native, true);
         assert!(!native.learning.load(Relaxed));
         assert!(hub.try_edit_mapping(&native, |_| panic!("trial must be read-only")).is_err());
@@ -3652,8 +3652,8 @@ mod tests {
         let mut midi = MidiState { hub: Some(hub.clone()), ..Default::default() };
         crate::ui_midi::select_device(&mut midi, name);
         crate::ui_midi::close(&mut midi);
-        assert!(native.rx3_trial_active(), "closing settings keeps the session trial");
-        hub.set_rx3_trial(&native, false);
+        assert!(native.profile_trial_active(), "closing settings keeps the session trial");
+        hub.set_profile_trial(&native, false);
         assert!(native.from_rekordbox());
         let codes = |d: &Device| d.map.lock().live_inputs().map(|i| i.e.code).collect::<Vec<_>>();
         assert_eq!(codes(&native), [0x9010, 0x9011]);
@@ -3665,11 +3665,11 @@ mod tests {
         let reset = connect();
         assert!(!reset.from_rekordbox());
         assert_eq!(codes(&reset), [0x9010]);
-        hub.set_rx3_trial(&reset, true);
-        assert!(reset.rx3_trial_active());
+        hub.set_profile_trial(&reset, true);
+        assert!(reset.profile_trial_active());
         hub.devices.lock().clear();
         let reconnected = connect();
-        assert!(!reconnected.rx3_trial_active());
+        assert!(!reconnected.profile_trial_active());
         assert_eq!(codes(&reconnected), [0x9010]);
         assert_eq!(std::fs::read(local_path).unwrap(), saved_empty);
         assert_eq!(std::fs::read_to_string(factory_path).unwrap(), csv(0x9010));

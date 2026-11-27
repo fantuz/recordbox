@@ -248,7 +248,7 @@ impl Hub {
         // Keep MIDI input outside the interval between changing the table and
         // tagging its entries, including when an import keeps the same binding.
         let mut route = self.routing.lock();
-        if dev.rx3_trial_active() {
+        if dev.profile_trial_active() {
             return Err(crate::midi_map::Reject::Revert);
         }
         edit(&mut dev.map.lock())?;
@@ -269,12 +269,13 @@ impl Hub {
 
     /// A manual, reversible switch for this connection. The usual factory and
     /// user loaders also remain authoritative when the device next connects.
-    pub(crate) fn set_rx3_trial(&self, dev: &Arc<Device>, on: bool) {
-        if !crate::midi_csv::rx3_primary_input(&dev.name) || dev.needs_auth {
+    pub(crate) fn set_profile_trial(&self, dev: &Arc<Device>, on: bool) {
+        let Some(profile) = crate::midi_csv::trial_profile(&dev.name) else { return };
+        if dev.needs_auth {
             return;
         }
         let mut route = self.routing.lock();
-        let mut original = dev.rx3_original.lock();
+        let mut original = dev.profile_original.lock();
         if !dev.alive.load(Relaxed) || original.is_some() == on {
             return;
         }
@@ -286,14 +287,17 @@ impl Hub {
         let mut offs = Vec::new();
         if let Some(previous) = original.take() {
             if dev.has_output {
-                // A pending OFF for one of the trial's four transport lamps
+                // A pending OFF for one of the trial's lamps
                 // may still be queued when the old map is restored.
                 offs.extend(map.outputs.iter().map(|e| (map.led_message(e, 0), e.opts.priority)));
             }
             *map = previous;
         } else {
-            let pilot = MidiMap::load(&dev.name, Some(include_bytes!("profiles/XDJ-RX3.csv")), None)
-                .expect("built-in XDJ-RX3 profile");
+            let csv: &[u8] = match profile {
+                crate::midi_csv::TrialProfile::Rx3 => include_bytes!("profiles/XDJ-RX3.csv"),
+                crate::midi_csv::TrialProfile::OpusQuad => include_bytes!("profiles/OPUS-QUAD.csv"),
+            };
+            let pilot = MidiMap::load(&dev.name, Some(csv), None).expect("built-in MIDI profile");
             *original = Some(std::mem::replace(&mut *map, pilot));
         }
         dev.reindex_map(&mut map, &offs);
@@ -327,7 +331,7 @@ impl Hub {
 
     pub(crate) fn set_learning(&self, device: &Arc<Device>, on: bool) {
         let mut route = self.routing.lock();
-        if on && device.rx3_trial_active() { return; }
+        if on && device.profile_trial_active() { return; }
         if device.learning.swap(on, Relaxed) != on {
             device.input_epoch.fetch_add(1, Relaxed);
             if on {
@@ -475,11 +479,11 @@ mod tests {
         let mut rx3 = controller("XDJ-RX3");
         Arc::get_mut(&mut rx3).unwrap().has_output = true;
         let peer = controller("Other controller");
-        hub.set_rx3_trial(&peer, true);
-        assert!(!peer.rx3_trial_active());
+        hub.set_profile_trial(&peer, true);
+        assert!(!peer.profile_trial_active());
         let tag = registry().tag("PlayPause");
-        hub.set_rx3_trial(&rx3, true);
-        assert!(rx3.rx3_trial_active());
+        hub.set_profile_trial(&rx3, true);
+        assert!(rx3.profile_trial_active());
         assert_eq!(rx3.map.lock().live_inputs().count(), 39);
         assert_eq!(rx3.out_keys().len(), 4);
         hub.input_message(&rx3, [0x90, 0x01, 127], 0.0, 0, 0);
@@ -487,8 +491,8 @@ mod tests {
         hub.input_message(&rx3, [0x90, 0x01, 127], 1.0, 0, 1);
         assert!(hub.decks[0].lock().playing);
         rx3.set_led(tag, 2, Led::On);
-        hub.set_rx3_trial(&rx3, false);
-        assert!(!rx3.rx3_trial_active());
+        hub.set_profile_trial(&rx3, false);
+        assert!(!rx3.profile_trial_active());
         assert!(hub.routing.lock().held.is_empty());
         assert!(!hub.decks[0].lock().playing);
         assert_eq!(rx3.map.lock().live_inputs().count(), 1);
@@ -501,6 +505,32 @@ mod tests {
         assert!(!hub.decks[0].lock().playing, "queued during the trial");
         hub.input_message(&peer, [0x90, 0x0B, 127], 3.0, 0, 0);
         assert!(hub.decks[0].lock().playing, "other port keeps its epoch and map");
+    }
+
+    #[test]
+    fn opus_quad_fourth_deck_plays_and_trial_stop_restores_the_user_map() {
+        let (hub, _) = hub();
+        hub.routing.lock().performance = true;
+        hub.snap.lock().count = 4;
+        let audio = hub.decks[0].lock().audio.clone();
+        hub.decks[3].lock().audio = audio;
+        let mut opus = controller("MIDIIN (OPUS-QUAD)");
+        Arc::get_mut(&mut opus).unwrap().has_output = true;
+        hub.set_profile_trial(&opus, true);
+        assert!(opus.profile_trial_active());
+        assert_eq!(opus.map.lock().live_inputs().count(), 162);
+        assert_eq!(opus.out_keys().len(), 12);
+        hub.input_message(&opus, [0x93, 0, 127], 1.0, 0, 1);
+        assert!(hub.decks[3].lock().playing);
+        assert!(!hub.decks[0].lock().playing);
+        hub.set_profile_trial(&opus, false);
+        assert!(!opus.profile_trial_active());
+        assert_eq!(opus.map.lock().live_inputs().count(), 1);
+        let mut out = opus.out.lock();
+        let mut messages: Vec<_> = std::iter::from_fn(|| out.queue.pop()).collect();
+        messages.sort();
+        let expected: Vec<_> = (0x90..=0x93).flat_map(|ch| [[ch, 0, 0], [ch, 1, 0], [ch, 0x12, 0]]).collect();
+        assert_eq!(messages, expected);
     }
 
     fn drum_map(name: &str, code: u16) -> MidiMap {

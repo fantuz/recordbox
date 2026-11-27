@@ -2,6 +2,8 @@
 
 Choose the drive root that contains `PIONEER`. Check which library your player reads before exporting. For example, AlphaTheta lists the **CDJ-3000X** under OneLibrary. The **CDJ-3000** reverted to Device Library after Pioneer DJ withdrew firmware 3.30. Check the model and installed firmware when comparing results. [AlphaTheta equipment list](https://rekordbox.com/en/support/usb-export/) · [Pioneer DJ firmware notice, 7 January 2026](https://www.pioneerdj.com/en/news/2026/cdj-3000-firmware-ver330-important-notice/)
 
+**OPUS-QUAD standalone playback requires OneLibrary.** If a drive contains both catalogs, a classic playlist update made in recordbox will only appear on equipment that reads the classic catalog. Use AlphaTheta Rekordbox to prepare the OneLibrary playlist for the OPUS-QUAD. When using the OPUS-QUAD as a computer MIDI controller, recordbox plays from its local collection. [AlphaTheta USB equipment matrix](https://rekordbox.com/en/support/usb-export/)
+
 | Catalogs on the drive | What happens in recordbox |
 | --- | --- |
 | No recognized device catalog | A classic export can create `PIONEER/rekordbox/export.pdb` and `exportExt.pdb`, copy audio to `Contents` and write track analysis under `PIONEER/USBANLZ`. |

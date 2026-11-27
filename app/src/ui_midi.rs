@@ -180,7 +180,7 @@ fn device(midi: &MidiState) -> Option<std::sync::Arc<Device>> {
 }
 
 fn editable_device(midi: &MidiState) -> Option<(&Hub, std::sync::Arc<Device>)> {
-    Some((midi.hub.as_deref()?, device(midi).filter(|d| !d.rx3_trial_active())?))
+    Some((midi.hub.as_deref()?, device(midi).filter(|d| !d.profile_trial_active())?))
 }
 
 fn save(app: &mut App) {
@@ -647,7 +647,7 @@ fn content(app: &mut App, ui: &mut Ui, o: Pos2, live: bool) {
     let p = ui.painter().clone();
     let at = |x: f32, y: f32, w: f32, h: f32| Rect::from_min_size(o + vec2(x, y), vec2(w, h));
     let selected = device(&app.midi);
-    let trial = selected.as_ref().is_some_and(|d| d.rx3_trial_active());
+    let trial = selected.as_ref().is_some_and(|d| d.profile_trial_active());
     let can_edit = selected.is_some() && !trial;
     let tips = app.prefs.tooltips;
     let tip = move |r: egui::Response, t: &str| if tips { r.on_hover_text(t) } else { r };
@@ -661,7 +661,7 @@ fn content(app: &mut App, ui: &mut Ui, o: Pos2, live: bool) {
     let cresp = combo_box(ui, cr, "device", &shown, cur.is_empty(), live);
     app.midi.win.at.insert("device".into(), cr.center());
     let source_tip = if trial {
-        "The experimental XDJ-RX3 profile is active for this connection. Stop the trial to return to your previous mapping."
+        "The experimental controller profile is active for this connection. Stop the trial to return to your previous mapping."
     } else if selected.as_ref().is_some_and(|d| d.from_rekordbox()) {
         "This controller uses your AlphaTheta Rekordbox user mapping. MIDI Learn saves your edits in recordbox."
     } else {
@@ -677,14 +677,18 @@ fn content(app: &mut App, ui: &mut Ui, o: Pos2, live: bool) {
     }
     if let Some(d) = selected.as_ref().filter(|d| d.needs_auth) {
         p.text(o + vec2(240.0, 52.0), Align2::LEFT_CENTER, format!("{}: rekordbox unlocks this model with a hardware handshake that recordbox does not have. It may not respond.", d.name), jf(13.0), hex(0xE04848));
-    } else if let Some(d) = selected.as_ref().filter(|d| crate::midi_csv::rx3_primary_input(&d.name)) {
-        let label = if trial { "Stop RX3 profile" } else { "Try RX3 profile" };
+    } else if let Some((d, profile)) = selected.as_ref().and_then(|d| Some((d, crate::midi_csv::trial_profile(&d.name)?))) {
+        let (short, setup) = match profile {
+            crate::midi_csv::TrialProfile::Rx3 => ("RX3", "Try two decks in PERFORMANCE mode. On the XDJ-RX3 choose SOURCE → SOFTWARE CONTROL and press LOAD for each deck. Set MIXER MODE to MIDI CONTROL to use the software mixer."),
+            crate::midi_csv::TrialProfile::OpusQuad => ("OPUS-QUAD", "On the OPUS-QUAD choose SOURCE → SOFTWARE CONTROL and press LOAD 1/3 or LOAD 2/4 for each side. Choose a four-deck PERFORMANCE layout to control decks 3 and 4."),
+        };
+        let label = format!("{} {short} profile", if trial { "Stop" } else { "Try" });
         let r = at(240.0, 40.0, 152.0, 24.0);
-        let button = text_button(ui, r, "rx3_trial", label, trial, live, (false, false));
-        if tip(button, "Try two decks in PERFORMANCE mode. On the XDJ-RX3 choose SOURCE → SOFTWARE CONTROL and press LOAD for each deck. Set MIXER MODE to MIDI CONTROL to use the software mixer.").clicked() {
+        let button = text_button(ui, r, "controller_trial", &label, trial, live, (false, false));
+        if tip(button, setup).clicked() {
             set_learn(&mut app.midi, false);
             if let Some(hub) = &app.midi.hub {
-                hub.set_rx3_trial(d, !trial);
+                hub.set_profile_trial(d, !trial);
             }
             app.midi.win.edit = None;
             app.midi.win.ask = None;
