@@ -165,7 +165,6 @@ pub fn missing_reason(id: u16) -> &'static str {
         0xa003 | 0xa007 | 0xa009 | 0xa100 | 0xa008 | 0xa002 | 0xa001 => "rekordbox's own online and registration pages.",
         0x2010 | 0x2018 => "greyed in recordbox's menu (no rekordbox 5 library, no device library backups).",
         0x3005 => "rekordbox's own name says it: \"Currently not working\".",
-        0xb054 => "the Light appearance is not drawn yet.",
         0xb11e | 0xb11f => "recordbox's Playlist Palette has one bank.",
         0x30e3 => "SP.SCRATCH is not built.",
         0x3053 => "the BPM field's command was not traced (what it focuses or switches is unknown).",
@@ -260,6 +259,7 @@ pub fn action(base: u16) -> Option<Ka> {
         0xb04c => Menu("split_screen"),
         0xb04e => Menu("fullscreen"),
         0xb053 => Menu("appearance_dark"),
+        0xb054 => Menu("appearance_light"),
         // ---- Browse
         0xb105 => Menu("filter"),
         0xb106 | 0xb107 => Menu("info_window"),

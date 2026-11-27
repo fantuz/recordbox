@@ -49,7 +49,7 @@ thread_local! {
 
 /// Every menu command: (id, label, ticked item). The order here is not the menu order. Some
 /// commands are in no menu (they are reached from Preferences > Keyboard or a context menu).
-pub const COMMANDS: [(&str, &str, bool); 92] = [
+pub const COMMANDS: [(&str, &str, bool); 95] = [
     ("edit_cut", "Cut", false),
     ("edit_copy", "Copy", false),
     ("edit_paste", "Paste", false),
@@ -125,6 +125,9 @@ pub const COMMANDS: [(&str, &str, bool); 92] = [
     ("property", "Property", false),
     ("load", "Load to Player", false),
     ("trash", "Restore Removed Tracks…", false),
+    ("stem_vocals", "Vocals", false),
+    ("stem_inst", "Instrumental", false),
+    ("stem_stop", "Stop Exporting Stems", false),
     ("p_import_playlist", "Import Playlist", false),
     ("new_playlist", "Create New Playlist", false),
     ("new_smart", "Create New Intelligent Playlist", false),
@@ -155,7 +158,7 @@ use It::{Sep, Sub, C};
 
 /// Submenus: (key, title). "add_to_playlist", "export_track" and "export_playlist" are filled
 /// in from the playlist tree and the connected devices (`fill_playlists`, `fill_devices`).
-const SUBMENUS: [(&str, &str); 16] = [
+const SUBMENUS: [(&str, &str); 17] = [
     ("file", "File"),
     ("import", "Import"),
     ("additional", "Additional contents"),
@@ -169,6 +172,7 @@ const SUBMENUS: [(&str, &str); 16] = [
     ("analysis_lock", "Analysis Lock"),
     ("add_to_playlist", "Add To Playlist"),
     ("export_track", "Export Track"),
+    ("export_stems", "Export Stems"),
     ("playlist", "Playlist"),
     ("export_playlist", "Export Playlist"),
     ("save_info", "Save Playlist Info"),
@@ -231,6 +235,7 @@ fn layout(mode: u8) -> Vec<(&'static str, Vec<It>)> {
         // recordbox's own.
         Sep,
         C("trash"),
+        Sub("export_stems"),
     ];
     let playlist = vec![
         Sub("export_playlist"),
@@ -261,6 +266,7 @@ fn layout(mode: u8) -> Vec<(&'static str, Vec<It>)> {
         ("view", view),
         ("appearance", vec![C("appearance_dark"), C("appearance_light")]),
         ("track", track),
+        ("export_stems", vec![C("stem_vocals"), C("stem_inst"), Sep, C("stem_stop")]),
         ("analysis_lock", vec![C("lock_on"), C("lock_off")]),
         ("playlist", playlist),
         ("save_info", vec![C("save_info_txt"), C("save_info_m3u8")]),
@@ -492,9 +498,10 @@ pub fn state(app: &App) -> HashMap<&'static str, (bool, bool)> {
             "undo" => (!app.undo.is_empty(), false),
             "redo" => (!app.redo.is_empty(), false),
             "fullscreen" => (true, fullscreen_viewport(&app.ctx).is_some_and(|(_, fullscreen)| fullscreen)),
-            // The Light appearance does not exist in recordbox (Preferences > View says why).
-            "appearance_dark" => (true, true),
-            "appearance_light" => (false, false),
+            "appearance_dark" => (!crate::ui_edit::is_edit(app), crate::ui_edit::is_edit(app) || app.prefs.rb.color_theme != 2),
+            "appearance_light" => (!crate::ui_edit::is_edit(app), !crate::ui_edit::is_edit(app) && app.prefs.rb.color_theme == 2),
+            "stem_vocals" | "stem_inst" => (has_sel && app.prefs.show_stems && !app.prefs.rb.library_protection, false),
+            "stem_stop" => (crate::stem_export::busy(app), false),
             "layout_player" => (true, layout == 0),
             "layout_2players" => (true, layout == 1),
             "layout_dual" => (true, layout == 2),
@@ -852,6 +859,8 @@ pub fn handle(app: &mut App, id: &str) {
                 crate::set_window_fullscreen(&app.ctx, id, app.library_window.as_mut(), !fullscreen);
             }
         }
+        "appearance_dark" if !crate::ui_edit::is_edit(app) => app.prefs.rb.color_theme = 1,
+        "appearance_light" if !crate::ui_edit::is_edit(app) => app.prefs.rb.color_theme = 2,
         "layout_player" => app.set_player_layout(0),
         "layout_2players" => app.set_player_layout(1),
         "layout_dual" => app.set_player_layout(2),
@@ -1013,6 +1022,9 @@ pub fn handle(app: &mut App, id: &str) {
             }
         }
         "export_device" => crate::ui_browser::open_export(app, vec![], vec![]),
+        "stem_vocals" => crate::stem_export::request(app, &sel, crate::stem_export::Part::Vocals, false),
+        "stem_inst" => crate::stem_export::request(app, &sel, crate::stem_export::Part::Instrumental, false),
+        "stem_stop" => crate::stem_export::stop(app),
         _ => {}
     }
 }

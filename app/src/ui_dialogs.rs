@@ -36,7 +36,7 @@ fn info_window(app: &mut App, ctx: &Context) {
         kit::apply_style(ui);
         egui::Grid::new("prop").num_columns(2).spacing(vec2(10.0, 5.0)).show(ui, |ui| {
             let field = |ui: &mut Ui, label: &str, v: &mut String| {
-                ui.label(RichText::new(label).color(DIM2));
+                ui.label(RichText::new(label).color(INFO_LBL));
                 ui.add(egui::TextEdit::singleline(v).desired_width(320.0));
                 ui.end_row();
             };
@@ -55,14 +55,14 @@ fn info_window(app: &mut App, ctx: &Context) {
             field(ui, "Comments", &mut t.comment);
             field(ui, "Message", &mut t.message);
             field(ui, "Release Date", &mut t.release_date);
-            ui.label(RichText::new("Year / Track / Disc").color(DIM2));
+            ui.label(RichText::new("Year / Track / Disc").color(INFO_LBL));
             ui.horizontal(|ui| {
                 ui.add(egui::DragValue::new(&mut t.year).range(0..=9999));
                 ui.add(egui::DragValue::new(&mut t.track_no).range(0..=999));
                 ui.add(egui::DragValue::new(&mut t.disc_no).range(0..=99));
             });
             ui.end_row();
-            ui.label(RichText::new("Key").color(DIM2));
+            ui.label(RichText::new("Key").color(INFO_LBL));
             let alnum = app.prefs.key_alnum;
             kit::combo_plain("propkey").selected_text(if t.key < 0 { "—".to_string() } else { key_name(t.key, alnum) }).show_ui(ui, |ui| {
                 ui.selectable_value(&mut t.key, -1, "—");
@@ -71,20 +71,20 @@ fn info_window(app: &mut App, ctx: &Context) {
                 }
             });
             ui.end_row();
-            ui.label(RichText::new("Rating").color(DIM2));
+            ui.label(RichText::new("Rating").color(INFO_LBL));
             ui.add(egui::Slider::new(&mut t.rating, 0..=5));
             ui.end_row();
-            ui.label(RichText::new("Color").color(DIM2));
+            ui.label(RichText::new("Color").color(INFO_LBL));
             kit::combo_plain("propcolor").selected_text(app.prefs.color_name(t.color)).show_ui(ui, |ui| {
                 for i in 0..9u8 {
                     ui.selectable_value(&mut t.color, i, app.prefs.color_name(i));
                 }
             });
             ui.end_row();
-            ui.label(RichText::new("Location").color(DIM2));
+            ui.label(RichText::new("Location").color(INFO_LBL));
             ui.label(RichText::new(&t.path).size(10.5).color(DIM));
             ui.end_row();
-            ui.label(RichText::new("File").color(DIM2));
+            ui.label(RichText::new("File").color(INFO_LBL));
             ui.label(RichText::new(format!("{} · {} kbps · {} Hz · {:.1} MB · {}", t.file_type.to_uppercase(), t.bitrate, t.sample_rate, t.file_size as f64 / 1e6, fmt_time(t.duration, false))).size(10.5).color(DIM));
             ui.end_row();
         });
@@ -660,7 +660,7 @@ fn confirm_windows(app: &mut App, ctx: &Context) {
             kit::apply_style(ui);
             ui.set_width(380.0);
             // The logo (mark and wordmark) instead of the name in text.
-            ui.add(crate::brand::logo_image(WHITE, 22.0));
+            ui.add(crate::brand::logo_image(WHITE.c(), 22.0));
             ui.add_space(2.0);
             ui.label(RichText::new(format!("Version {}", env!("CARGO_PKG_VERSION"))).size(11.0).color(DIM));
             ui.add_space(6.0);

@@ -739,35 +739,210 @@ pub fn iir_bpf2(fc: f64, q: f64, rate: f64) -> [f32; 5] {
     [(n * v10) as f32, 0.0, (-n * v10) as f32, ((2.0 * v11 - 2.0) * n) as f32, (n * (1.0 - v10 + v11)) as f32]
 }
 
-/// `IirFilter::calcCoefLpf1stOrder` / `Hpf1stOrder` as b0, b1, a1.
+/// `IirFilter::calcCoefLpf1stOrder` 0x1028bfab4 / `Hpf1stOrder` 0x1028bfa4c as b0, b1, a1
+/// (no limit on the cutoff in rekordbox; here just under Nyquist, which no caller reaches).
 pub fn iir_1st(fc: f64, rate: f64, hp: bool) -> [f32; 3] {
-    let t = (fc.min(0.49 * rate) * PI / rate).tan();
+    let t = (fc.min(0.4999 * rate) * 3.14159265 / rate).tan();
     let n = 1.0 / (t + 1.0);
     let a1 = -(n - t * n);
     if hp { [n as f32, -n as f32, a1 as f32] } else { [(n * t) as f32, (n * t) as f32, a1 as f32] }
 }
 
-/// `Filter::make_lpf2(fc, damping, gain)` (the three-number form the CFX filter uses): the
-/// cutoff is not pre-warped, `damping` is 1/Q and `gain` scales the whole response.
-pub fn make_lpf2(fc: f64, damping: f64, gain: f64, rate: f64) -> [f32; 5] {
+/// `Filter::make_lpf2(fc, damping, gain)` 0x102aad1fc (the three-number form the CFX filter
+/// uses): bilinear with the cutoff not pre-warped (`Filter::initialize` keeps T = 1/fs and T^2),
+/// `damping` is 1/Q and `gain` scales the whole response. b0, b1, b2, a1, a2 in double, as
+/// rekordbox keeps them.
+pub fn make_lpf2(fc: f64, damping: f64, gain: f64, rate: f64) -> [f64; 5] {
     let tt = 1.0 / rate;
-    let w = fc * std::f64::consts::TAU;
-    let v5 = fc * 4.0 * PI * damping * tt;
-    let v6 = w * w * tt * tt;
+    let w = fc * 6.28318531;
+    let v5 = fc * 12.5663706 * (damping * tt);
+    let v6 = w * w * (tt * tt);
     let n = 1.0 / (v5 + 4.0 + v6);
     let b = v6 * gain * n;
-    [b as f32, (2.0 * b) as f32, b as f32, ((2.0 * v6 - 8.0) * n) as f32, (n * (4.0 - v5 + v6)) as f32]
+    [b, b + b, b, (v6 + v6 - 8.0) * n, n * (4.0 - v5 + v6)]
 }
 
-/// `Filter::make_hpf2(fc, damping, gain)`.
-pub fn make_hpf2(fc: f64, damping: f64, gain: f64, rate: f64) -> [f32; 5] {
+/// `Filter::make_hpf2(fc, damping, gain)` 0x102aad4ec.
+pub fn make_hpf2(fc: f64, damping: f64, gain: f64, rate: f64) -> [f64; 5] {
     let tt = 1.0 / rate;
-    let w = fc * std::f64::consts::TAU;
-    let v5 = fc * 4.0 * PI * damping * tt;
-    let v6 = w * w * tt * tt;
+    let w = fc * 6.28318531;
+    let v5 = fc * 12.5663706 * (damping * tt);
+    let v6 = w * w * (tt * tt);
     let n = 1.0 / (v5 + 4.0 + v6);
     let b = gain * 4.0 * n;
-    [b as f32, (-2.0 * b) as f32, b as f32, ((2.0 * v6 - 8.0) * n) as f32, (n * (4.0 - v5 + v6)) as f32]
+    [b, b * -2.0, b, (v6 + v6 - 8.0) * n, n * (4.0 - v5 + v6)]
+}
+
+/// rekordbox's `Filter::filter2` (double, 0x102aadd24) for two channels. It runs in transposed
+/// direct form II but, whenever the coefficients change, rebuilds its two states from the last
+/// two inputs and outputs it keeps, so it behaves as direct form I: that is what this is.
+#[derive(Clone, Copy, Default)]
+pub struct Filter2 {
+    pub c: [f64; 5],
+    /// Per channel: x[n-1], x[n-2], y[n-1], y[n-2].
+    h: [[f64; 4]; 2],
+}
+
+impl Filter2 {
+    pub fn clear(&mut self) {
+        self.h = [[0.0; 4]; 2];
+    }
+
+    #[inline]
+    pub fn run(&mut self, ch: usize, x: f64) -> f64 {
+        let c = &self.c;
+        let h = &mut self.h[ch];
+        let y = c[0] * x + c[1] * h[0] + c[2] * h[1] - c[3] * h[2] - c[4] * h[3];
+        h[1] = h[0];
+        h[0] = x;
+        h[3] = h[2];
+        h[2] = y;
+        y
+    }
+}
+
+/// rekordbox's `SmoothFloat<float>` (setTargetValue 0x10297acf8, setSmoothingTime 0x10297ad38):
+/// a new target is reached in a straight line over n = (int)(ms x 0.001 x fs) frames, whatever
+/// the distance.
+#[derive(Clone, Copy)]
+pub struct SmoothF {
+    pub cur: f32,
+    target: f32,
+    step: f32,
+    left: i32,
+    n: i32,
+    ms: f32,
+}
+
+impl SmoothF {
+    pub fn new(v: f32, ms: f32, rate: f32) -> SmoothF {
+        let mut s = SmoothF { cur: v, target: v, step: 0.0, left: 0, n: 1, ms };
+        s.set_rate(rate);
+        s
+    }
+
+    pub fn set_rate(&mut self, rate: f32) {
+        self.n = (((self.ms * 0.001) * rate) as i32).max(1);
+    }
+
+    /// At `v` with `ms`, for 48 kHz until `set_rate` says otherwise (usable in a const).
+    pub const fn new_const(v: f32, ms: f32) -> SmoothF {
+        SmoothF { cur: v, target: v, step: 0.0, left: 0, n: (ms * 48.0) as i32, ms }
+    }
+
+    /// Set the target and take the next frame's value (a target that moves every frame, as
+    /// rekordbox's per-frame `setTargetValue`).
+    #[inline]
+    pub fn set_next(&mut self, t: f32) -> f32 {
+        self.set(t);
+        self.next()
+    }
+
+    pub fn reset(&mut self, v: f32) {
+        self.cur = v;
+        self.target = v;
+        self.left = 0;
+    }
+
+    pub fn set(&mut self, t: f32) {
+        if (t - self.target).abs() >= 1.1920929e-7 {
+            self.target = t;
+            self.step = (t - self.cur) / self.n as f32;
+            self.left = self.n;
+        }
+    }
+
+    #[inline]
+    pub fn settled(&self) -> bool {
+        self.left == 0
+    }
+
+    /// The value for the next frame.
+    #[inline]
+    pub fn next(&mut self) -> f32 {
+        if self.left > 0 {
+            self.left -= 1;
+            self.cur = if self.left == 0 { self.target } else { self.cur + self.step };
+        }
+        self.cur
+    }
+}
+
+/// rekordbox's `SmoothShiftInteger` (setValue 0x10297d58c, processSamples 0x10297d6d8,
+/// setShiftingTime 0x10297d210): an integer that moves one step toward its target every
+/// `per` = (int)(ms x 0.001 x fs) frames. A new value equal to the current one while it is still
+/// moving elsewhere is ignored, as in rekordbox.
+#[derive(Clone, Copy)]
+pub struct ShiftInt {
+    pub cur: i32,
+    target: i32,
+    dir: i32,
+    /// Frames until the next step (while moving).
+    pub count: i32,
+    per: i32,
+    ms: f32,
+}
+
+impl ShiftInt {
+    pub fn new(v: i32, ms: f32, rate: f32) -> ShiftInt {
+        let mut s = ShiftInt { cur: v, target: v, dir: 1, count: 0, per: 1, ms };
+        s.set_rate(rate);
+        s
+    }
+
+    pub fn set_rate(&mut self, rate: f32) {
+        self.per = ((self.ms * 0.001) * rate) as i32;
+    }
+
+    pub fn reset(&mut self, v: i32) {
+        self.cur = v;
+        self.target = v;
+        self.count = 0;
+    }
+
+    pub fn set(&mut self, v: i32) {
+        if self.cur != v {
+            if self.cur == self.target {
+                self.count = self.per;
+            }
+            self.dir = if self.cur < v { 1 } else { -1 };
+            self.target = v;
+        }
+    }
+
+    #[inline]
+    pub fn moving(&self) -> bool {
+        self.cur != self.target
+    }
+
+    pub fn advance(&mut self, frames: i32) {
+        if self.cur == self.target || frames < 0 {
+            return;
+        }
+        let (mut v, mut c, mut n) = (self.cur, self.count, frames);
+        if n == 0 {
+            return;
+        }
+        loop {
+            if c - n > 0 {
+                c -= n;
+                break;
+            }
+            v += self.dir;
+            if v == self.target {
+                self.count = 0;
+                self.cur = v;
+                return;
+            }
+            n -= c;
+            c = self.per;
+            if n <= 0 {
+                break;
+            }
+        }
+        self.count = c;
+        self.cur = v;
+    }
 }
 
 /// `Filter::make_lpf2(fc, resonance dB, prewarp)` / `make_hpf2`: Q = 10^(dB / 20).
@@ -1151,9 +1326,10 @@ mod tests {
         // make_lpf2 / make_hpf2 at DC and Nyquist.
         let dc = |c: &[f32; 5]| (c[0] + c[1] + c[2]) / (1.0 + c[3] + c[4]);
         let ny = |c: &[f32; 5]| (c[0] - c[1] + c[2]) / (1.0 - c[3] + c[4]);
-        let l = make_lpf2(1000.0, 0.5, 1.0, 48000.0);
+        let f = |c: [f64; 5]| c.map(|v| v as f32);
+        let l = f(make_lpf2(1000.0, 0.5, 1.0, 48000.0));
         assert!((dc(&l) - 1.0).abs() < 1e-4 && ny(&l).abs() < 1e-4);
-        let h = make_hpf2(1000.0, 0.5, 0.8, 48000.0);
+        let h = f(make_hpf2(1000.0, 0.5, 0.8, 48000.0));
         assert!(dc(&h).abs() < 1e-4 && (ny(&h) - 0.8).abs() < 0.01);
         let b = iir_bpf2(1000.0, 1.0, 48000.0);
         assert!(dc(&b).abs() < 1e-5 && ny(&b).abs() < 1e-5);

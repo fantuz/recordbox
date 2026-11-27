@@ -90,8 +90,8 @@ pub fn link_button(app: &mut App, ui: &mut Ui, r: Rect) {
     let br = Rect::from_min_max(pos2(r.min.x + 396.0, r.min.y + 3.0), pos2(r.min.x + 441.0, r.max.y - 3.0));
     let resp = ui.interact(br, ui.id().with("mpl_link_btn"), Sense::click());
     let enabled = app.prefs.mixx.mpl.enable;
-    p.text(c + vec2(0.0, 0.75), Align2::CENTER_CENTER, "LINK", caps(12.6), if !enabled { OFF } else { WHITE });
-    p.rect_filled(Rect::from_min_max(pos2(r.min.x + 398.0, r.min.y + 20.0), pos2(r.min.x + 438.0, r.min.y + 22.0)), 0.0, if app.mixx.mpl.any_linked() { BLUE } else { hex(0x282828) });
+    p.text(c + vec2(0.0, 0.75), Align2::CENTER_CENTER, "LINK", caps(12.6), if !enabled { OFF.c() } else { WHITE.c() });
+    p.rect_filled(Rect::from_min_max(pos2(r.min.x + 398.0, r.min.y + 20.0), pos2(r.min.x + 438.0, r.min.y + 22.0)), 0.0, if app.mixx.mpl.any_linked() { BLUE.c() } else { gy(0x282828) });
     app.mixx.mpl.ui.rects.retain(|x| x.0 != "panel");
     app.mixx.mpl.ui.rects.push(("panel".into(), br));
     let resp = if app.prefs.tooltips { resp.on_hover_text(TIP_PANEL) } else { resp };
@@ -134,8 +134,8 @@ fn move_icon(p: &Painter, r: Rect, c: Color32) {
 /// A marker button (`mpl_mix_in_*` / `mpl_mix_out_*`, 23 x 23): round at the outer side,
 /// with the bracket; lit, it is blue and carries the deck's letter.
 fn marker_icon(p: &Painter, r: Rect, out: bool, on: bool, deck: usize) {
-    let fill = if on { LIT } else { hex(0x1B1B1B) };
-    let fg = if on { Color32::BLACK } else { WHITE };
+    let fill = if on { LIT } else { gy(0x1B1B1B) };
+    let fg = if on { Color32::BLACK } else { WHITE.c() };
     let o = r.min;
     let (w, h) = (r.width(), r.height());
     let (round, square) = if out { (r, Rect::from_min_max(o, o + vec2(w / 2.0, h))) } else { (r, Rect::from_min_max(o + vec2(w / 2.0, 0.0), r.max)) };
@@ -207,8 +207,8 @@ pub fn strip(app: &mut App, ui: &mut Ui, r: Rect) {
         let br = at(x, 6.0, w, 16.0);
         let on = app.mixx.mpl.mode == mode;
         let resp = ui.interact(br, ui.id().with(("mpl_mode", i)), Sense::click());
-        p.rect_filled(br, 1.0, if on { BLUE } else if resp.hovered() { hex(0x343434) } else { BTN });
-        p.text(br.center() + vec2(1.0, 0.5), Align2::CENTER_CENTER, label, rb(10.5), if on { Color32::BLACK } else { WHITE });
+        p.rect_filled(br, 1.0, if on { BLUE.c() } else if resp.hovered() { gy(0x343434) } else { BTN.c() });
+        p.text(br.center() + vec2(1.0, 0.5), Align2::CENTER_CENTER, label, rb(10.5), if on { Color32::BLACK } else { WHITE.c() });
         map.push((if mode == MODE_IN { "mix_in" } else { "mix_out" }.into(), br));
         if tip(resp, app, tipt).clicked() {
             app.mpl_set_mode(mode);
@@ -217,39 +217,39 @@ pub fn strip(app: &mut App, ui: &mut Ui, r: Rect) {
     for (i, (x, dir)) in [(164.0f32, -1i32), (199.0, 1)].into_iter().enumerate() {
         let br = at(x, 6.0, 25.0, 16.0);
         let resp = ui.interact(br, ui.id().with(("mpl_sel", i)), Sense::click());
-        p.rect_filled(br, 2.0, if resp.hovered() { hex(0x343434) } else { BTN });
+        p.rect_filled(br, 2.0, if resp.hovered() { gy(0x343434) } else { BTN.c() });
         let c = br.center();
         let s = dir as f32;
-        p.add(Shape::line(vec![c + vec2(-1.6 * s - 0.5, -3.1), c + vec2(1.6 * s - 0.5, 0.0), c + vec2(-1.6 * s - 0.5, 3.1)], Stroke::new(1.4, hex(0x969696))));
+        p.add(Shape::line(vec![c + vec2(-1.6 * s - 0.5, -3.1), c + vec2(1.6 * s - 0.5, 0.0), c + vec2(-1.6 * s - 0.5, 3.1)], Stroke::new(1.4, gy(0x969696))));
         map.push((if dir < 0 { "prev" } else { "next" }.into(), br));
         if tip(resp, app, TIP_SELECT).clicked() {
             app.mpl_select_cue(dir);
         }
     }
     for x in [244.0, 344.0, 406.0] {
-        p.rect_filled(at(x, 8.0, 1.0, 12.0), 0.0, hex(0x323232));
+        p.rect_filled(at(x, 8.0, 1.0, 12.0), 0.0, gy(0x323232));
     }
     // SILENT and EDIT act on the selected deck (or the one holding the MIX IN point).
     let sd = app.mixx.mpl.selected.or(app.mixx.mpl.in_deck).filter(|d| app.mixx.mpl.mix_in[*d] != -1);
     let (s_on, e_on) = sd.map(|d| (app.mixx.mpl.silent_on[d], app.mixx.mpl.silent_edit[d])).unwrap_or((false, false));
     let sr = at(264.0, 5.0, 18.0, 18.0);
     let resp = ui.interact(sr, ui.id().with("mpl_silent"), Sense::click());
-    silent_icon(&p, sr, if s_on { LIT } else if sd.is_some() { hex(0x969696) } else { hex(0x404040) });
+    silent_icon(&p, sr, if s_on { LIT } else if sd.is_some() { gy(0x969696) } else { gy(0x404040) });
     map.push(("silent".into(), sr));
     if tip(resp, app, TIP_SILENT).clicked() {
         app.mpl_toggle_silent();
     }
-    p.rect_filled(at(287.0, 13.5, 5.0, 1.0), 0.0, hex(0x404040));
+    p.rect_filled(at(287.0, 13.5, 5.0, 1.0), 0.0, gy(0x404040));
     let er = at(297.0, 7.0, 27.0, 12.0);
     let resp = ui.interact(er.expand(2.0), ui.id().with("mpl_edit"), Sense::click());
-    p.text(pos2(er.min.x + 1.0, er.center().y + 1.5), Align2::LEFT_CENTER, "EDIT", rb(11.0), if e_on { LIT } else if sd.is_some() { hex(0x969696) } else { hex(0x626262) });
+    p.text(pos2(er.min.x + 1.0, er.center().y + 1.5), Align2::LEFT_CENTER, "EDIT", rb(11.0), if e_on { LIT } else if sd.is_some() { gy(0x969696) } else { gy(0x626262) });
     map.push(("edit".into(), er));
     if tip(resp, app, TIP_EDIT).clicked() {
         app.mpl_toggle_silent_edit();
     }
     let mr = at(364.0, 2.0, 22.0, 22.0);
     let resp = ui.interact(mr, ui.id().with("mpl_move"), Sense::click());
-    move_icon(&p, mr, if app.mixx.mpl.move_mode { LIT } else { hex(0x969696) });
+    move_icon(&p, mr, if app.mixx.mpl.move_mode { LIT } else { gy(0x969696) });
     map.push(("move".into(), mr));
     if tip(resp, app, TIP_MOVE).clicked() {
         app.mixx.mpl.move_mode = !app.mixx.mpl.move_mode;
@@ -260,8 +260,8 @@ pub fn strip(app: &mut App, ui: &mut Ui, r: Rect) {
     if linked && !ready {
         p.rect_filled(lr, 2.0, BLUE);
     }
-    p.rect_stroke(lr, 2.0, Stroke::new(1.0, if ready { hex(0x969696) } else if linked { BLUE } else { hex(0x434343) }), egui::StrokeKind::Inside);
-    p.text(lr.center() + vec2(0.0, 0.5), Align2::CENTER_CENTER, "MIX POINT LINK", rb(11.8), if linked && !ready { Color32::BLACK } else if ready { WHITE } else { hex(0x626262) });
+    p.rect_stroke(lr, 2.0, Stroke::new(1.0, if ready { gy(0x969696) } else if linked { BLUE.c() } else { gy(0x434343) }), egui::StrokeKind::Inside);
+    p.text(lr.center() + vec2(0.0, 0.5), Align2::CENTER_CENTER, "MIX POINT LINK", rb(11.8), if linked && !ready { Color32::BLACK } else if ready { WHITE.c() } else { gy(0x626262) });
     map.push(("link".into(), lr));
     if tip(resp, app, TIP_LINK).clicked() && ready {
         app.mpl_request_link();
@@ -288,7 +288,7 @@ pub fn strip(app: &mut App, ui: &mut Ui, r: Rect) {
                 continue;
             }
             let y = oy + 3.0 + 3.0 * d as f32;
-            p.rect_filled(Rect::from_min_max(pos2(ox, y + 0.5), pos2(sx(dk.duration), y + 1.5)), 0.0, hex(0x7D7D7D));
+            p.rect_filled(Rect::from_min_max(pos2(ox, y + 0.5), pos2(sx(dk.duration), y + 1.5)), 0.0, gy(0x7D7D7D));
             let mark = |t: f64, c: Color32| {
                 let x = sx(t).round();
                 p.rect_filled(Rect::from_min_max(pos2(x - 1.0, y), pos2(x + 3.0, y + 3.0)), 0.0, BG);
@@ -302,7 +302,7 @@ pub fn strip(app: &mut App, ui: &mut Ui, r: Rect) {
             }
             let pos = app.player.decks[d].lock().pos;
             let sr = dk.audio.as_ref().map(|a| a.sr as f64).unwrap_or(44100.0);
-            mark(pos / sr, WHITE);
+            mark(pos / sr, WHITE.c());
         }
         // The part of the track the lanes show.
         let v0 = app.mixx.mpl.ui.view[focus].clamp(0.0, longest);
@@ -338,9 +338,9 @@ pub fn strip(app: &mut App, ui: &mut Ui, r: Rect) {
         for k in 0..6 {
             let x = o.x + LANE_X + k as f32 * ((lane_w - 3.5) / 6.0);
             let t = (v0 + (x - o.x - LANE_X) as f64 / pps).max(0.0);
-            p.rect_filled(Rect::from_min_max(pos2(x, o.y + 62.0), pos2(x + 0.5, o.y + 71.0)), 0.0, hex(0x4A4A4A));
+            p.rect_filled(Rect::from_min_max(pos2(x, o.y + 62.0), pos2(x + 0.5, o.y + 71.0)), 0.0, gy(0x4A4A4A));
             // (The first label starts on its tick, the others are centred on theirs.)
-            p.text(pos2(x + if k == 0 { 0.0 } else { 1.5 }, o.y + 58.5), if k == 0 { Align2::LEFT_CENTER } else { Align2::CENTER_CENTER }, format!("{:02}:{:02}", t.round() as i64 / 60, t.round() as i64 % 60), rb(11.6), hex(0x969696));
+            p.text(pos2(x + if k == 0 { 0.0 } else { 1.5 }, o.y + 58.5), if k == 0 { Align2::LEFT_CENTER } else { Align2::CENTER_CENTER }, format!("{:02}:{:02}", t.round() as i64 / 60, t.round() as i64 % 60), rb(11.6), gy(0x969696));
         }
     }
 
@@ -352,12 +352,12 @@ pub fn strip(app: &mut App, ui: &mut Ui, r: Rect) {
         let by = box_y0 + pitch * d as f32;
         let br = at(1.0, by, 95.0, box_h);
         let sel = app.mixx.mpl.selected == Some(d);
-        p.rect_filled(br, 0.0, if selectable[d] || sel { hex(0x323232) } else { hex(0x323232).gamma_multiply(0.4) });
+        p.rect_filled(br, 0.0, if selectable[d] || sel { gy(0x323232) } else { gy(0x323232).gamma_multiply(0.4) });
         if sel {
             p.rect_filled(Rect::from_min_size(br.min, vec2(16.0, box_h)), 0.0, BLUE);
             p.rect_stroke(br, 0.0, Stroke::new(1.0, BLUE), egui::StrokeKind::Inside);
         }
-        p.text(pos2(o.x + 9.25, br.center().y + 2.0), Align2::CENTER_CENTER, format!("{}", d + 1), bold(10.5), if sel { Color32::BLACK } else { hex(0x969696) });
+        p.text(pos2(o.x + 9.25, br.center().y + 2.0), Align2::CENTER_CENTER, format!("{}", d + 1), bold(10.5), if sel { Color32::BLACK } else { gy(0x969696) });
         map.push((format!("box{d}"), br));
         let m = &app.mixx.mpl;
         for (which, x, set) in [(MODE_IN, 25.5f32, m.mix_in[d] != -1), (MODE_OUT, 60.0, m.mix_out[d] != -1)] {
@@ -409,8 +409,8 @@ pub fn strip(app: &mut App, ui: &mut Ui, r: Rect) {
                     lp.add(Shape::convex_polygon(vec![pos2(x - 2.5, bot), pos2(x + 3.5, bot), pos2(x + 0.5, bot - 4.0)], hex(0xE01010), Stroke::NONE));
                 } else {
                     for (y0, y1, cap) in [(top, top + 3.5, top), (bot - 3.5, bot, bot - 1.0)] {
-                        lp.rect_filled(Rect::from_min_max(pos2(x, y0), pos2(x + 1.0, y1)), 0.0, hex(0x808080));
-                        lp.rect_filled(Rect::from_min_max(pos2(x - 1.0, cap), pos2(x + 2.0, cap + 1.0)), 0.0, hex(0x808080));
+                        lp.rect_filled(Rect::from_min_max(pos2(x, y0), pos2(x + 1.0, y1)), 0.0, gy(0x808080));
+                        lp.rect_filled(Rect::from_min_max(pos2(x - 1.0, cap), pos2(x + 2.0, cap + 1.0)), 0.0, gy(0x808080));
                     }
                 }
             }
@@ -420,7 +420,7 @@ pub fn strip(app: &mut App, ui: &mut Ui, r: Rect) {
         if m.silent_on[d] && m.mix_in[d] != -1 {
             let xe = x_of(m.silent_end[d].max(0) as f64 / 1000.0);
             lp.rect_filled(Rect::from_min_max(pos2(x_of(0.0), lr.min.y + 6.0), pos2(xe, lr.max.y - 6.0)), 0.0, Color32::from_black_alpha(150));
-            lp.rect_filled(Rect::from_min_max(pos2(xe - 0.5, lr.min.y + 6.0), pos2(xe + 0.5, lr.max.y - 6.0)), 0.0, hex(0x969696));
+            lp.rect_filled(Rect::from_min_max(pos2(xe - 0.5, lr.min.y + 6.0), pos2(xe + 0.5, lr.max.y - 6.0)), 0.0, gy(0x969696));
         }
         // Cues: hot cues in their colour and memory cues in red along the top, the current
         // cue in orange at the bottom.
@@ -450,13 +450,13 @@ pub fn strip(app: &mut App, ui: &mut Ui, r: Rect) {
         }
         // The playhead.
         let xp = x_of(pos).round();
-        lp.rect_filled(Rect::from_min_max(pos2(xp, lr.min.y), pos2(xp + 1.0, lr.max.y)), 0.0, hex(0x717171));
+        lp.rect_filled(Rect::from_min_max(pos2(xp, lr.min.y), pos2(xp + 1.0, lr.max.y)), 0.0, gy(0x717171));
         // A linked MIX IN deck counts its bars from the MIX IN point
         // (`operateWaveViewSetMixPointBeatCountMode`, set by `doMixPointLinkStart`): "-1.2Bars"
         // three beats before it, in the beat count's blue, ending 2 pt left of the playhead.
         if m.link_set[d] && m.mix_in[d] != -1 {
             let label = crate::mpl::mix_point_bars(&dk.beats, m.mix_in[d] as f64 / 1000.0, pos);
-            lp.text(pos2(xp as f32 - 2.0, lr.min.y + 9.0), Align2::RIGHT_CENTER, label, crate::ui_perf_layouts::arial_b(if four { 11.0 } else { 13.0 }), crate::theme::BEAT_BLUE);
+            lp.text(pos2(xp as f32 - 2.0, lr.min.y + 9.0), Align2::RIGHT_CENTER, label, crate::ui_perf_layouts::arial_b(if four { 11.0 } else { 13.0 }), crate::theme::BEAT_BLUE.c());
         }
         // Clicks and drags.
         let resp = ui.interact(lr, ui.id().with(("mpl_lane", d)), Sense::click_and_drag());
@@ -483,17 +483,17 @@ pub fn strip(app: &mut App, ui: &mut Ui, r: Rect) {
     // ---- readouts and guidance
     let ry = r.max.y - 18.25;
     let m = &app.mixx.mpl;
-    let grey = hex(0x969696);
+    let grey = gy(0x969696);
     let mut dels: Vec<(usize, u8)> = vec![];
     for (label, x, deck, t, which) in [("MIX IN :", 26.0f32, m.in_deck, m.in_deck.map(|d| m.mix_in[d]).unwrap_or(-1), MODE_IN), ("MIX OUT :", 205.5, m.out_deck, m.out_deck.map(|d| m.mix_out[d]).unwrap_or(-1), MODE_OUT)] {
         // (rekordbox's labels are 50 and 55 pt wide and squeeze their text to fit.)
         squeezed_text(ui, &p, pos2(o.x + x, ry + 1.0), label, rb(11.3), grey, if which == MODE_IN { 38.0 } else { 43.5 });
         if let (Some(d), true) = (deck, t != -1) {
             let vx = o.x + x + if which == MODE_IN { 50.0 } else { 55.0 };
-            p.text(pos2(vx, ry), Align2::LEFT_CENTER, format!("DECK{}  {}", d + 1, mmss(t)), rb(11.6), WHITE);
+            p.text(pos2(vx, ry), Align2::LEFT_CENTER, format!("DECK{}  {}", d + 1, mmss(t)), rb(11.6), WHITE.c());
             let cr = Rect::from_min_size(pos2(vx + 84.0, ry - 10.0), vec2(20.0, 20.0));
             let resp = ui.interact(cr, ui.id().with(("mpl_del", which)), Sense::click());
-            close_icon(&p, cr, if resp.hovered() { WHITE } else { grey });
+            close_icon(&p, cr, if resp.hovered() { WHITE.c() } else { grey });
             map.push((if which == MODE_IN { "del_in" } else { "del_out" }.into(), cr));
             let resp = if app.prefs.tooltips { resp.on_hover_text(format!("Clear the MIX POINT on the MIX {} deck.", if which == MODE_IN { "IN" } else { "OUT" })) } else { resp };
             if resp.clicked() {

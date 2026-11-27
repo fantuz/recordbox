@@ -298,7 +298,7 @@ fn path_row(ui: &mut Ui, value: &Option<String>, empty: &str) {
     ui.painter().rect_filled(r, 3.0, BG);
     let text = value.clone().unwrap_or_else(|| empty.to_string());
     let col = if value.is_some() { WHITE } else { DIM };
-    ui.painter().with_clip_rect(r).text(pos2(r.min.x + 6.5, r.center().y), egui::Align2::LEFT_CENTER, text, inter(12.5), col);
+    ui.painter().with_clip_rect(r).text(pos2(r.min.x + 6.5, r.center().y), egui::Align2::LEFT_CENTER, text, inter(12.5), col.c());
 }
 
 /// The category icons of the sidebar, in a 30 pt box at `o` (shapes as the original's).
@@ -426,7 +426,7 @@ pub fn prefs_window(app: &mut App, ctx: &Context) {
         if !assigning_key {
             crate::window_fullscreen(&app.prefs, vctx, None);
         }
-        egui::CentralPanel::default().frame(egui::Frame::NONE.fill(BG)).show(vctx, |ui| {
+        egui::CentralPanel::default().frame(egui::Frame::NONE.fill(BG.c())).show(vctx, |ui| {
             let h = ui.available_height();
             prefs_body(app, ui, h)
         });
@@ -449,7 +449,7 @@ fn prefs_embedded(app: &mut App, ctx: &Context) {
         return;
     }
     let mut open = true;
-    let frame = egui::Frame::window(&ctx.style()).fill(BG).inner_margin(0.0);
+    let frame = egui::Frame::window(&ctx.style()).fill(BG.c()).inner_margin(0.0);
     let h = (ctx.screen_rect().height() - 90.0).clamp(480.0, WIN.y);
     egui::Window::new("Preferences").open(&mut open).default_size(vec2(WIN.x, h)).collapsible(false).resizable(false).frame(frame).show(ctx, |ui| prefs_body(app, ui, h));
     app.dialogs.prefs_open &= open;
@@ -512,11 +512,11 @@ fn prefs_body(app: &mut App, ui: &mut Ui, height: f32) {
     ui.painter().rect_filled(Rect::from_min_max(o, at(160.0, height)), 0.0, BG2);
     let sr = Rect::from_min_max(at(8.0, 16.0), at(152.0, 40.0));
     ui.painter().rect_filled(sr, 0.0, BG);
-    let lens = egui::Stroke::new(1.0, hex(0x555555));
+    let lens = egui::Stroke::new(1.0, gy(0x555555));
     ui.painter().circle_stroke(at(12.0 + 6.857, 20.0 + 6.857), 5.214, lens);
     ui.painter().line_segment([at(12.0 + 10.64, 20.0 + 11.075), at(12.0 + 14.07, 20.0 + 14.5)], lens);
     let field = Rect::from_min_max(pos2(sr.min.x + 24.0, sr.min.y + 3.0), pos2(sr.max.x - 2.0, sr.max.y));
-    ui.put(field, egui::TextEdit::singleline(&mut app.dialogs.ext.prefs_search).frame(false).font(inter(13.0)).text_color(WHITE));
+    ui.put(field, egui::TextEdit::singleline(&mut app.dialogs.ext.prefs_search).frame(false).font(inter(13.0)).text_color(WHITE.c()));
     let mode = prefs_mode(app);
     let cats = rb::categories(mode);
     // A category the mode does not have (the mode was changed since): the first real one.
@@ -528,18 +528,18 @@ fn prefs_body(app: &mut App, ui: &mut Ui, height: f32) {
         let r = Rect::from_min_size(at(8.0, 56.0 + n as f32 * 33.0), vec2(144.0, 30.0));
         if let Some(why) = absent_reason(*i) {
             crate::ui_prefs_keys::side_icon(ui, r.min, *i, false, true);
-            crate::prefs_font::draw(ui, Rect::from_min_size(pos2(r.min.x + 40.0, r.min.y), vec2(104.0, 30.0)), name, 15.0, false, OFF, kit::Just::Left);
+            crate::prefs_font::draw(ui, Rect::from_min_size(pos2(r.min.x + 40.0, r.min.y), vec2(104.0, 30.0)), name, 15.0, false, OFF.c(), kit::Just::Left);
             ui.interact(r, ui.id().with(("prefs_absent", *i)), egui::Sense::hover()).on_hover_text(why);
             continue;
         }
         let sel = app.dialogs.prefs_tab == *i && app.dialogs.ext.prefs_search.trim().is_empty();
         let resp = ui.interact(r, ui.id().with(("prefs_page", *i)), egui::Sense::click());
-        let bg = if sel { PBLUE } else if resp.hovered() { hex(0x2A2A2A) } else { BG2 };
+        let bg = if sel { PBLUE } else if resp.hovered() { gy(0x2A2A2A) } else { BG2.c() };
         if bg != BG2 {
             ui.painter().rect_filled(r, 0.0, bg);
         }
         crate::ui_prefs_keys::side_icon(ui, r.min, *i, sel, false);
-        crate::prefs_font::draw(ui, Rect::from_min_size(pos2(r.min.x + 40.0, r.min.y), vec2(104.0, 30.0)), name, 15.0, false, if sel { WHITE } else { DIM2 }, kit::Just::Left);
+        crate::prefs_font::draw(ui, Rect::from_min_size(pos2(r.min.x + 40.0, r.min.y), vec2(104.0, 30.0)), name, 15.0, false, if sel { ON_ACCENT.c() } else { PREF_CAT.c() }, kit::Just::Left);
         crate::ui_prefs_item::tab_seen(name, r);
         if resp.clicked() {
             app.dialogs.prefs_tab = *i;
@@ -572,8 +572,8 @@ fn prefs_body(app: &mut App, ui: &mut Ui, height: f32) {
         }
         let r = Rect::from_min_size(at(x, 4.0), vec2(w, 30.0));
         let resp = ui.interact(r, ui.id().with(("prefs_tab", page, i)), egui::Sense::click());
-        ui.painter().rect_filled(r, 0.0, if sel { PBLUE } else if resp.hovered() && out.is_none() { hex(0x2A2A2A) } else { BG2 });
-        crate::prefs_font::draw(ui, r, t, 14.0, false, if sel { WHITE } else if out.is_some() { OFF } else { DIM2 }, kit::Just::Centre);
+        ui.painter().rect_filled(r, 0.0, if sel { PBLUE } else if resp.hovered() && out.is_none() { gy(0x2A2A2A) } else { BG2.c() });
+        crate::prefs_font::draw(ui, r, t, 14.0, false, if sel { ON_ACCENT.c() } else if out.is_some() { OFF.c() } else { PREF_CAT.c() }, kit::Just::Centre);
         crate::ui_prefs_item::tab_seen(t, r);
         if let Some(why) = out {
             resp.on_hover_text(why);
@@ -859,7 +859,7 @@ fn page_audio(app: &mut App, ui: &mut Ui, tab: usize) {
             _ => (format!("Running at {} Hz{}.", app.player.device_rate, if dev.is_empty() { String::new() } else { format!(" on {dev}") }), false),
         };
         kit::row_at(ui, kit::Kind::Note, 18.0, 52.0, |ui| {
-            ui.label(kit::text(status, 11.0).color(if warn { CAUTION_TX } else { DIM }));
+            ui.label(kit::text(status, 11.0).color(if warn { CAUTION_TX } else { DIM.c() }));
             ui.add_space(10.0);
             if ui.add(btn("Refresh").small()).on_hover_text("Look for audio devices again").clicked() {
                 ui.ctx().data_mut(|m| {
@@ -904,7 +904,7 @@ fn page_audio(app: &mut App, ui: &mut Ui, tab: usize) {
         ui.add_space(1.0);
         kit::row_at(ui, kit::Kind::Ctl, 16.0, 57.5, |ui| {
             let r = ui.max_rect();
-            kit::paint_text(ui, pos2(r.min.x, r.center().y), egui::Align2::LEFT_CENTER, &label, inter(14.0), WHITE, 0.1);
+            kit::paint_text(ui, pos2(r.min.x, r.center().y), egui::Align2::LEFT_CENTER, &label, inter(14.0), WHITE.c(), 0.1);
         });
         ui.add_space(5.0);
         let mut t = if b == 0 { 0.0 } else { crate::prefs_ext::buffer_to_slider(b) };
@@ -934,7 +934,7 @@ fn page_audio(app: &mut App, ui: &mut Ui, tab: usize) {
                 crate::prefs_ext::set_stream_opts(&app.prefs);
             }
         }
-        kit::separator_col(ui, hex(0xFEFEFE));
+        kit::separator_col(ui, gy(0xFEFEFE));
         sub(ui, "Volume");
         kit::indent(ui, 88.0);
         let vol = app.prefs.metronome_vol.clamp(1, 3);
@@ -1031,7 +1031,7 @@ fn page_analysis(app: &mut App, ui: &mut Ui, tab: usize) {
         ui.add_enabled_ui(app.prefs.analysis_mode != 1, |ui| {
             toggle(ui, &mut app.prefs.use_installed_beatgrid_model, "Use installed beat grid model");
         });
-        note(ui, "Normal mode can also use a compatible local model on eligible 44.1 or 48 kHz tracks. If the model cannot run, the selected estimator supplies the grid.");
+        note(ui, "Normal mode can also use a compatible local model on eligible tracks up to 15 minutes long. The selected estimator supplies the grid when the input or model is unsupported.");
         kit::labeled(ui, "Analysis workers", |ui| {
             let before = app.prefs.analysis_threads;
             let label = if before == 0 { format!("Automatic ({})", app.pool.thread_count()) } else { app.pool.thread_count().to_string() };
@@ -1123,7 +1123,7 @@ fn place(ui: &mut Ui, r: Rect, enabled: bool, w: impl egui::Widget) -> egui::Res
 /// The grey 20 pt square with a white arrow head under the Active list.
 fn order_button(ui: &mut Ui, r: Rect, up: bool, enabled: bool, tip: &str) -> bool {
     let resp = ui.interact(r, ui.id().with(("order", up, r.min.x as i32)), if enabled { egui::Sense::click() } else { egui::Sense::hover() });
-    ui.painter().rect_filled(r, 2.0, if !enabled { hex(0x3A3A3A) } else if resp.hovered() { hex(0x666666) } else { hex(0x555555) });
+    ui.painter().rect_filled(r, 2.0, if !enabled { gy(0x3A3A3A) } else if resp.hovered() { gy(0x666666) } else { gy(0x555555) });
     let (a, b) = if up { (r.min.y + 12.0, r.min.y + 8.0) } else { (r.min.y + 8.0, r.min.y + 12.0) };
     let pts = vec![pos2(r.min.x + 6.0, a), pos2(r.min.x + 10.0, b), pos2(r.min.x + 14.0, a)];
     ui.painter().add(egui::Shape::line(pts, egui::Stroke::new(1.0, if enabled { WHITE } else { OFF })));
@@ -1147,7 +1147,7 @@ fn dual_list(app: &mut App, ui: &mut Ui, is_cat: bool) {
         if selected {
             ui.painter().rect_filled(r, 0.0, PBLUE);
         }
-        ui.painter().text(pos2(r.min.x + 6.0, r.center().y), egui::Align2::LEFT_CENTER, name.to_uppercase(), inter(13.0), if greyed { OFF } else { WHITE });
+        ui.painter().text(pos2(r.min.x + 6.0, r.center().y), egui::Align2::LEFT_CENTER, name.to_uppercase(), inter(13.0), if greyed { OFF.c() } else { WHITE.c() });
         resp.clicked()
     };
     // The card and everything in it at the original's coordinates (628 x 484 pt).
@@ -1157,8 +1157,8 @@ fn dual_list(app: &mut App, ui: &mut Ui, is_cat: bool) {
     let at = |x: f32, y: f32| pos2(card.min.x + x, card.min.y + y);
     let left = Rect::from_min_max(at(20.0, 54.0), at(284.0, 464.0));
     let right = Rect::from_min_max(at(344.0, 54.0), at(608.0, 441.0));
-    ui.painter().text(pos2(left.center().x, card.min.y + 29.5), egui::Align2::CENTER_CENTER, if is_cat { "Inactive Categories" } else { "Inactive Sort Options" }, inter_bold(14.0), WHITE);
-    ui.painter().text(pos2(right.center().x, card.min.y + 30.75), egui::Align2::CENTER_CENTER, if is_cat { "Active Categories" } else { "Active Sort Options" }, inter_bold(15.75), WHITE);
+    ui.painter().text(pos2(left.center().x, card.min.y + 29.5), egui::Align2::CENTER_CENTER, if is_cat { "Inactive Categories" } else { "Inactive Sort Options" }, inter_bold(14.0), WHITE.c());
+    ui.painter().text(pos2(right.center().x, card.min.y + 30.75), egui::Align2::CENTER_CENTER, if is_cat { "Active Categories" } else { "Active Sort Options" }, inter_bold(15.75), WHITE.c());
     ui.painter().rect_filled(left, 0.0, BG);
     ui.painter().rect_filled(right, 0.0, BG);
     let list = |ui: &mut Ui, r: Rect, salt: &str, add: &mut dyn FnMut(&mut Ui)| {
@@ -1277,7 +1277,7 @@ pub(crate) fn page_dj_system(app: &mut App, ui: &mut Ui, tab: usize) {
                 kit::combo_row(ui, 19.0, |ui| {
                     let r = kit::combo("bgcolor", 500.0, names[cur], 12.0).show_ui(ui, |ui| {
                         for (i, n) in names.iter().enumerate() {
-                            let text = RichText::new(format!("■ {n}")).color(if i == 0 { DIM2 } else { label_color(i as u8) });
+                            let text = RichText::new(format!("■ {n}")).color(if i == 0 { DIM2.c() } else { label_color(i as u8) });
                             if ui.selectable_label(cur == i, text).clicked() {
                                 app.prefs.device_bg_color = i as u8;
                             }
@@ -1429,7 +1429,7 @@ fn section(ui: &mut Ui, title: &str) {
     // (25 pt in, like a card's title; its middle 17 pt above the card: reference preferences/10.)
     ui.add_space(20.0);
     let (r, _) = ui.allocate_exact_size(vec2(ui.available_width().min(kit::CARD_W), 22.0), egui::Sense::hover());
-    ui.painter().text(pos2(r.min.x + 25.0, r.center().y), egui::Align2::LEFT_CENTER, title, inter_bold(16.0), WHITE);
+    ui.painter().text(pos2(r.min.x + 25.0, r.center().y), egui::Align2::LEFT_CENTER, title, inter_bold(16.0), WHITE.c());
     ui.add_space(4.0);
 }
 

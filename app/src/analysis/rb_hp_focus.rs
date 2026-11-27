@@ -11,10 +11,9 @@
 //! 3. a grid at the legacy BPM is laid through the run: its phase is the mean offset of the run's
 //!    beats, shifted by half a beat when the beats outside the run sit consistently off-beat;
 //! 4. the grid is extended to the start and end of the track and refined by `UnitBeatAdjust`
-//!    (`uba.rs`); a last pass on the low / full band integrals settles the downbeat.
+//!    (`uba.rs`); a last pass on the low / full band integrals settles the bar phase (`vote.rs`).
 //!
-//! The function writes its intermediate lists to `csv/interval*.csv` under rekordbox's data
-//! folder; the same lines are kept in [`FocusOutput::csv`] for checks.
+//! The original writes intermediate lists to CSV. Tests can compare these rows in memory.
 
 use super::uba::{BeatInfo, Uba, UbaRefine};
 
@@ -38,13 +37,12 @@ pub struct FocusOutput {
     pub beats: Vec<(i32, i32, i32)>,
     /// `BA_GetBpm_Focus`.
     pub bpm100: i32,
+    pub adaptive: bool,
     /// The `bool&` out parameter (set when the BPM was halved into range).
     pub flag: bool,
     /// Lines of rekordbox's debug files (interval.csv .. interval5.csv), for checks.
+    #[cfg(test)]
     pub csv: [Vec<String>; 5],
-    /// The list handed to `UnitBeatAdjust::analyze` and what came back (for stage checks).
-    pub before_uba: Vec<BeatInfo>,
-    pub after_uba: Vec<BeatInfo>,
 }
 
 /// C `%` for i32 (sign of the dividend).
@@ -167,16 +165,104 @@ fn half_beat_conflict(starts: &[i32; 128], ends: &[i32; 128], count: usize, list
     ((pos + neg) as f64) * 0.25 < pos as f64
 }
 
-pub fn analyze_focus(env: &Uba, inp: &FocusInput) -> Option<FocusOutput> {
+/// Why the port gives no result where rekordbox would have one.
+pub const NO_INPUT: &str = "no beats to work from";
+pub const OUT_OF_RANGE: &str = "rekordbox reads past its beat list here; recordbox stops instead";
+
+/// The original's branch for conflicting stretches (`v2600 || v2666`): low band over one beat
+/// at each beat of the (resized, not yet repaired) list, normalised; the first beat louder than
+/// 0.6, or louder than 0.2 and 0.1 above the beat before, marks where the music starts; the
+/// steady stretch around it (between two 10 ms outlier stretches, else two 20 ms ones, else from
+/// the start or to the end) becomes the range the grid is fitted to.
+/// Returns (last, first, reference beat, its position, its number) = v2737, v2738, v2739,
+/// v2741, v2742.
+#[allow(clippy::too_many_arguments)]
+fn conflict_range(env: &Uba, list: &[BeatInfo], offset: i32, bpm: f32, st10: &[i32; 128], en10: &[i32; 128], count10: usize, st20: &[i32; 128], en20: &[i32; 128], count20: usize) -> (i64, i64, i64, i32, i32) {
+    let len = list.len();
+    let m = len.saturating_sub(1); // v2731
+    let mut low = vec![0f64; len];
+    for i in 0..m {
+        let v = env.calc_low_integ(bpm, offset + list[i].pos);
+        low[i] = if i != 0 && v < 0.0 { low[i - 1] } else { v };
+    }
+    let mut mx = 0f64;
+    for &v in &low[..m] {
+        mx = mx.max(v);
+    }
+    if mx.abs() > 2.22044605e-16 {
+        let inv = 1.0 / mx;
+        for v in low[..m].iter_mut() {
+            *v *= inv;
+        }
+    }
+    let mut d = vec![0f64; len];
+    if len > 2 {
+        for k in 1..m {
+            d[k] = (low[k] - low[k - 1]).abs();
+        }
+    }
+    let mut v2739 = 0usize;
+    if len >= 2 {
+        v2739 = (0..m).find(|&k| low[k] > 0.6 || (k != 0 && low[k] > 0.2 && d[k] > 0.1)).unwrap_or(0);
+    }
+    let at = v2739 as i32;
+    let v2741 = list[v2739].pos;
+    let v2742 = list[v2739].num;
+    // the steady stretch around it: between 20 ms outlier stretches k and k + 1, then the same
+    // with the 10 ms ones (which win)
+    let (mut v2817, mut v2818) = (0i32, 0i32);
+    if count20 >= 2 {
+        if let Some(k) = (0..count20 - 1).find(|&k| en20[k] <= at && st20[k + 1] >= at) {
+            v2817 = en20[k];
+            v2818 = st20[k + 1];
+        }
+    }
+    if count10 >= 2 {
+        if let Some(k) = (0..count10 - 1).find(|&k| !(en10[k] > at || st10[k + 1] < at)) {
+            v2818 = st10[k + 1];
+            v2817 = en10[k];
+        }
+    }
+    let v3957 = st20[0];
+    let (mut v2822, mut v2823) = if v3957 >= at { (v3957, 0) } else { (v2818, v2817) };
+    if v3957 < at && count20 != 0 {
+        let last = en20[count20 - 1];
+        if last <= at {
+            v2822 = len as i32 - 1;
+            v2823 = last;
+        } else {
+            v2822 = v2818;
+            v2823 = v2817;
+        }
+    }
+    let s10 = st10[0];
+    let (mut v2825, mut v2826) = if s10 >= at { (s10, 0) } else { (v2822, v2823) };
+    if s10 < at && count10 != 0 {
+        let last = en10[count10 - 1];
+        if last <= at {
+            v2825 = len as i32 - 1;
+            v2826 = last;
+        } else {
+            v2825 = v2822;
+            v2826 = v2823;
+        }
+    }
+    let v2830 = (at + 16).min(len as i32 - 1);
+    let (v2737, v2738) = if (v2826 | v2825) != 0 { (v2825, v2826) } else { (v2830, at) };
+    (v2737 as i64, v2738 as i64, v2739 as i64, v2741, v2742)
+}
+
+pub fn analyze_focus(env: &Uba, inp: &FocusInput) -> Result<FocusOutput, &'static str> {
     let a3 = inp.legacy_count;
     let a4 = inp.legacy_bpm100;
     let a6 = inp.madmom.len() as i32;
     let a7 = inp.madmom_bpm;
     if a3 == 0 || a4 == 0 || a6 == 0 || a7 == 0 || inp.sr == 0 {
-        return None;
+        return Err(NO_INPUT);
     }
     let ml = inp.madmom;
     let mut flag = false;
+    #[cfg(test)]
     let mut csv: [Vec<String>; 5] = Default::default();
     // highest beat number among the first four beats
     let v81 = if a6 < 1 {
@@ -200,13 +286,17 @@ pub fn analyze_focus(env: &Uba, inp: &FocusInput) -> Option<FocusOutput> {
         v3969 = num;
         if bpm != 0 {
             v87 = 6000000.0 / bpm as f64;
-            csv[0].push(format!("{:.3}, {}", v87, bpm as u32));
+            // printed as the float it is stored as (fcvt s8 at 0x10116c310)
+            #[cfg(test)]
+            csv[0].push(format!("{:.3}, {}", (v87 as f32) as f64, bpm as u32));
         }
         list.push(BeatInfo { pos, zero: 0, interval: v87 as f32, num, minus1: -1, flag: false });
     }
     if inp.hendou || v81 != 4 {
-        // The tempo-change / non 4-4 path of the original is not ported.
-        return None;
+        let out = super::focus2::analyze(list, inp.sr, a7, bpm72, inp.total)?;
+        let bpm100 = (out.bpm72 * 100.0 + 0.5) as i32;
+        let beats = out.list.iter().map(|b| (b.pos, b.num, (6_000_000.0f32 / b.interval + 0.5) as i32)).collect();
+        return Ok(FocusOutput { beats, bpm100, adaptive: true, flag, #[cfg(test)] csv });
     }
     let n = a6 as usize;
     let sr = inp.sr as f64;
@@ -227,7 +317,7 @@ pub fn analyze_focus(env: &Uba, inp: &FocusInput) -> Option<FocusOutput> {
         n as i64 - 1
     };
     if v2235 < 1 {
-        return None;
+        return Err(NO_INPUT);
     }
     let cnt = v2235 as usize;
     let mut c = vec![0f64; n];
@@ -431,9 +521,13 @@ pub fn analyze_focus(env: &Uba, inp: &FocusInput) -> Option<FocusOutput> {
     while fixed.len() > list.len() {
         list.push(BeatInfo { pos: v3978, zero: 0, interval: v87 as f32, num: v3969, minus1: -1, flag: false });
     }
+    // what the original's vector still holds past its end after shrinking (`+120 -= 24 * n`):
+    // later reads of the run's last beat can land there on short tracks
+    let mut stale: Vec<BeatInfo> = vec![];
     if fixed.len() < list.len() {
         let drop = (list.len() - fixed.len()).max(1);
         let keep = list.len().saturating_sub(drop);
+        stale = list[keep..].to_vec();
         list.truncate(keep);
     }
     let len = list.len();
@@ -441,13 +535,28 @@ pub fn analyze_focus(env: &Uba, inp: &FocusInput) -> Option<FocusOutput> {
     let count20 = if v3957 != 0 { (1..128).find(|&k| st20[k] == 0).unwrap_or(0) } else { 0 };
     let v2600 = half_beat_conflict(&st10, &en10, count10, &list, v3967);
     let v2666 = half_beat_conflict(&st20, &en20, count20, &list, v3967);
-    if v2600 || v2666 {
-        // The original's branch for conflicting stretches is not ported yet.
-        return None;
+    let conflict = v2600 || v2666;
+    if std::env::var("PREPDECK_HP_FOCUSTRACE").is_ok() {
+        eprintln!("focus: len {len} run {v3908}..{v3905} v2319 {v2319} bpm72 {bpm72} conflict10 {v2600} conflict20 {v2666} st10 {:?} en10 {:?} st20 {:?} en20 {:?}", &st10[..count10], &en10[..count10], &st20[..count20.max((v3957 != 0) as usize)], &en20[..count20.max((v3957 != 0) as usize)]);
     }
     let (mut v2737, mut v2738, mut v2739): (i64, i64, i64) = (0, 0, 0);
-    let v2741 = list[v3908 as usize].pos;
-    let v2742 = list[v3908 as usize].num;
+    let (v2741, v2742);
+    if conflict {
+        // the steady stretches disagree by half a beat: take the stretch where the low band
+        // first gets loud instead of the run (decompile from LABEL_3584 on, 0x10117...)
+        let r = conflict_range(env, &list, inp.offset, bpm72, &st10, &en10, count10, &st20, &en20, count20);
+        v2737 = r.0;
+        v2738 = r.1;
+        v2739 = r.2;
+        v2741 = r.3;
+        v2742 = r.4;
+        if v2738 < 0 || v2737 < v2738 || v2737 as usize >= len || v2739 < 0 || v2739 as usize >= len {
+            return Err(OUT_OF_RANGE);
+        }
+    } else {
+        v2741 = list[v3908 as usize].pos;
+        v2742 = list[v3908 as usize].num;
+    }
     // positions from the repaired times
     {
         let k = sr * 0.001;
@@ -496,13 +605,15 @@ pub fn analyze_focus(env: &Uba, inp: &FocusInput) -> Option<FocusOutput> {
             }
             let iv = ((list[i + 1].pos - list[i].pos) as f64 * 1000.0 / sr) as f32;
             list[i].interval = iv;
+            #[cfg(test)]
             csv[1].push(format!("{:.3}", iv as f64));
         }
         list[len - 1].interval = list[len - 2].interval;
     }
-    // 3. phase: half-beat shift when the beats outside the run sit off-beat
+    // 3. phase: half-beat shift when the beats outside the run sit off-beat (not when the
+    //    stretches conflict: then the range above is used as it is)
     let mut v2891 = 0f64;
-    {
+    if !conflict {
         let mut v2893 = 0i64;
         if v3957 >= 1 {
             for k in 0..128 {
@@ -517,16 +628,16 @@ pub fn analyze_focus(env: &Uba, inp: &FocusInput) -> Option<FocusOutput> {
         v2738 = v2893 + v3908;
         v2737 = v2893 + v3905;
         // the original reads past the list here; recordbox gives up instead
-        if v2738 < 0 || v2737 < v2738 || v2737 as usize >= len {
-            return None;
+        if v2738 < 0 || v2737 < v2738 || v2737 as usize >= len + stale.len() {
+            return Err(OUT_OF_RANGE);
         }
         let v2896 = ((v2737 + v2738) / 2) as usize;
         let v2898 = list[v2896].num as i64;
         v2739 = if v2898 == 1 { v2896 as i64 } else { v2896 as i64 - v2898 + 1 };
         if v2739 < 0 || v2739 as usize >= len {
-            return None;
+            return Err(OUT_OF_RANGE);
         }
-        let pos = |i: i64| list[i as usize].pos as f64;
+        let pos = |i: i64| list.get(i as usize).or_else(|| stale.get(i as usize - len)).map(|b| b.pos).unwrap_or(0) as f64;
         let v2900 = pos(v2739);
         let (mut v2901, mut v2902) = (0f64, 0f64);
         for i in 0..v2738.max(0) {
@@ -616,7 +727,8 @@ pub fn analyze_focus(env: &Uba, inp: &FocusInput) -> Option<FocusOutput> {
         let mut diffs = Vec::with_capacity(count);
         for i in v2738..=v2737 {
             let ideal = v3967.mul_add((i - v2739) as f64, pos_ref);
-            diffs.push(list[i as usize].pos as f64 - ideal);
+            let p = list.get(i as usize).or_else(|| stale.get(i as usize - len)).map(|b| b.pos).unwrap_or(0);
+            diffs.push(p as f64 - ideal);
         }
         // 8 lanes over all but the last 1..8 values, then the rest in order
         let mut s = 0f64;
@@ -661,6 +773,7 @@ pub fn analyze_focus(env: &Uba, inp: &FocusInput) -> Option<FocusOutput> {
         for i in 0..len - 1 {
             let iv = ((ideal2[i + 1] - ideal2[i]) * 1000.0 / sr) as f32;
             list[i].interval = iv;
+            #[cfg(test)]
             csv[2].push(format!("{:.3}", iv as f64));
         }
         list[len - 1].interval = list[len - 2].interval;
@@ -669,12 +782,17 @@ pub fn analyze_focus(env: &Uba, inp: &FocusInput) -> Option<FocusOutput> {
         b.pos += inp.offset;
     }
     // 4. extend to the start and the end of the track
+    // A valid tempo must yield a finite period within the public analysis
+    // range (1–1000 BPM). Avoid expanding a model's malformed interval.
+    if !(sr * 60.0 / 1000.0..=sr * 60.0).contains(&v3967) { return Err(OUT_OF_RANGE); }
+    if list[0].pos > total || list[len-1].pos < 0 { return Err(OUT_OF_RANGE); }
     let v3027 = (list[0].pos as f64 / v3967) as i32;
     let v3029 = (len - 1).min(list.len() - 1);
     let v3030 = list[v3029].pos;
     let interval = (60000.0 / bpm72 as f64) as f32;
     if v3027 >= 1 {
         let first = list[0];
+        let mut leading = Vec::with_capacity(v3027 as usize);
         for j in 1..=v3027 {
             let mut p = ((-v3967).mul_add(j as f64, 0.5) + first.pos as f64) as i32;
             if p <= 0 {
@@ -682,9 +800,13 @@ pub fn analyze_focus(env: &Uba, inp: &FocusInput) -> Option<FocusOutput> {
             }
             let r = cmod4(first.num as i64 - 1 - j as i64);
             let num = if r >= 0 { r + 1 } else { r + 5 } as i32;
+            #[cfg(test)]
             csv[3].push(format!("{:.3}", interval as f64));
-            list.insert(0, BeatInfo { pos: p, zero: 0, interval, num, minus1: -1, flag: false });
+            leading.push(BeatInfo { pos: p, zero: 0, interval, num, minus1: -1, flag: false });
         }
+        leading.reverse();
+        leading.append(&mut list);
+        list = leading;
     }
     let v3046 = ((total - v3030) as f64 / v3967) as i32;
     if v3046 >= 1 {
@@ -695,16 +817,16 @@ pub fn analyze_focus(env: &Uba, inp: &FocusInput) -> Option<FocusOutput> {
                 p = total;
             }
             let num = cmod4(k as i64 + base.num as i64 - 1) as i32 + 1;
+            #[cfg(test)]
             csv[4].push(format!("{:.3}", interval as f64));
             list.push(BeatInfo { pos: p, zero: 0, interval, num, minus1: -1, flag: false });
         }
     }
-    let before_uba = list.clone();
     let mut refine = UbaRefine::new(env);
     refine.analyze(&mut bpm72, &mut list);
-    let after_uba = list.clone();
-    // 5. the downbeat pass on the band integrals is not ported yet: report the refined list.
+    // 5. the bar-phase vote on the band integrals (beat numbers only)
+    super::vote::bar_phase_vote(env, bpm72, inp.sr, &mut list);
     let bpm100 = ((bpm72 * 100.0) + 0.5) as i32;
     let beats = list.iter().map(|b| (b.pos, b.num, ((6000000.0f32 / b.interval) + 0.5) as i32)).collect();
-    Some(FocusOutput { beats, bpm100, flag, csv, before_uba, after_uba })
+    Ok(FocusOutput { beats, bpm100, adaptive: false, flag, #[cfg(test)] csv })
 }

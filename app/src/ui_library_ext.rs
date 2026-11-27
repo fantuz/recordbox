@@ -59,7 +59,7 @@ fn icon_tag_list(p: &egui::Painter, c: egui::Pos2, col: Color32) {
     p.rect_filled(b, 0.0, col);
     for k in 0..3 {
         let y = b.top() + 2.5 + k as f32 * 2.2;
-        p.line_segment([pos2(b.left() + 1.8, y), pos2(b.right() - 1.8, y)], Stroke::new(1.0, Color32::BLACK));
+        p.line_segment([pos2(b.left() + 1.8, y), pos2(b.right() - 1.8, y)], Stroke::new(1.0, gy(0x000000)));
     }
     p.add(egui::Shape::line(vec![c + vec2(-1.5, 2.0), c + vec2(1.2, 5.0), c + vec2(6.5, -1.0)], Stroke::new(1.8, col)));
 }
@@ -113,12 +113,12 @@ pub fn status_cell(app: &mut App, ui: &mut Ui, t: &Track, r: Rect) {
     } else if loaded {
         // The original's `playing` glyph: a 7×8 pt triangle.
         let c = pos2(a.min.x + 9.0, cy);
-        let col = if app.playing() { PLAY_GREEN } else { WHITE };
+        let col = if app.playing() { PLAY_GREEN } else { WHITE.c() };
         p.add(egui::Shape::convex_polygon(vec![c + vec2(-3.5, -4.0), c + vec2(3.5, 0.0), c + vec2(-3.5, 4.0)], col, Stroke::NONE));
         tips.push("Now playing");
     }
     if in_tag {
-        icon_tag_list(&p, pos2(a.min.x + 21.0, cy), hex(0xA0A0A0));
+        icon_tag_list(&p, pos2(a.min.x + 21.0, cy), gy(0xA0A0A0));
         tips.push("Track exists in the Tag List");
     } else if t.color > 0 {
         p.rect_filled(Rect::from_center_size(pos2(a.min.x + 21.0, cy), vec2(8.0, 8.0)), 1.0, label_color(t.color));
@@ -132,9 +132,9 @@ pub fn status_cell(app: &mut App, ui: &mut Ui, t: &Track, r: Rect) {
             let total = app.analysis_total.max(1) as f32;
             let frac = (app.analysis_done as f32 / total).clamp(0.0, 1.0);
             let tt = app.ctx.input(|i| i.time) as f32;
-            ring(&p, ic, 4.6, 0.0, std::f32::consts::TAU, Stroke::new(1.4, hex(0x4A4A4A)));
+            ring(&p, ic, 4.6, 0.0, std::f32::consts::TAU, Stroke::new(1.4, gy(0x4A4A4A)));
             ring(&p, ic, 4.6, tt * 4.0, std::f32::consts::TAU * (0.15 + 0.85 * frac), Stroke::new(1.6, BLUE));
-            p.text(pos2(b.min.x + 15.0, cy), Align2::LEFT_CENTER, format!("{}%", (frac * 100.0) as i32), FontId::proportional(8.0), DIM2);
+            p.text(pos2(b.min.x + 15.0, cy), Align2::LEFT_CENTER, format!("{}%", (frac * 100.0) as i32), FontId::proportional(8.0), DIM2.c());
             app.ctx.request_repaint_after(std::time::Duration::from_millis(100));
             tips.push("Now Analyzing");
         }
@@ -144,8 +144,8 @@ pub fn status_cell(app: &mut App, ui: &mut Ui, t: &Track, r: Rect) {
         }
         0 => {
             // Not analysed: an empty ring.
-            p.circle_stroke(ic, 4.6, Stroke::new(1.3, hex(0x787878)));
-            p.circle_filled(ic, 1.2, hex(0x787878));
+            p.circle_stroke(ic, 4.6, Stroke::new(1.3, gy(0x787878)));
+            p.circle_filled(ic, 1.2, gy(0x787878));
             tips.push("Track is not analyzed");
         }
         _ => {}
@@ -154,12 +154,12 @@ pub fn status_cell(app: &mut App, ui: &mut Ui, t: &Track, r: Rect) {
     // runs under the column line; the analysed star (12 x 11 pt, white) sits over its first
     // letter, or in the middle of the half when there is no cue.
     if cued && t.analyzed != 3 {
-        p.with_clip_rect(Rect::from_min_max(b.min, pos2(b.max.x - 1.0, b.max.y))).text(pos2(b.min.x + 12.2, cy + 0.6), Align2::LEFT_CENTER, "CUE", rb(10.2), if t.analyzed == 1 { DIM } else { OFF });
+        p.with_clip_rect(Rect::from_min_max(b.min, pos2(b.max.x - 1.0, b.max.y))).text(pos2(b.min.x + 12.2, cy + 0.6), Align2::LEFT_CENTER, "CUE", rb(10.2), if t.analyzed == 1 { DIM.c() } else { OFF.c() });
         tips.push("Track has Hot Cue/Memory Cue");
     }
     if t.analyzed == 1 {
         let sc = pos2(b.min.x + if cued { 7.5 } else { 14.5 }, cy - 0.5);
-        crate::icons_src::star(&p, sc + vec2(0.0, 0.0), true, WHITE);
+        crate::icons_src::star(&p, sc + vec2(0.0, 0.0), true, WHITE.c());
     }
     // The middle cell: EDIT and Track Type attributes (ui_edit.rs).
     crate::ui_edit::attribute_icons(app, &p, Rect::from_min_max(pos2(a.max.x, r.min.y), pos2(b.min.x, r.max.y)), t.id, &mut tips);
@@ -217,7 +217,7 @@ pub fn col_text(app: &App, t: &Track, c: Col) -> Option<String> {
 /// "Auto-size this column": wide enough for its header and its longest text in the list.
 pub fn autosize_column(app: &mut App, ui: &Ui, c: Col) {
     let font = list_font(app);
-    let width_of = |s: &str, f: FontId| ui.fonts(|fonts| fonts.layout_no_wrap(s.to_string(), f, WHITE).size().x);
+    let width_of = |s: &str, f: FontId| ui.fonts(|fonts| fonts.layout_no_wrap(s.to_string(), f, WHITE.c()).size().x);
     let mut w = width_of(c.label(), FontId::proportional(11.0)) + 26.0;
     let mut text = false;
     for id in app.list.iter().take(5000) {
@@ -310,7 +310,7 @@ pub fn color_picker(app: &mut App, ctx: &egui::Context) {
     let now = ctx.input(|i| i.time);
     let mut chosen: Option<u8> = None;
     let area = egui::Area::new(egui::Id::new("color_pick")).order(egui::Order::Foreground).fixed_pos(pos).show(ctx, |ui| {
-        egui::Frame::popup(ui.style()).fill(BG2).show(ui, |ui| {
+        egui::Frame::popup(ui.style()).fill(BG2.c()).show(ui, |ui| {
             ui.spacing_mut().item_spacing = vec2(0.0, 1.0);
             let cur = app.track(id).map(|t| t.color).unwrap_or(0);
             for i in (1..=8u8).chain([0u8]) {
@@ -324,7 +324,7 @@ pub fn color_picker(app: &mut App, ctx: &egui::Context) {
                 } else {
                     ui.painter().rect_filled(chip, 1.0, label_color(i));
                 }
-                ui.painter().text(pos2(rr.min.x + 26.0, rr.center().y), Align2::LEFT_CENTER, COLOR_NAMES[i as usize], FontId::proportional(11.5), TEXT);
+                ui.painter().text(pos2(rr.min.x + 26.0, rr.center().y), Align2::LEFT_CENTER, COLOR_NAMES[i as usize], FontId::proportional(11.5), TEXT.c());
                 if resp.clicked() {
                     chosen = Some(i);
                 }
@@ -435,7 +435,7 @@ pub fn filter_bar(app: &mut App, ui: &mut Ui) {
     tick(ui, &mut f.rating_on, "RATING", tips);
     let (sr, sresp) = ui.allocate_exact_size(vec2(5.0 * 13.0 + 2.0, 16.0), Sense::click());
     for s in 1..=5u8 {
-        star(ui.painter(), pos2(sr.min.x + 7.0 + (s - 1) as f32 * 13.0, sr.center().y), 5.6, if f.rating >= s { WHITE } else { DIM }, f.rating >= s);
+        star(ui.painter(), pos2(sr.min.x + 7.0 + (s - 1) as f32 * 13.0, sr.center().y), 5.6, if f.rating >= s { WHITE.c() } else { DIM.c() }, f.rating >= s);
     }
     if sresp.clicked() {
         if let Some(pp) = sresp.interact_pointer_pos() {
@@ -750,6 +750,7 @@ pub fn track_menu(app: &mut App, ui: &mut Ui, sel: &[i64]) {
         app.analyze_key_tracks(sel);
         ui.close_menu();
     }
+    crate::ui_stem_export::track_menu(app, ui, sel);
     if app.analysis_total > 0 && ui.button("Stop Analyzing").clicked() {
         app.pool.stop();
         ui.close_menu();
@@ -1020,7 +1021,7 @@ pub fn tree_search_field(app: &mut App, ui: &mut Ui) {
     }
     let xr = Rect::from_center_size(pos2(fr.max.x - 8.0, fr.center().y), vec2(12.0, 12.0));
     let x = ui.interact(xr, ui.id().with("tree_search_clear"), Sense::click());
-    crate::icons::cross(ui.painter(), xr.shrink(3.0), if x.hovered() { WHITE } else { DIM2 }, 1.2);
+    crate::icons::cross(ui.painter(), xr.shrink(3.0), if x.hovered() { WHITE.c() } else { DIM2.c() }, 1.2);
     if x.clicked() {
         app.ext.tree_search.clear();
     }
@@ -1035,8 +1036,8 @@ pub fn tree_top_rows(app: &mut App, ui: &mut Ui, drop: &mut Vec<(Rect, i64)>) {
     {
         // The tag-list glyph over the note placeholder.
         let ir = Rect::from_min_size(pos2(r.rect.min.x + 4.0 + 15.0 - 1.0, r.rect.min.y), vec2(14.0, 15.0));
-        ui.painter().rect_filled(ir, 0.0, if app.view == View::TagList { ROW_SEL } else if r.hovered() { hex(0x262626) } else { BG2 });
-        icon_tag_list(ui.painter(), ir.center() + vec2(0.0, 0.5), DIM2);
+        ui.painter().rect_filled(ir, 0.0, if app.view == View::TagList { ROW_SEL.c() } else if r.hovered() { gy(0x262626) } else { BG2.c() });
+        icon_tag_list(ui.painter(), ir.center() + vec2(0.0, 0.5), DIM2.c());
     }
     drop.push((r.rect, -1));
     if r.clicked() {
@@ -1090,7 +1091,7 @@ pub fn tree_top_rows(app: &mut App, ui: &mut Ui, drop: &mut Vec<(Rect, i64)>) {
 pub fn palette_bar(app: &mut App, ui: &mut Ui, r: Rect, drop: &mut Vec<(Rect, i64)>) {
     let p = ui.painter().clone();
     p.rect_filled(r, 0.0, BG2);
-    p.text(pos2(r.min.x + 8.0, r.center().y), Align2::LEFT_CENTER, "Playlist Palette", FontId::proportional(10.5), DIM2);
+    p.text(pos2(r.min.x + 8.0, r.center().y), Align2::LEFT_CENTER, "Playlist Palette", FontId::proportional(10.5), DIM2.c());
     let x0 = r.min.x + 96.0;
     let w = ((r.max.x - 6.0 - x0) / PALETTE_SLOTS as f32).max(40.0);
     app.prefs.palette.resize(PALETTE_SLOTS, 0);
@@ -1100,17 +1101,17 @@ pub fn palette_bar(app: &mut App, ui: &mut Ui, r: Rect, drop: &mut Vec<(Rect, i6
         let node = app.node(pl).cloned();
         let resp = ui.interact(sr, ui.id().with(("palette", slot)), Sense::click());
         let showing = node.as_ref().map(|n| app.view == View::Playlist(n.id)).unwrap_or(false);
-        p.rect_filled(sr, 2.0, if showing { ROW_SEL } else if resp.hovered() { hex(0x3A3A3A) } else { BTN });
-        p.text(pos2(sr.min.x + 7.0, sr.center().y), Align2::LEFT_CENTER, (slot + 1).to_string(), bold(10.0), DIM2);
+        p.rect_filled(sr, 2.0, if showing { ROW_SEL.c() } else if resp.hovered() { gy(0x3A3A3A) } else { BTN.c() });
+        p.text(pos2(sr.min.x + 7.0, sr.center().y), Align2::LEFT_CENTER, (slot + 1).to_string(), bold(10.0), DIM2.c());
         let clip = p.with_clip_rect(Rect::from_min_max(pos2(sr.min.x + 20.0, sr.min.y), pos2(sr.max.x - 30.0, sr.max.y)));
         match &node {
             Some(n) => {
-                clip.text(pos2(sr.min.x + 20.0, sr.center().y), Align2::LEFT_CENTER, &n.name, FontId::proportional(11.5), WHITE);
-                p.text(pos2(sr.max.x - 7.0, sr.center().y), Align2::RIGHT_CENTER, app.node_counts.get(&n.id).copied().unwrap_or(0).to_string(), FontId::proportional(11.0), WHITE);
+                clip.text(pos2(sr.min.x + 20.0, sr.center().y), Align2::LEFT_CENTER, &n.name, FontId::proportional(11.5), WHITE.c());
+                p.text(pos2(sr.max.x - 7.0, sr.center().y), Align2::RIGHT_CENTER, app.node_counts.get(&n.id).copied().unwrap_or(0).to_string(), FontId::proportional(11.0), WHITE.c());
                 drop.push((sr, n.id));
             }
             None => {
-                clip.text(pos2(sr.min.x + 20.0, sr.center().y), Align2::LEFT_CENTER, "not assigned", FontId::proportional(11.0), DIM);
+                clip.text(pos2(sr.min.x + 20.0, sr.center().y), Align2::LEFT_CENTER, "not assigned", FontId::proportional(11.0), DIM.c());
             }
         }
         // A playlist dragged from the tree lands here.
@@ -1434,7 +1435,7 @@ pub fn source_tree(app: &mut App, ui: &mut Ui, kind: u8) {
     // Reload button at the right end of the heading.
     let rr = Rect::from_center_size(pos2(head.rect.max.x - 12.0, head.rect.center().y), vec2(16.0, 16.0));
     let rb = ui.interact(rr, ui.id().with(("src_reload", kind)), Sense::click());
-    crate::icons::sync(ui.painter(), rr.shrink(1.0), if rb.hovered() { WHITE } else { DIM2 });
+    crate::icons::sync(ui.painter(), rr.shrink(1.0), if rb.hovered() { WHITE.c() } else { DIM2.c() });
     let rb = if app.prefs.tooltips { rb.on_hover_text(if kind == SRC_ITUNES { "Reload:\nReload iTunes library." } else { "Reload" }) } else { rb };
     if rb.clicked() {
         app.source_reload(kind);
@@ -1558,12 +1559,12 @@ pub fn source_list(app: &mut App, ui: &mut Ui, kind: u8, node: &str) {
     let bar = Rect::from_min_max(pos2(r.min.x, r.min.y + 5.0), pos2(r.max.x, r.min.y + 27.0));
     ui.painter().rect_filled(bar, 0.0, BG2);
     let Some(lib) = app.ext.sources[k].lib.clone() else {
-        ui.painter().text(pos2(bar.min.x + 10.5, bar.center().y), Align2::LEFT_CENTER, source_name(kind), FontId::proportional(11.5), WHITE);
+        ui.painter().text(pos2(bar.min.x + 10.5, bar.center().y), Align2::LEFT_CENTER, source_name(kind), FontId::proportional(11.5), WHITE.c());
         return;
     };
     let rows = lib.tracks_of(node);
     let title = lib.node(node).map(|n| n.name.clone()).unwrap_or_else(|| "All Tracks".into());
-    ui.painter().text(pos2(bar.min.x + 10.5, bar.center().y), Align2::LEFT_CENTER, format!("{} › {title} ({} Tracks)", source_name(kind), rows.len()), FontId::proportional(11.5), WHITE);
+    ui.painter().text(pos2(bar.min.x + 10.5, bar.center().y), Align2::LEFT_CENTER, format!("{} › {title} ({} Tracks)", source_name(kind), rows.len()), FontId::proportional(11.5), WHITE.c());
     // Import button on the right.
     let n_sel = app.ext.sources[k].sel.len();
     let ib = Rect::from_min_max(pos2(bar.max.x - 190.0, bar.min.y + 2.0), pos2(bar.max.x - 8.0, bar.max.y - 2.0));
@@ -1584,7 +1585,7 @@ pub fn source_list(app: &mut App, ui: &mut Ui, kind: u8, node: &str) {
     bui.painter().rect_filled(hr, 0.0, BG2);
     let mut x = hr.min.x;
     for (c, w, _) in cols.iter().chain([("Location", loc_w, false)].iter()) {
-        bui.painter().text(pos2(x + 5.0, hr.center().y), Align2::LEFT_CENTER, *c, FontId::proportional(11.0), WHITE);
+        bui.painter().text(pos2(x + 5.0, hr.center().y), Align2::LEFT_CENTER, *c, FontId::proportional(11.0), WHITE.c());
         bui.painter().line_segment([pos2(x + w - 0.5, hr.min.y + 1.0), pos2(x + w - 0.5, hr.max.y - 1.0)], Stroke::new(1.0, BG));
         x += w;
     }
@@ -1598,6 +1599,8 @@ pub fn source_list(app: &mut App, ui: &mut Ui, kind: u8, node: &str) {
             let t = &lib.tracks[ti];
             let (rr, resp) = ui.allocate_exact_size(vec2(ui.available_width(), ROW_H), Sense::click());
             let sel = app.ext.sources[k].sel.contains(&ti);
+            // (A selected row keeps rekordbox's fixed blue and white text in Light: `ListViewer::findTextColour`.)
+            let _sel_dark = crate::theme::dark_scope(sel);
             ui.painter().rect_filled(rr, 0.0, if sel { ROW_SEL } else if ri % 2 == 0 { BG1 } else { BG2 });
             let have = present[ri];
             if have {
@@ -1611,12 +1614,13 @@ pub fn source_list(app: &mut App, ui: &mut Ui, kind: u8, node: &str) {
                 let cr = Rect::from_min_size(pos2(x, rr.min.y), vec2(*w, rr.height()));
                 let p = ui.painter().with_clip_rect(cr.shrink2(vec2(3.0, 0.0)));
                 if *right {
-                    p.text(pos2(cr.max.x - 6.0, cr.center().y), Align2::RIGHT_CENTER, v, font.clone(), TEXT);
+                    p.text(pos2(cr.max.x - 6.0, cr.center().y), Align2::RIGHT_CENTER, v, font.clone(), TEXT.c());
                 } else {
-                    p.text(pos2(cr.min.x + 6.0, cr.center().y), Align2::LEFT_CENTER, v, font.clone(), TEXT);
+                    p.text(pos2(cr.min.x + 6.0, cr.center().y), Align2::LEFT_CENTER, v, font.clone(), TEXT.c());
                 }
                 x += w;
             }
+            drop(_sel_dark);
             if resp.clicked() || (resp.secondary_clicked() && !sel) {
                 let (cmd, shift) = ui.input(|i| (i.modifiers.command, i.modifiers.shift));
                 let s = &mut app.ext.sources[k];
@@ -1787,7 +1791,7 @@ fn summary_value(app: &mut App, ui: &mut Ui, r: Rect, col: Col, ids: &[i64], fon
         return;
     }
     let resp = ui.interact(r, ui.id().with(("summary_value", col)), Sense::click());
-    ui.painter().with_clip_rect(r.intersect(ui.clip_rect())).text(pos2(r.min.x, r.center().y), Align2::LEFT_CENTER, common.clone().unwrap_or_default(), font, WHITE);
+    ui.painter().with_clip_rect(r.intersect(ui.clip_rect())).text(pos2(r.min.x, r.center().y), Align2::LEFT_CENTER, common.clone().unwrap_or_default(), font, WHITE.c());
     if resp.clicked() && !ids.is_empty() {
         app.ext.info_edit = Some((col, common.unwrap_or_default()));
         ui.ctx().request_repaint();
@@ -1813,7 +1817,7 @@ fn date_dmy(s: &str) -> String {
     if parts.len() == 3 { format!("{}/{}/{}", parts[2], parts[1], parts[0]) } else { d.to_string() }
 }
 
-pub const INFO_LABEL: Color32 = hex(0x828282);
+pub const INFO_LABEL: Tc = gr(0x828282);
 
 /// Information window at the right of the browser (reference 13), 445 pt wide on #1E1E1E:
 /// Summary / Info / Artwork tabs 21 pt high from 8.5 pt down (the chosen one blue with dark
@@ -1837,8 +1841,8 @@ pub fn info_panel(app: &mut App, ui: &mut Ui, r: Rect) {
         let on = app.ext.info_tab == i as u8;
         let rr = Rect::from_min_size(pos2(x0 + i as f32 * (w + gap), t + 8.5), vec2(w, 21.0));
         let resp = ui.interact(rr, ui.id().with(("info_tab", i)), Sense::click());
-        p.rect_filled(rr, 0.0, if on { BLUE } else if resp.hovered() { hex(0x3A3A3A) } else { hex(0x323232) });
-        p.text(rr.center(), Align2::CENTER_CENTER, *name, rb(INFO_TAB_FONT), if on { hex(0x00021E) } else { DIM });
+        p.rect_filled(rr, 0.0, if on { BLUE.c() } else if resp.hovered() { gy(0x3A3A3A) } else { gy(0x323232) });
+        p.text(rr.center(), Align2::CENTER_CENTER, *name, rb(INFO_TAB_FONT), if on { hex(0x00021E) } else { DIM.c() });
         if resp.clicked() {
             app.ext.info_tab = i as u8;
             app.ext.info_edit = None;
@@ -1847,7 +1851,7 @@ pub fn info_panel(app: &mut App, ui: &mut Ui, r: Rect) {
     // Reload Tags (skin brws_refresh).
     let rc = pos2(right - 17.0, t + 19.0);
     let rresp = ui.interact(Rect::from_center_size(rc, vec2(18.0, 20.0)), ui.id().with("info_reload"), Sense::click());
-    crate::icons_src::refresh(&p, rc, if rresp.hovered() { WHITE } else { hex(0xDCDCDC) });
+    crate::icons_src::refresh(&p, rc, if rresp.hovered() { WHITE.c() } else { gy(0xDCDCDC) });
     let rresp = if app.prefs.tooltips { rresp.on_hover_text("Reload Tags") } else { rresp };
     if rresp.clicked() && !ids.is_empty() {
         app.reload_tags_from_files(&ids);
@@ -1859,10 +1863,10 @@ pub fn info_panel(app: &mut App, ui: &mut Ui, r: Rect) {
     let mut bui = ui.new_child(egui::UiBuilder::new().max_rect(body).id_salt("info_body"));
     bui.set_clip_rect(body.intersect(ui.clip_rect()));
     bui.spacing_mut().scroll = egui::style::ScrollStyle { floating: false, bar_width: 8.0, bar_inner_margin: 2.0, bar_outer_margin: 2.0, foreground_color: false, dormant_background_opacity: 1.0, active_background_opacity: 1.0, interact_background_opacity: 1.0, dormant_handle_opacity: 1.0, active_handle_opacity: 1.0, interact_handle_opacity: 1.0, ..egui::style::ScrollStyle::solid() };
-    bui.visuals_mut().extreme_bg_color = Color32::BLACK;
-    bui.visuals_mut().widgets.inactive.bg_fill = hex(0x323232);
-    bui.visuals_mut().widgets.hovered.bg_fill = hex(0x4A4A4A);
-    bui.visuals_mut().widgets.active.bg_fill = hex(0x5A5A5A);
+    bui.visuals_mut().extreme_bg_color = FIELD.c();
+    bui.visuals_mut().widgets.inactive.bg_fill = gy(0x323232);
+    bui.visuals_mut().widgets.hovered.bg_fill = gy(0x4A4A4A);
+    bui.visuals_mut().widgets.active.bg_fill = gy(0x5A5A5A);
     if app.ext.info_tab == 0 {
         let ro = |f: &dyn Fn(&Track) -> String| if ids.is_empty() { String::new() } else { common_of(app, &ids, |t| f(t)).unwrap_or_default() };
         let rows: [(&str, String); 8] = [
@@ -1876,7 +1880,7 @@ pub fn info_panel(app: &mut App, ui: &mut Ui, r: Rect) {
             ("Location", ro(&|t| t.path.clone())),
         ];
         let font = rb(INFO_ROW_FONT);
-        let widest = rows.iter().map(|(_, v)| ui.painter().layout_no_wrap(v.clone(), font.clone(), WHITE).size().x).fold(0.0, f32::max);
+        let widest = rows.iter().map(|(_, v)| ui.painter().layout_no_wrap(v.clone(), font.clone(), WHITE.c()).size().x).fold(0.0, f32::max);
         let content_w = (171.0 + widest + 8.0).max(body.width());
         egui::ScrollArea::horizontal().id_salt("info_summary_h").auto_shrink([false, false]).scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysVisible).show(&mut bui, |ui| {
             let (cr, _) = ui.allocate_exact_size(vec2(content_w, ui.available_height()), Sense::hover());
@@ -1885,38 +1889,38 @@ pub fn info_panel(app: &mut App, ui: &mut Ui, r: Rect) {
             let (l, t) = (cr.min.x - 3.0, cr.min.y - 34.0);
             let line_right = cr.max.x;
             let ar = Rect::from_min_size(pos2(l + 9.5, t + 42.0), vec2(111.0, 111.0));
-            p.rect_filled(ar, 0.0, hex(0x101010));
+            p.rect_filled(ar, 0.0, gy(0x101010));
             match artwork_large(app, &art) {
                 Some(tex) => {
                     p.image(tex.id(), ar.shrink(1.0), Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
                 }
                 None => {
                     // The original's "no artwork" record.
-                    p.circle_filled(ar.center(), 48.5, hex(0x1E1E1E));
-                    p.circle_filled(ar.center(), 14.0, hex(0x101010));
+                    p.circle_filled(ar.center(), 48.5, gy(0x1E1E1E));
+                    p.circle_filled(ar.center(), 14.0, gy(0x101010));
                 }
             }
-            p.rect_stroke(ar, 0.0, Stroke::new(1.0, hex(0x4C4C4C)), egui::StrokeKind::Inside);
+            p.rect_stroke(ar, 0.0, Stroke::new(1.0, gy(0x4C4C4C)), egui::StrokeKind::Inside);
             let vx = l + 174.0;
             for (i, (label, col)) in [("Track Title", Col::Title), ("Artist", Col::Artist), ("Album", Col::Album)].into_iter().enumerate() {
                 let y = t + 49.5 + 39.0 * i as f32;
-                p.text(pos2(vx, y), Align2::LEFT_CENTER, label, rb(INFO_SMALL_FONT), INFO_LABEL);
+                p.text(pos2(vx, y), Align2::LEFT_CENTER, label, rb(INFO_SMALL_FONT), INFO_LABEL.c());
                 summary_value(app, ui, Rect::from_min_max(pos2(vx, y + 8.5), pos2(line_right, y + 27.0)), col, &ids, rb(INFO_VALUE_FONT));
                 if i < 2 {
-                    p.rect_filled(Rect::from_min_max(pos2(vx, y + 29.0), pos2(line_right, y + 30.0)), 0.0, hex(0x313131));
+                    p.rect_filled(Rect::from_min_max(pos2(vx, y + 29.0), pos2(line_right, y + 30.0)), 0.0, gy(0x313131));
                 }
             }
             for (i, (label, value)) in rows.iter().enumerate() {
                 let y = t + 168.0 + 24.0 * i as f32;
-                p.rect_filled(Rect::from_min_max(pos2(l + 9.5, y), pos2(line_right, y + 1.0)), 0.0, hex(0x313131));
-                p.rect_filled(Rect::from_min_max(pos2(vx - 4.5, y + 3.5), pos2(vx - 3.5, y + 21.5)), 0.0, hex(0x313131));
-                p.text(pos2(l + 9.5, y + 12.5), Align2::LEFT_CENTER, *label, rb(INFO_LABEL_FONT), INFO_LABEL);
-                p.text(pos2(vx, y + 12.5), Align2::LEFT_CENTER, value, font.clone(), WHITE);
+                p.rect_filled(Rect::from_min_max(pos2(l + 9.5, y), pos2(line_right, y + 1.0)), 0.0, gy(0x313131));
+                p.rect_filled(Rect::from_min_max(pos2(vx - 4.5, y + 3.5), pos2(vx - 3.5, y + 21.5)), 0.0, gy(0x313131));
+                p.text(pos2(l + 9.5, y + 12.5), Align2::LEFT_CENTER, *label, rb(INFO_LABEL_FONT), INFO_LABEL.c());
+                p.text(pos2(vx, y + 12.5), Align2::LEFT_CENTER, value, font.clone(), WHITE.c());
             }
             let y = t + 168.0 + 24.0 * rows.len() as f32;
-            p.rect_filled(Rect::from_min_max(pos2(l + 9.5, y), pos2(line_right, y + 1.0)), 0.0, hex(0x313131));
+            p.rect_filled(Rect::from_min_max(pos2(l + 9.5, y), pos2(line_right, y + 1.0)), 0.0, gy(0x313131));
             if multi {
-                p.text(pos2(l + 9.5, y + 14.0), Align2::LEFT_CENTER, format!("{} tracks selected", ids.len()), rb(11.0), DIM);
+                p.text(pos2(l + 9.5, y + 14.0), Align2::LEFT_CENTER, format!("{} tracks selected", ids.len()), rb(11.0), DIM.c());
             }
         });
         return;
@@ -1962,7 +1966,7 @@ pub fn info_panel(app: &mut App, ui: &mut Ui, r: Rect) {
                     let (sr, sresp) = ui.allocate_exact_size(vec2(5.0 * 15.5 + 4.0, 16.0), Sense::click());
                     for s in 1..=5u8 {
                         let on = rating.map(|r| r >= s).unwrap_or(false);
-                        star(ui.painter(), pos2(sr.min.x + 8.0 + (s - 1) as f32 * 15.5, sr.center().y), 6.4, if on { WHITE } else { DIM }, on);
+                        star(ui.painter(), pos2(sr.min.x + 8.0 + (s - 1) as f32 * 15.5, sr.center().y), 6.4, if on { WHITE.c() } else { DIM.c() }, on);
                     }
                     if sresp.clicked() {
                         if let Some(pp) = sresp.interact_pointer_pos() {
@@ -2041,7 +2045,7 @@ pub fn info_panel(app: &mut App, ui: &mut Ui, r: Rect) {
                         ui.painter().image(tex.id(), Rect::from_center_size(ar.center(), ts * scale), Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
                     }
                     None => {
-                        ui.painter().text(ar.center(), Align2::CENTER_CENTER, if art.is_empty() { "No Artwork" } else { "Artwork File Not Found" }, FontId::proportional(11.5), DIM);
+                        ui.painter().text(ar.center(), Align2::CENTER_CENTER, if art.is_empty() { "No Artwork" } else { "Artwork File Not Found" }, FontId::proportional(11.5), DIM.c());
                     }
                 }
                 ui.add_space(6.0);
@@ -2177,14 +2181,14 @@ fn missing_file_manager(app: &mut App, ctx: &egui::Context) {
     let ids: HashSet<i64> = missing.iter().map(|t| t.id).collect();
     app.ext.missing_sel.retain(|t| ids.contains(t));
     let busy = app.relocate_rx.is_some();
-    kit::dialog(ctx, "Missing File Manager").open(&mut open).resizable(false).anchor(Align2::CENTER_CENTER, vec2(0.0, 0.0)).frame(egui::Frame::window(&ctx.style()).fill(BG2).inner_margin(egui::Margin::ZERO)).show(ctx, |ui| {
+    kit::dialog(ctx, "Missing File Manager").open(&mut open).resizable(false).anchor(Align2::CENTER_CENTER, vec2(0.0, 0.0)).frame(egui::Frame::window(&ctx.style()).fill(BG2.c()).inner_margin(egui::Margin::ZERO)).show(ctx, |ui| {
         let (r, _) = ui.allocate_exact_size(vec2(602.0, 528.0), Sense::hover());
         let p = ui.painter().clone();
-        p.rect_filled(r, 0.0, BG2);
+        p.rect_filled(r, 0.0, BG2.c());
         let table = Rect::from_min_max(pos2(r.min.x + 4.0, r.min.y + 4.5), pos2(r.max.x - 4.0, r.min.y + 453.5));
         p.rect_filled(table, 0.0, BG);
         let font = rb(MFM_FONT);
-        let loc_w = missing.iter().map(|t| p.layout_no_wrap(t.path.clone(), font.clone(), WHITE).size().x).fold(0.0, f32::max);
+        let loc_w = missing.iter().map(|t| p.layout_no_wrap(t.path.clone(), font.clone(), WHITE.c()).size().x).fold(0.0, f32::max);
         let content_w = (360.0 + loc_w + 16.0).max(table.width());
         let mut tui = ui.new_child(egui::UiBuilder::new().max_rect(table).id_salt("mfm_table"));
         tui.set_clip_rect(table);
@@ -2197,13 +2201,13 @@ fn missing_file_manager(app: &mut App, ctx: &egui::Context) {
             ui.spacing_mut().item_spacing = vec2(0.0, 0.0);
             let cols: [(&str, f32); 4] = [("Track Title", 120.0), ("artist", 120.0), ("album", 120.0), ("location", content_w - 360.0)];
             let (hr, _) = ui.allocate_exact_size(vec2(content_w, 27.0), Sense::hover());
-            ui.painter().rect_filled(hr, 0.0, hex(0x1A1A1A));
+            ui.painter().rect_filled(hr, 0.0, gy(0x1A1A1A));
             let mut x = hr.min.x;
             for (i, (label, cw)) in cols.iter().enumerate() {
                 if i > 0 {
                     ui.painter().rect_filled(Rect::from_min_max(pos2(x - 1.0, hr.min.y), pos2(x, hr.max.y)), 0.0, BG);
                 }
-                ui.painter().text(pos2(x + 7.0, hr.center().y), Align2::LEFT_CENTER, *label, font.clone(), DIM);
+                ui.painter().text(pos2(x + 7.0, hr.center().y), Align2::LEFT_CENTER, *label, font.clone(), DIM.c());
                 x += cw;
             }
             egui::ScrollArea::vertical().id_salt("mfm_rows").auto_shrink([false, false]).show_rows(ui, 25.0, missing.len(), |ui, range| {
@@ -2211,6 +2215,8 @@ fn missing_file_manager(app: &mut App, ctx: &egui::Context) {
                     let t = &missing[i];
                     let (rr, resp) = ui.allocate_exact_size(vec2(content_w, 25.0), Sense::click());
                     let on = app.ext.missing_sel.contains(&t.id);
+                    // (A selected row keeps rekordbox's fixed blue and white text in Light: `ListViewer::findTextColour`.)
+                    let _sel_dark = crate::theme::dark_scope(on);
                     if on {
                         ui.painter().rect_filled(Rect::from_min_max(pos2(rr.min.x, rr.min.y + 0.5), rr.max), 0.0, ROW_SEL);
                     } else if resp.hovered() {
@@ -2222,9 +2228,10 @@ fn missing_file_manager(app: &mut App, ctx: &egui::Context) {
                             ui.painter().rect_filled(Rect::from_min_max(pos2(x - 1.0, rr.min.y), pos2(x, rr.max.y)), 0.0, hex(0x1F3A52));
                         }
                         let cr = Rect::from_min_size(pos2(x, rr.min.y), vec2(*cw - 2.0, rr.height()));
-                        ui.painter().with_clip_rect(cr.intersect(ui.clip_rect())).text(pos2(cr.min.x + 5.0, cr.center().y), Align2::LEFT_CENTER, v, font.clone(), WHITE);
+                        ui.painter().with_clip_rect(cr.intersect(ui.clip_rect())).text(pos2(cr.min.x + 5.0, cr.center().y), Align2::LEFT_CENTER, v, font.clone(), WHITE.c());
                         x += cw;
                     }
+                    drop(_sel_dark);
                     if resp.clicked() {
                         if cmd {
                             if !app.ext.missing_sel.remove(&t.id) {
@@ -2260,9 +2267,9 @@ fn missing_file_manager(app: &mut App, ctx: &egui::Context) {
         bg.context_menu(|ui| search_folders_menu(app, ui));
         // Count, and what is going on.
         let n = missing.len();
-        p.text(pos2(r.max.x - 15.5, r.min.y + 473.0), Align2::RIGHT_CENTER, format!("{n} Track{}", if n == 1 { "" } else { "s" }), font.clone(), hex(0xDCDCDC));
+        p.text(pos2(r.max.x - 15.5, r.min.y + 473.0), Align2::RIGHT_CENTER, format!("{n} Track{}", if n == 1 { "" } else { "s" }), font.clone(), gy(0xDCDCDC));
         if busy {
-            p.text(pos2(r.min.x + 15.0, r.min.y + 473.0), Align2::LEFT_CENTER, "Searching…", font.clone(), DIM);
+            p.text(pos2(r.min.x + 15.0, r.min.y + 473.0), Align2::LEFT_CENTER, "Searching…", font.clone(), DIM.c());
             ui.ctx().request_repaint_after(std::time::Duration::from_millis(200));
         }
         let picked: Vec<i64> = missing.iter().map(|t| t.id).filter(|t| app.ext.missing_sel.contains(t)).collect();
@@ -2277,9 +2284,9 @@ fn missing_file_manager(app: &mut App, ctx: &egui::Context) {
                 _ => true,
             };
             let resp = ui.interact(br, ui.id().with(("mfm_btn", k)), if enabled { Sense::click() } else { Sense::hover() });
-            p.rect_filled(br, 2.0, hex(0x141414));
-            p.rect_filled(br.shrink(1.0), 1.5, if enabled && resp.is_pointer_button_down_on() { hex(0x2E2E2E) } else if enabled && resp.hovered() { hex(0x4A4A4A) } else { hex(0x3C3C3C) });
-            p.text(br.center(), Align2::CENTER_CENTER, label, font.clone(), if enabled { hex(0xC8C8C8) } else { hex(0x787878) });
+            p.rect_filled(br, 2.0, gy(0x141414));
+            p.rect_filled(br.shrink(1.0), 1.5, if enabled && resp.is_pointer_button_down_on() { gy(0x2E2E2E) } else if enabled && resp.hovered() { gy(0x4A4A4A) } else { gy(0x3C3C3C) });
+            p.text(br.center(), Align2::CENTER_CENTER, label, font.clone(), if enabled { gy(0xC8C8C8) } else { gy(0x787878) });
             if resp.clicked() {
                 match k {
                     0 => app.auto_relocate(Some(target.clone())),
@@ -2317,7 +2324,7 @@ fn search_folders_menu(app: &mut App, ui: &mut Ui) {
                     app.prefs.relocate_folders.remove(i);
                     app.save_prefs();
                 }
-                ui.label(RichText::new(f).size(11.0).color(if std::path::Path::new(f).is_dir() { TEXT } else { CAUTION_TX }));
+                ui.label(RichText::new(f).size(11.0).color(if std::path::Path::new(f).is_dir() { TEXT.c() } else { CAUTION_TX }));
             });
         }
         if ui.button("Add Folder…").clicked() {

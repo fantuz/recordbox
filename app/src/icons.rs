@@ -162,7 +162,7 @@ pub fn tag(p: &Painter, r: Rect, c: Color32) {
     let w = r.width() * 0.3;
     let pts = vec![m + vec2(-w, -w * 0.2), m + vec2(-w * 0.2, -w), m + vec2(w, -w), m + vec2(w, w * 0.2), m + vec2(w * 0.2, w)];
     p.add(Shape::convex_polygon(pts, c, Stroke::NONE));
-    p.circle_filled(m + vec2(w * 0.45, -w * 0.45), 1.6, Color32::from_rgb(30, 30, 30));
+    p.circle_filled(m + vec2(w * 0.45, -w * 0.45), 1.6, crate::theme::gy(0x1E1E1E));
 }
 pub fn info(p: &Painter, r: Rect, c: Color32) {
     let m = r.center();
@@ -214,11 +214,11 @@ pub fn funnel(p: &Painter, r: Rect, c: Color32) {
 pub fn vinyl(p: &Painter, r: Rect) {
     let m = r.center();
     let rad = r.height().min(r.width()) * 0.42;
-    p.circle_filled(m, rad, Color32::from_rgb(28, 28, 28));
+    p.circle_filled(m, rad, crate::theme::gy(0x1C1C1C));
     for k in [0.85, 0.7, 0.55] {
-        p.circle_stroke(m, rad * k, Stroke::new(1.0, Color32::from_rgb(40, 40, 40)));
+        p.circle_stroke(m, rad * k, Stroke::new(1.0, crate::theme::gy(0x282828)));
     }
-    p.circle_filled(m, rad * 0.18, Color32::from_rgb(12, 12, 12));
+    p.circle_filled(m, rad * 0.18, crate::theme::gy(0x0C0C0C));
 }
 pub fn lock(p: &Painter, r: Rect, c: Color32) {
     let m = r.center();

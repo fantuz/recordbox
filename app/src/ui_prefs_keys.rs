@@ -29,11 +29,11 @@ pub fn side_icon(ui: &Ui, o: egui::Pos2, cat: u8, selected: bool, dim: bool) {
     let file = format!("preferece_{}_{}.svg", icon_name(cat), if selected { "on" } else { "off" });
     if let Some((tex, size)) = crate::prefs_font::skin(ui.ctx(), &file) {
         // (The files are #AAAAAA or white already; a dimmed category is drawn at #646464.)
-        let tint = if dim { egui::Color32::from_rgb(150, 150, 150) } else { WHITE };
+        let tint = if dim { gy(0x969696) } else { WHITE.c() };
         crate::prefs_font::paint_skin(ui.painter(), &tex, Rect::from_min_size(o, size), tint);
         return;
     }
-    let (c, bg) = if selected { (WHITE, crate::ui_kit::PBLUE) } else if dim { (OFF, BG2) } else { (DIM2, BG2) };
+    let (c, bg) = if selected { (WHITE.c(), crate::ui_kit::PBLUE) } else if dim { (OFF.c(), BG2.c()) } else { (DIM2.c(), BG2.c()) };
     crate::ui_prefs::side_icon_drawn(ui.painter(), o, cat, c, bg);
     let _ = vec2(0.0, 0.0);
 }
@@ -509,7 +509,7 @@ pub fn page(app: &mut App, ui: &mut Ui, mode: Mode) {
                     let c = r.left_center() + egui::vec2(12.0, 0.0);
                     let tri = if is_open { vec![c + egui::vec2(-4.0, -2.5), c + egui::vec2(4.0, -2.5), c + egui::vec2(0.0, 3.5)] } else { vec![c + egui::vec2(-2.5, -4.0), c + egui::vec2(3.5, 0.0), c + egui::vec2(-2.5, 4.0)] };
                     ui.painter().add(egui::Shape::convex_polygon(tri, DIM2, egui::Stroke::NONE));
-                    crate::prefs_font::draw(ui, egui::Rect::from_min_max(egui::pos2(r.min.x + 24.0, r.min.y), r.max), cat.trim(), 16.0, true, WHITE, crate::ui_kit::Just::Left);
+                    crate::prefs_font::draw(ui, egui::Rect::from_min_max(egui::pos2(r.min.x + 24.0, r.min.y), r.max), cat.trim(), 16.0, true, WHITE.c(), crate::ui_kit::Just::Left);
                     crate::ui_prefs_item::tab_seen(&format!("keycat:{}", cat.trim()), r);
                     if resp.clicked() {
                         if is_open { open.remove(&cat); } else { open.insert(cat.clone()); }
@@ -523,12 +523,12 @@ pub fn page(app: &mut App, ui: &mut Ui, mode: Mode) {
                     continue;
                 }
                 let acts = crate::keycmd::acts(row.id, mode);
-                crate::prefs_font::draw(ui, egui::Rect::from_min_max(egui::pos2(r.min.x + 40.0, r.min.y), egui::pos2(r.max.x - 190.0, r.max.y)), &row.name, 15.0, false, if acts { WHITE } else { DIM2 }, crate::ui_kit::Just::Left);
+                crate::prefs_font::draw(ui, egui::Rect::from_min_max(egui::pos2(r.min.x + 40.0, r.min.y), egui::pos2(r.max.x - 190.0, r.max.y)), &row.name, 15.0, false, if acts { WHITE.c() } else { DIM2.c() }, crate::ui_kit::Just::Left);
                 let key = if waiting == Some(row.id) { "Press a key…".to_string() } else { key_of(&app.prefs, mode, &cur, row) };
                 let br = egui::Rect::from_min_size(egui::pos2(r.max.x - 186.0, r.min.y + 2.0), egui::vec2(170.0, 20.0));
                 let resp = ui.interact(br, ui.id().with(("keybtn", row.id)), if preset { egui::Sense::hover() } else { egui::Sense::click() });
-                ui.painter().rect_filled(br, 3.0, if waiting == Some(row.id) { crate::ui_kit::PBLUE } else if resp.hovered() && !preset { hex(0x3C3C3C) } else { hex(0x323232) });
-                crate::prefs_font::draw(ui, br, &key, 14.0, false, if preset { DIM2 } else { WHITE }, crate::ui_kit::Just::Centre);
+                ui.painter().rect_filled(br, 3.0, if waiting == Some(row.id) { crate::ui_kit::PBLUE } else if resp.hovered() && !preset { gy(0x3C3C3C) } else { gy(0x323232) });
+                crate::prefs_font::draw(ui, br, &key, 14.0, false, if preset { DIM2.c() } else { WHITE.c() }, crate::ui_kit::Just::Centre);
                 let why;
                 let hint = if preset {
                     "A preset cannot be changed. Edit > Copy makes a mapping of your own from it."

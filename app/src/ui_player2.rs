@@ -182,17 +182,17 @@ pub fn manual_loop_buttons(app: &mut App, ui: &mut Ui, at: impl Fn(f32, f32) -> 
         } else if on {
             LOOP.gamma_multiply(0.7)
         } else {
-            BTN
+            BTN.c()
         }
     };
     let in_on = active || app.deck.loop_in.is_some();
-    if tip(button(ui, at(960.5, 37.0), "lin", "IN", fill(in_on, adj == 1), WHITE, 9.5), app, "Manual Loop:\nSet a Loop In point.").clicked() {
+    if tip(button(ui, at(960.5, 37.0), "lin", "IN", fill(in_on, adj == 1), WHITE.c(), 9.5), app, "Manual Loop:\nSet a Loop In point.").clicked() {
         app.loop_in_pressed();
     }
-    if tip(button(ui, at(999.5, 37.0), "lout", "OUT", fill(active, adj == 2), WHITE, 9.5), app, "Manual Loop:\nSet a Loop Out point.").clicked() {
+    if tip(button(ui, at(999.5, 37.0), "lout", "OUT", fill(active, adj == 2), WHITE.c(), 9.5), app, "Manual Loop:\nSet a Loop Out point.").clicked() {
         app.loop_out_pressed();
     }
-    if tip(button(ui, at(1055.0, 70.0), "lre", "RELOOP/EXIT", fill(false, false), if active || app.deck.last_loop.is_some() { WHITE } else { OFF }, 9.5), app, "Back to Loop playback (Reloop), or cancel Loop playback (Loop Exit).").clicked() {
+    if tip(button(ui, at(1055.0, 70.0), "lre", "RELOOP/EXIT", fill(false, false), if active || app.deck.last_loop.is_some() { WHITE.c() } else { OFF.c() }, 9.5), app, "Back to Loop playback (Reloop), or cancel Loop playback (Loop Exit).").clicked() {
         app.exit_reloop();
     }
     if adj != 0 {
@@ -253,7 +253,7 @@ fn grid_icon(p: &Painter, r: Rect, icon: GridIcon, c: Color32) {
             p.line_segment([m(xx, y0), m(xx, y1)], Stroke::new(1.0_f32, col));
         }
     };
-    let grey = hex(0x646464);
+    let grey = gy(0x646464);
     match icon {
         GridIcon::MoveLeft => {
             tri(m(5.0, 15.0), m(10.0, 12.0), m(10.0, 18.0), c);
@@ -297,7 +297,7 @@ fn grid_icon(p: &Painter, r: Rect, icon: GridIcon, c: Color32) {
             p.rect_filled(Rect::from_min_max(m(14.0, 15.0), m(16.0, 23.0)), 0.0, hex(0xFA0000));
         }
         GridIcon::Whole | GridIcon::FromCurrent => {
-            bars(5.0, 10.0, 20.0, if icon == GridIcon::Whole { c } else { hex(0x4B4B4B) });
+            bars(5.0, 10.0, 20.0, if icon == GridIcon::Whole { c } else { gy(0x4B4B4B) });
             bars(18.0, 10.0, 20.0, c);
             tri(m(15.0, 9.0), m(13.0, 6.0), m(17.0, 6.0), grey);
             tri(m(15.0, 21.0), m(17.0, 24.0), m(13.0, 24.0), grey);
@@ -312,26 +312,26 @@ fn grid_icon(p: &Painter, r: Rect, icon: GridIcon, c: Color32) {
                 pts.push(mm(13.6 + a.cos() * 4.6, 15.0 + a.sin() * 4.2));
             }
             // The skin draws Undo / Redo in #969696.
-            let c = if c == OFF { c } else { hex(0x969696) };
+            let c = if c == OFF { c } else { gy(0x969696) };
             p.add(Shape::line(pts, Stroke::new(1.7 * k / 0.8, c)));
             p.add(Shape::convex_polygon(vec![mm(9.0, 10.8), mm(13.6, 7.9), mm(13.6, 13.7)], c, Stroke::NONE));
         }
         GridIcon::Metronome(on) => {
             // A solid body (white; blue while it ticks) with the pendulum cut out of it.
-            let col = if c == OFF { c } else if on { SKIN_BLUE } else { WHITE };
+            let col = if c == OFF { c } else if on { SKIN_BLUE } else { WHITE.c() };
             p.add(Shape::convex_polygon(vec![m(11.5, 7.0), m(18.5, 7.0), m(21.0, 23.0), m(9.0, 23.0)], col, Stroke::NONE));
-            let cut = Stroke::new(1.6 * k / 0.8, hex(0x282828));
+            let cut = Stroke::new(1.6 * k / 0.8, gy(0x282828));
             p.line_segment([m(11.0, 8.0), m(18.6, 18.6)], cut);
             p.line_segment([m(9.5, 18.8), m(20.5, 18.8)], cut);
-            p.add(Shape::closed_line(vec![m(12.4, 8.2), m(17.6, 8.2), m(19.4, 18.0), m(10.6, 18.0)], Stroke::new(0.9 * k / 0.8, hex(0x282828))));
+            p.add(Shape::closed_line(vec![m(12.4, 8.2), m(17.6, 8.2), m(19.4, 18.0), m(10.6, 18.0)], Stroke::new(0.9 * k / 0.8, gy(0x282828))));
         }
         GridIcon::Volume(v) => {
             for (i, (x, y0, y1)) in [(9.0, 12.0, 17.0), (13.0, 10.0, 19.0), (17.0, 8.0, 22.0)].iter().enumerate() {
-                p.rect_filled(Rect::from_min_max(m(*x, *y0), m(*x + 2.0, *y1)), 0.0, if c == OFF { c } else if (i as u8) < v { SKIN_BLUE } else { WHITE });
+                p.rect_filled(Rect::from_min_max(m(*x, *y0), m(*x + 2.0, *y1)), 0.0, if c == OFF { c } else if (i as u8) < v { SKIN_BLUE } else { WHITE.c() });
             }
         }
         GridIcon::Lock(on) => {
-            let col = if c == OFF { c } else if on { hex(0x007DE1) } else { WHITE };
+            let col = if c == OFF { c } else if on { hex(0x007DE1) } else { WHITE.c() };
             let body = Rect::from_min_max(m(9.0, 14.0), m(21.0, 23.0));
             p.rect_filled(body, 1.0, col);
             let mut pts = vec![];
@@ -366,11 +366,11 @@ pub fn grid_strip(app: &mut App, ui: &mut Ui, s: Rect, main: Rect) {
     let locked = app.deck.track.and_then(|t| app.track(t)).map(|t| t.grid_locked).unwrap_or(false);
     let loaded = app.deck.track.is_some();
     let x_of = |x: f32| crate::ui_player::sx(main, x);
-    p.text(pos2(x_of(173.0), s.min.y + 6.0), Align2::LEFT_CENTER, "GRID EDIT", caps(8.8), WHITE);
+    p.text(pos2(x_of(173.0), s.min.y + 6.0), Align2::LEFT_CENTER, "GRID EDIT", caps(8.8), WHITE.c());
     // One icon button at design x; returns its response. `dim`: drawn as unavailable.
     let ib = |ui: &mut Ui, app: &App, x: f32, id: &str, icon: GridIcon, tipt: &str, dim: bool| -> egui::Response {
         let r = Rect::from_min_size(pos2(x_of(x), y - 12.0), vec2(24.0, 24.0));
-        let resp = icon_button(ui, r, id, Some(if dim { hex(0x212121) } else { face }), |p, r, c| grid_icon(p, r.expand2(vec2(2.0, 0.0)), icon, if loaded && !dim { c } else { OFF }));
+        let resp = icon_button(ui, r, id, Some(if dim { gy(0x212121) } else { face.c() }), |p, r, c| grid_icon(p, r.expand2(vec2(2.0, 0.0)), icon, if loaded && !dim { c } else { OFF.c() }));
         tip(resp, app, tipt)
     };
     let fine = ui.input(|i| i.modifiers.shift);
@@ -380,13 +380,13 @@ pub fn grid_strip(app: &mut App, ui: &mut Ui, s: Rect, main: Rect) {
     }
     // BPM: shows the tempo at the playhead; type a value (40–499) and press Enter to set it.
     let r = Rect::from_min_max(pos2(x_of(207.0), y - 12.0), pos2(x_of(257.0), y + 12.0));
-    p.rect_filled(r, 2.0, hex(0x0F0F0F));
+    p.rect_filled(r, 2.0, gy(0x0F0F0F));
     if !app.deck.x.bpm_editing {
         let b = app.current_bpm();
         app.deck.bpm_text = if loaded && b > 0.0 { format!("{b:.2}") } else { String::new() };
     }
     let mut txt = app.deck.bpm_text.clone();
-    let resp = ui.put(r.shrink2(vec2(3.0, 3.0)), egui::TextEdit::singleline(&mut txt).horizontal_align(egui::Align::Center).frame(false).font(FontId::proportional(11.5)).text_color(WHITE).interactive(loaded));
+    let resp = ui.put(r.shrink2(vec2(3.0, 3.0)), egui::TextEdit::singleline(&mut txt).horizontal_align(egui::Align::Center).frame(false).font(FontId::proportional(11.5)).text_color(WHITE.c()).interactive(loaded));
     app.deck.bpm_text = txt;
     if resp.gained_focus() || resp.has_focus() {
         app.deck.x.bpm_editing = true;
@@ -400,7 +400,7 @@ pub fn grid_strip(app: &mut App, ui: &mut Ui, s: Rect, main: Rect) {
     }
     let _ = tip(resp, app, "Enter a BPM value");
     let r = Rect::from_min_size(pos2(x_of(262.0), y - 12.0), vec2(24.0, 24.0));
-    if tip(button(ui, r, "gtap", "TAP", hex(0x212121), if loaded { hex(0x969696) } else { hex(0x505050) }, 8.5), app, "Set BPM with the tapping interval").clicked() {
+    if tip(button(ui, r, "gtap", "TAP", gy(0x212121), if loaded { gy(0x969696) } else { gy(0x505050) }, 8.5), app, "Set BPM with the tapping interval").clicked() {
         app.grid_tap();
     }
     // Beat grid left / right: 1 ms a click (Shift: 5 ms).
@@ -461,12 +461,12 @@ pub fn grid_strip(app: &mut App, ui: &mut Ui, s: Rect, main: Rect) {
     // ---- PHRASE EDIT: CUT, the type of the phrase under the playhead, CLEAR
     let cur = app.current_phrase();
     let has = cur.is_some();
-    let ink = if has { WHITE } else { hex(0x505050) };
-    p.text(pos2(x_of(880.0), s.min.y + 6.0), Align2::LEFT_CENTER, "PHRASE EDIT", caps(8.8), if has { WHITE } else { hex(0x787878) });
+    let ink = if has { WHITE.c() } else { gy(0x505050) };
+    p.text(pos2(x_of(880.0), s.min.y + 6.0), Align2::LEFT_CENTER, "PHRASE EDIT", caps(8.8), if has { WHITE.c() } else { gy(0x787878) });
     let pb = |x0: f32, x1: f32| Rect::from_min_max(pos2(x_of(x0), y - 8.5), pos2(x_of(x1), y + 8.5));
     let flat = |ui: &mut Ui, r: Rect, id: &str, label: &str, col: Color32| -> egui::Response {
         let resp = ui.interact(r, ui.id().with(id), Sense::click());
-        ui.painter().rect_filled(r, 2.0, if resp.hovered() && col == WHITE { lighten(hex(0x212121)) } else { hex(0x212121) });
+        ui.painter().rect_filled(r, 2.0, if resp.hovered() && col == WHITE { lighten(gy(0x212121)) } else { gy(0x212121) });
         ui.painter().text(r.center(), Align2::CENTER_CENTER, label, caps(8.8), col);
         resp
     };
@@ -475,11 +475,11 @@ pub fn grid_strip(app: &mut App, ui: &mut Ui, s: Rect, main: Rect) {
     }
     let lr = pb(940.0, 1020.0);
     let lresp = ui.interact(lr, ui.id().with("phkind"), Sense::click());
-    p.rect_filled(lr, 2.0, hex(0x212121));
+    p.rect_filled(lr, 2.0, gy(0x212121));
     if let Some((mood, kind)) = cur {
-        p.with_clip_rect(lr).text(pos2(lr.min.x + 8.0, lr.center().y), Align2::LEFT_CENTER, crate::phrase::label(mood, kind), FontId::proportional(11.0), WHITE);
+        p.with_clip_rect(lr).text(pos2(lr.min.x + 8.0, lr.center().y), Align2::LEFT_CENTER, crate::phrase::label(mood, kind), FontId::proportional(11.0), WHITE.c());
     }
-    crate::icons_player::chevron_down(&p, pos2(lr.max.x - 10.0, lr.center().y), 1.0, if has { WHITE } else { hex(0x505050) });
+    crate::icons_player::chevron_down(&p, pos2(lr.max.x - 10.0, lr.center().y), 1.0, if has { WHITE.c() } else { gy(0x505050) });
     let lresp = tip(lresp, app, "Select the phrase type.");
     if let Some((mood, kind)) = cur {
         crate::ui_browser::dropdown(ui, &lresp, "phkindpop", |ui: &mut Ui| {
@@ -492,7 +492,7 @@ pub fn grid_strip(app: &mut App, ui: &mut Ui, s: Rect, main: Rect) {
         });
     }
     let edited = app.deck.x.phrases_edited;
-    if tip(flat(ui, pb(1030.0, 1080.5), "phclear", "CLEAR", if edited { WHITE } else { hex(0x505050) }), app, "Clear the edited phrases.").clicked() && edited {
+    if tip(flat(ui, pb(1030.0, 1080.5), "phclear", "CLEAR", if edited { WHITE.c() } else { gy(0x505050) }), app, "Clear the edited phrases.").clicked() && edited {
         app.phrase_clear();
     }
 
@@ -502,7 +502,7 @@ pub fn grid_strip(app: &mut App, ui: &mut Ui, s: Rect, main: Rect) {
         app.prefs.quantize = !q;
         app.save_prefs();
     }
-    let menu_r = tip(icon_button(ui, Rect::from_center_size(pos2(x_of(1259.5), y - 0.5), vec2(21.0, 21.0)), "stripmenu", Some(BTN), |p, r, c| crate::icons_player::menu(p, r.center(), 1.625, c)), app, "Show Menu items");
+    let menu_r = tip(icon_button(ui, Rect::from_center_size(pos2(x_of(1259.5), y - 0.5), vec2(21.0, 21.0)), "stripmenu", Some(BTN.c()), |p, r, c| crate::icons_player::menu(p, r.center(), 1.625, c)), app, "Show Menu items");
     crate::ui_browser::dropdown(ui, &menu_r, "gridpop", |ui: &mut Ui| {
         if ui.button("Set a beat to the current position").clicked() {
             app.grid_center();
@@ -546,7 +546,7 @@ pub(crate) fn artwork(app: &mut App, ui: &mut Ui, art: Rect, track: &Option<Trac
             if let Some(tex) = crate::ui_browser::artwork_texture(app, &t.artwork) {
                 p.image(tex.id(), crate::ui_player::fit_rect(art, tex.size_vec2()), Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
             } else {
-                p.rect_filled(art, 0.0, hex(0x141414));
+                p.rect_filled(art, 0.0, gy(0x141414));
                 draw_note_icon(&p.with_clip_rect(art), art);
             }
             let ar = ui.interact(art, ui.id().with("artwork"), Sense::click());
@@ -556,10 +556,10 @@ pub(crate) fn artwork(app: &mut App, ui: &mut Ui, art: Rect, track: &Option<Trac
         }
         None => {
             // Empty deck: a dark tile with a grey disc and hub, soft at the edges.
-            p.rect_filled(art, 0.0, hex(0x0F0F0F));
+            p.rect_filled(art, 0.0, gy(0x0F0F0F));
             let k = art.height().min(art.width()) / 48.0;
             for (rad, col) in [(21.5, 0x141414), (21.0, 0x181818), (20.5, 0x1D1D1D), (19.5, 0x1E1E1E), (6.5, 0x191919), (6.0, 0x141414), (5.5, 0x0F0F0F)] {
-                p.circle_filled(art.center(), rad * k, hex(col));
+                p.circle_filled(art.center(), rad * k, Tc(hex(col), hex(if rad > 10.0 { 0xF0F0F0 } else { 0xFFFFFF })).c());
             }
         }
     }
@@ -664,9 +664,9 @@ pub fn two_players(app: &mut App, ui: &mut Ui) {
 /// A raised 17 pt tall button of the deck rows with a caps label; `lit`: blue (on).
 fn row_button(ui: &mut Ui, r: Rect, id: &str, label: &str, lit: bool, enabled: bool) -> egui::Response {
     let resp = ui.interact(r, ui.id().with(id), Sense::click());
-    let fill = if lit { BLUE } else if resp.is_pointer_button_down_on() { BG2 } else if resp.hovered() { lighten(BTN) } else { BTN };
+    let fill = if lit { BLUE.c() } else if resp.is_pointer_button_down_on() { BG2.c() } else if resp.hovered() { lighten(BTN.c()) } else { BTN.c() };
     ui.painter().rect_filled(r, 2.0, fill);
-    ui.painter().text(r.center(), Align2::CENTER_CENTER, label, caps(8.8), if enabled { WHITE } else { OFF });
+    ui.painter().text(r.center(), Align2::CENTER_CENTER, label, caps(8.8), if enabled { WHITE.c() } else { OFF.c() });
     resp
 }
 
@@ -678,9 +678,9 @@ fn row_icon(ui: &mut Ui, r: Rect, id: &str, draw: impl FnOnce(&Painter, Pos2, Co
 /// `row_icon`; with `enabled` false the tile lies flat in the row (an empty deck).
 fn row_icon_on(ui: &mut Ui, r: Rect, id: &str, enabled: bool, draw: impl FnOnce(&Painter, Pos2, Color32, bool)) -> egui::Response {
     let resp = ui.interact(r, ui.id().with(id), Sense::click());
-    let fill = if !enabled { hex(0x212121) } else if resp.is_pointer_button_down_on() { BG2 } else if resp.hovered() { lighten(BTN) } else { BTN };
+    let fill = if !enabled { gy(0x212121) } else if resp.is_pointer_button_down_on() { BG2.c() } else if resp.hovered() { lighten(BTN.c()) } else { BTN.c() };
     ui.painter().rect_filled(r, 2.0, fill);
-    draw(ui.painter(), r.center(), WHITE, resp.is_pointer_button_down_on());
+    draw(ui.painter(), r.center(), WHITE.c(), resp.is_pointer_button_down_on());
     resp
 }
 
@@ -722,19 +722,19 @@ fn deck_rows(app: &mut App, ui: &mut Ui, g: &TwoGeom, rows: &DeckRows, n: u8, is
         cue_play(app, ui, pos2(l + 35.0, t + cue_y), pos2(l + 35.0, t + play_y), 14.5, is_active);
         let bj = app.prefs.beat_jump;
         let tile = |x: f32| Rect::from_min_size(pos2(l + x, t + jump_y), vec2(25.0, 22.0));
-        if tip(icon_button(ui, tile(8.0), "bjl", Some(BTN), |p, r, c| crate::icons_player::chevron_left(p, r.center(), 1.35, c)), app, "Jump Reverse").clicked() {
+        if tip(icon_button(ui, tile(8.0), "bjl", Some(BTN.c()), |p, r, c| crate::icons_player::chevron_left(p, r.center(), 1.35, c)), app, "Jump Reverse").clicked() {
             app.beat_jump(-bj);
             jumped = Some(-bj);
         }
-        if tip(icon_button(ui, tile(37.0), "bjr", Some(BTN), |p, r, c| crate::icons_player::chevron_right(p, r.center(), 1.35, c)), app, "Jump Forward").clicked() {
+        if tip(icon_button(ui, tile(37.0), "bjr", Some(BTN.c()), |p, r, c| crate::icons_player::chevron_right(p, r.center(), 1.35, c)), app, "Jump Forward").clicked() {
             app.beat_jump(bj);
             jumped = Some(bj);
         }
         let bj_rect = Rect::from_min_size(pos2(l + 8.0, t + jump_y + 26.0), vec2(54.0, 27.0));
         let r = tip(ui.interact(bj_rect, ui.id().with("bjsize"), Sense::click()), app, "Select the beat/bar length jumping from the current position.");
-        p.rect_filled(bj_rect, 0.0, if r.hovered() { lighten(BTN) } else { BTN });
-        p.text(pos2(bj_rect.center().x, bj_rect.min.y + 8.7), Align2::CENTER_CENTER, crate::player_ext::jump_label(bj, app.prefs.beat_jump_bars), bold(9.0), WHITE);
-        crate::icons_player::chevron_down(&p, pos2(bj_rect.center().x + 0.75, bj_rect.min.y + 20.5), 1.0, WHITE);
+        p.rect_filled(bj_rect, 0.0, if r.hovered() { lighten(BTN.c()) } else { BTN.c() });
+        p.text(pos2(bj_rect.center().x, bj_rect.min.y + 8.7), Align2::CENTER_CENTER, crate::player_ext::jump_label(bj, app.prefs.beat_jump_bars), bold(9.0), WHITE.c());
+        crate::icons_player::chevron_down(&p, pos2(bj_rect.center().x + 0.75, bj_rect.min.y + 20.5), 1.0, WHITE.c());
         crate::ui_browser::dropdown(ui, &r, "bjpop", |ui: &mut Ui| jump_size_menu(app, ui));
     } else {
         let (cue_y, play_y) = if n == 0 { (57.0, 107.0) } else { (273.0, 323.0) };
@@ -746,7 +746,7 @@ fn deck_rows(app: &mut App, ui: &mut Ui, g: &TwoGeom, rows: &DeckRows, n: u8, is
         let cx = l + 97.0;
         let (db_y, knob_y, name_y, eq_y) = if n == 0 { (29.8, 47.5, 64.0, 79.0) } else { (309.8, 328.0, 344.0, 241.0) };
         let db = app.gain_db();
-        let dim = if loaded { hex(0x686868) } else { hex(0x454545) };
+        let dim = if loaded { gy(0x686868) } else { gy(0x454545) };
         p.text(pos2(cx, t + db_y), Align2::CENTER_CENTER, format!("{db:.1}dB"), bold(9.0), dim);
         p.text(pos2(cx, t + name_y), Align2::CENTER_CENTER, "A-GAIN", bold(9.0), dim);
         let kc = pos2(cx, t + knob_y);
@@ -774,11 +774,11 @@ fn deck_rows(app: &mut App, ui: &mut Ui, g: &TwoGeom, rows: &DeckRows, n: u8, is
             let r = Rect::from_min_size(pos2(l + 79.0, t + eq_y + i as f32 * 20.0), vec2(36.0, 16.0));
             let resp = ui.interact(r, ui.id().with(("eqkill", i)), Sense::click());
             let killed = app.deck.x.eq_kill[*band];
-            p.rect_filled(r, 2.0, if resp.hovered() { lighten(BTN) } else { BTN });
+            p.rect_filled(r, 2.0, if resp.hovered() { lighten(BTN.c()) } else { BTN.c() });
             if killed {
                 p.rect_stroke(r, 2.0, Stroke::new(1.0_f32, BLUE), egui::StrokeKind::Inside);
             }
-            p.text(r.center(), Align2::CENTER_CENTER, *name, caps(8.8), WHITE);
+            p.text(r.center(), Align2::CENTER_CENTER, *name, caps(8.8), WHITE.c());
             if tip(resp, app, tipt).clicked() {
                 app.toggle_eq_kill(*band);
             }
@@ -792,8 +792,8 @@ fn deck_rows(app: &mut App, ui: &mut Ui, g: &TwoGeom, rows: &DeckRows, n: u8, is
     let (d1, d2, d3) = (mx1 - 372.5 - shift, mx1 - 231.5 - shift, mx1 - 175.5 - shift);
     if let Some(tr) = &track {
         let clip = p.with_clip_rect(Rect::from_min_max(pos2(mx0 + 49.0, y0 - 4.0), pos2(d1 - 8.0, y0 + 38.0)));
-        clip.text(pos2(mx0 + 49.5, y0 + 8.3), Align2::LEFT_CENTER, tr.display_title(), bold(15.5), WHITE);
-        clip.text(pos2(mx0 + 49.5, y0 + 28.7), Align2::LEFT_CENTER, &tr.artist, FontId::proportional(12.25), DIM);
+        clip.text(pos2(mx0 + 49.5, y0 + 8.3), Align2::LEFT_CENTER, tr.display_title(), bold(15.5), WHITE.c());
+        clip.text(pos2(mx0 + 49.5, y0 + 28.7), Align2::LEFT_CENTER, &tr.artist, FontId::proportional(12.25), DIM.c());
     }
     let ty = y0 + 28.0;
     for x in [d1, d2, d3] {
@@ -802,7 +802,7 @@ fn deck_rows(app: &mut App, ui: &mut Ui, g: &TwoGeom, rows: &DeckRows, n: u8, is
     // Remaining and elapsed time; a click switches which one is bright.
     {
         let remain = (app.deck.duration - pos).max(0.0);
-        let (dim_t, bright_t) = if loaded { (DIM, WHITE) } else { (hex(0x323232), hex(0x323232)) };
+        let (dim_t, bright_t) = if loaded { (DIM.c(), WHITE.c()) } else { (gy(0x323232), gy(0x323232)) };
         let (c1, c2) = if app.prefs.time_remain { (bright_t, dim_t) } else { (dim_t, bright_t) };
         let (big, small) = split_time(if loaded { remain } else { 0.0 });
         p.text(pos2(d1 + 22.0, ty), Align2::LEFT_CENTER, format!("-{big}.{small}"), FontId::proportional(12.0), c1);
@@ -814,9 +814,9 @@ fn deck_rows(app: &mut App, ui: &mut Ui, g: &TwoGeom, rows: &DeckRows, n: u8, is
         }
     }
     if loaded {
-        p.text(pos2((d2 + d3) / 2.0, ty), Align2::CENTER_CENTER, app.result_key_label(), FontId::proportional(12.0), WHITE);
+        p.text(pos2((d2 + d3) / 2.0, ty), Align2::CENTER_CENTER, app.result_key_label(), FontId::proportional(12.0), WHITE.c());
         let b = app.effective_bpm();
-        p.text(pos2(d3 + 38.5, ty), Align2::CENTER_CENTER, if b > 0.0 { format!("{b:.2}") } else { "--.--".into() }, FontId::proportional(12.0), WHITE);
+        p.text(pos2(d3 + 38.5, ty), Align2::CENTER_CENTER, if b > 0.0 { format!("{b:.2}") } else { "--.--".into() }, FontId::proportional(12.0), WHITE.c());
     }
     let is_master = app.px.master == n;
     let sync_on = app.deck.x.beat_sync;
@@ -828,9 +828,9 @@ fn deck_rows(app: &mut App, ui: &mut Ui, g: &TwoGeom, rows: &DeckRows, n: u8, is
         // MASTER: outlined; blue while this deck is the master.
         let r = top_btn(75.0, 20.0);
         let resp = ui.interact(r, ui.id().with("master"), Sense::click());
-        p.rect_filled(r, 2.0, if resp.hovered() { hex(0x1A1A1A) } else { BG });
+        p.rect_filled(r, 2.0, if resp.hovered() { gy(0x1A1A1A) } else { BG.c() });
         p.rect_stroke(r, 2.0, Stroke::new(1.0_f32, if is_master { BLUE } else { OFF }), egui::StrokeKind::Inside);
-        p.text(r.center(), Align2::CENTER_CENTER, "MASTER", caps(8.8), WHITE);
+        p.text(r.center(), Align2::CENTER_CENTER, "MASTER", caps(8.8), WHITE.c());
         if tip(resp, app, "Click here to set this deck as a master for Sync.").clicked() {
             app.set_master();
         }
@@ -840,7 +840,7 @@ fn deck_rows(app: &mut App, ui: &mut Ui, g: &TwoGeom, rows: &DeckRows, n: u8, is
             app.toggle_key_sync();
         }
         // Key shift: ‹ key ±n ›
-        let col = if loaded { WHITE } else { hex(0x3C3C3C) };
+        let col = if loaded { WHITE.c() } else { gy(0x3C3C3C) };
         let lr = Rect::from_center_size(pos2(mx1 - 154.0, ty), vec2(14.0, 16.0));
         let rr = Rect::from_center_size(pos2(mx1 - 94.0, ty), vec2(14.0, 16.0));
         let lresp = ui.interact(lr, ui.id().with("keydn"), Sense::click());
@@ -854,8 +854,8 @@ fn deck_rows(app: &mut App, ui: &mut Ui, g: &TwoGeom, rows: &DeckRows, n: u8, is
             app.key_shift_step(1);
         }
         if loaded {
-            p.text(pos2(mx1 - 136.5, ty), Align2::CENTER_CENTER, app.result_key_label(), bold(10.5), WHITE);
-            p.text(pos2(mx1 - 109.0, ty), Align2::CENTER_CENTER, crate::player_ext::shift_text(app.deck.x.key_shift), bold(10.5), WHITE);
+            p.text(pos2(mx1 - 136.5, ty), Align2::CENTER_CENTER, app.result_key_label(), bold(10.5), WHITE.c());
+            p.text(pos2(mx1 - 109.0, ty), Align2::CENTER_CENTER, crate::player_ext::shift_text(app.deck.x.key_shift), bold(10.5), WHITE.c());
             let mid = ui.interact(Rect::from_min_max(pos2(mx1 - 146.0, ty - 8.0), pos2(mx1 - 101.0, ty + 8.0)), ui.id().with("keyreset"), Sense::click());
             if tip(mid, app, "Key Reset:\nDouble click here to reset the key.").double_clicked() {
                 app.key_reset();
@@ -870,6 +870,8 @@ fn deck_rows(app: &mut App, ui: &mut Ui, g: &TwoGeom, rows: &DeckRows, n: u8, is
     // ---- enlarged waveform (this deck's half of the shared area)
     let wr = Rect::from_min_max(pos2(mx0, t + rows.wave.0), pos2(mx1, t + rows.wave.1));
     let mode = if n == 0 { DetailMode::HalfUp } else { DetailMode::HalfDown };
+    // (Black in both appearances, as rekordbox's waveform views.)
+    ui.painter().rect_filled(wr, 0.0, WAVE_BG);
     draw_detail_at(app, ui, wr, pos, if g.dual { 0.5 } else { 0.0 }, mode);
 
     // ---- control row
@@ -878,7 +880,7 @@ fn deck_rows(app: &mut App, ui: &mut Ui, g: &TwoGeom, rows: &DeckRows, n: u8, is
     let cy = s.min.y + 13.5;
     let b = |x: f32, w: f32| Rect::from_min_size(pos2(mx0 + x, cy - 8.5), vec2(w, 17.0));
     let br = |x: f32, w: f32| Rect::from_min_size(pos2(mx1 - x, cy - 8.5), vec2(w, 17.0));
-    let ink = if loaded { WHITE } else { hex(0x404040) };
+    let ink = if loaded { WHITE.c() } else { gy(0x404040) };
     let fine = ui.input(|i| i.modifiers.shift);
     let step = if fine { 0.005 } else { 0.001 };
     if tip(row_icon_on(ui, b(5.0, 40.0), "g2l", loaded, |p, c, _, _| crate::icons_player::grid2_move(p, c, -1.0, ink)), app, "Shift Beatgrid left").clicked() {
@@ -907,7 +909,7 @@ fn deck_rows(app: &mut App, ui: &mut Ui, g: &TwoGeom, rows: &DeckRows, n: u8, is
         let lb = app.prefs.loop_beats;
         let active = app.loop_active().is_some();
         let field = b(359.0, 66.0);
-        if tip(button(ui, field, "lbeat", &beats_text(lb), if active { LOOP.gamma_multiply(0.7) } else { BTN }, WHITE, 11.0), app, "Auto Beat Loop:\nSet/Reset Loop of displayed beat length.").clicked() {
+        if tip(button(ui, field, "lbeat", &beats_text(lb), if active { LOOP.gamma_multiply(0.7) } else { BTN.c() }, WHITE.c(), 11.0), app, "Auto Beat Loop:\nSet/Reset Loop of displayed beat length.").clicked() {
             if active {
                 app.loop_exit();
             } else {
@@ -917,7 +919,7 @@ fn deck_rows(app: &mut App, ui: &mut Ui, g: &TwoGeom, rows: &DeckRows, n: u8, is
         let dr = Rect::from_min_max(pos2(field.max.x - 14.0, field.min.y), field.max);
         let dresp = tip(ui.interact(dr, ui.id().with("lsize"), Sense::click()), app, "Beat Loop");
         if ui.rect_contains_pointer(field) {
-            crate::icons_player::chevron_down(&p, dr.center(), 0.9, if dresp.hovered() { WHITE } else { DIM });
+            crate::icons_player::chevron_down(&p, dr.center(), 0.9, if dresp.hovered() { WHITE.c() } else { DIM.c() });
         }
         crate::ui_browser::dropdown(ui, &dresp, "lsizepop", |ui: &mut Ui| loop_size_menu(app, ui));
         if tip(row_icon(ui, b(429.0, 20.0), "ldouble", |p, c, col, _| crate::icons_player::chevron_right(p, c, 1.25, col)), app, "Auto Beat Loop:\nMake Loop length longer.").clicked() {
@@ -937,7 +939,7 @@ fn deck_rows(app: &mut App, ui: &mut Ui, g: &TwoGeom, rows: &DeckRows, n: u8, is
     }
     // Tempo: − [BPM] +
     let follower = app.sync_follower();
-    let minus = row_icon_on(ui, b(473.0, 30.0), "tminus", loaded, |p, c, _, _| crate::icons_player::tempo_sign(p, c, false, if loaded { WHITE } else { hex(0x626262) }));
+    let minus = row_icon_on(ui, b(473.0, 30.0), "tminus", loaded, |p, c, _, _| crate::icons_player::tempo_sign(p, c, false, if loaded { WHITE.c() } else { gy(0x626262) }));
     if click_or_repeat(ui, &minus) && loaded {
         app.tempo_step(-1);
     }
@@ -946,7 +948,7 @@ fn deck_rows(app: &mut App, ui: &mut Ui, g: &TwoGeom, rows: &DeckRows, n: u8, is
     p.rect_filled(field, 2.0, BTN);
     if app.deck.x.tempo_editing {
         let mut txt = app.deck.x.tempo_text.clone();
-        let resp = ui.put(field.shrink2(vec2(4.0, 0.0)), egui::TextEdit::singleline(&mut txt).horizontal_align(egui::Align::Center).frame(false).font(FontId::proportional(11.5)).text_color(WHITE));
+        let resp = ui.put(field.shrink2(vec2(4.0, 0.0)), egui::TextEdit::singleline(&mut txt).horizontal_align(egui::Align::Center).frame(false).font(FontId::proportional(11.5)).text_color(WHITE.c()));
         app.deck.x.tempo_text = txt;
         // Whether the field just gave up focus must be read before focus is asked for again.
         let gave_up = resp.lost_focus();
@@ -962,7 +964,7 @@ fn deck_rows(app: &mut App, ui: &mut Ui, g: &TwoGeom, rows: &DeckRows, n: u8, is
     } else {
         let bpm = app.effective_bpm();
         if loaded && bpm > 0.0 {
-            p.text(field.center(), Align2::CENTER_CENTER, format!("{bpm:.2}"), FontId::proportional(11.0), if follower { hex(0x6FA8F5) } else { WHITE });
+            p.text(field.center(), Align2::CENTER_CENTER, format!("{bpm:.2}"), FontId::proportional(11.0), if follower { tc(0x6FA8F5, 0x24559A).c() } else { WHITE.c() });
         }
         let resp = ui.interact(field, ui.id().with("tempofield"), Sense::click());
         if tip(resp, app, "Display the BPM of the track currently playing.\nClick here to enter a BPM value (within the Tempo Range) directly.").clicked() && loaded && bpm > 0.0 {
@@ -975,7 +977,7 @@ fn deck_rows(app: &mut App, ui: &mut Ui, g: &TwoGeom, rows: &DeckRows, n: u8, is
             }
         }
     }
-    let plus = row_icon_on(ui, b(576.0, 30.0), "tplus", loaded, |p, c, _, _| crate::icons_player::tempo_sign(p, c, true, if loaded { WHITE } else { hex(0x626262) }));
+    let plus = row_icon_on(ui, b(576.0, 30.0), "tplus", loaded, |p, c, _, _| crate::icons_player::tempo_sign(p, c, true, if loaded { WHITE.c() } else { gy(0x626262) }));
     if click_or_repeat(ui, &plus) && loaded {
         app.tempo_step(1);
     }
@@ -1021,10 +1023,10 @@ fn shared_controls(app: &mut App, ui: &mut Ui, g: &TwoGeom) {
     // Crossfader: A at the top, B at the bottom; the fader runs from y 162 to 215.
     let cx = l + if g.dual { 97.0 } else { 38.0 };
     let (y0, y1) = (t + 162.0, t + 215.0);
-    let label = hex(0x757575);
+    let label = gy(0x757575);
     p.text(pos2(cx, t + 150.0), Align2::CENTER_CENTER, "A", bold(10.0), label);
     p.text(pos2(cx, t + if g.dual { 226.0 } else { 230.0 }), Align2::CENTER_CENTER, "B", bold(10.0), label);
-    let rail = hex(0x323232);
+    let rail = gy(0x323232);
     p.rect_filled(Rect::from_min_max(pos2(cx - 0.5, y0), pos2(cx + 0.5, y1)), 0.0, rail);
     p.rect_filled(Rect::from_min_max(pos2(cx - 12.0, y0), pos2(cx + 12.0, y0 + 1.0)), 0.0, rail);
     p.rect_filled(Rect::from_min_max(pos2(cx - 12.0, y1 - 1.0), pos2(cx + 12.0, y1)), 0.0, rail);
@@ -1039,17 +1041,17 @@ fn shared_controls(app: &mut App, ui: &mut Ui, g: &TwoGeom) {
         app.set_crossfader(0.5);
     }
     let hy = y0 + app.px.crossfader * (y1 - y0);
-    p.rect_filled(Rect::from_center_size(pos2(cx, hy), vec2(28.0, 3.0)), 0.0, if resp.hovered() || resp.dragged() { hex(0x8C8C8C) } else { hex(0x646464) });
+    p.rect_filled(Rect::from_center_size(pos2(cx, hy), vec2(28.0, 3.0)), 0.0, if resp.hovered() || resp.dragged() { gy(0x8C8C8C) } else { gy(0x646464) });
     let _ = tip(resp, app, "CROSSFADER:\nOutputs audio of each channel according to the curve characteristics set in [Preferences].");
 
     // Zoom (both waveforms): on a black strip over the left end of the waveform area.
     let zx = g.mx0 + 11.0;
-    p.rect_filled(Rect::from_min_max(pos2(g.mx0, t + 148.0), pos2(g.mx0 + 24.0, t + 224.0)), 0.0, Color32::BLACK);
+    p.rect_filled(Rect::from_min_max(pos2(g.mx0, t + 148.0), pos2(g.mx0 + 24.0, t + 224.0)), 0.0, ZOOM_BG.c());
     let zc = |y: f32| Rect::from_center_size(pos2(zx, t + y), vec2(22.0, 20.0));
     if tip(icon_button(ui, zc(161.0), "zin", None, |p, r, c| crate::icons_player::zoom(p, r.center(), 7.0 / 6.0, c, true)), app, "Zoom In").clicked() && app.prefs.zoom > 0 {
         app.prefs.zoom -= 1;
     }
-    if tip(button(ui, zc(185.4), "zrst", "RST", Color32::TRANSPARENT, WHITE, 8.2), app, "Reset Zoom").clicked() {
+    if tip(button(ui, zc(185.4), "zrst", "RST", Color32::TRANSPARENT, WHITE.c(), 8.2), app, "Reset Zoom").clicked() {
         app.prefs.zoom = 2;
     }
     if tip(icon_button(ui, zc(211.0), "zout", None, |p, r, c| crate::icons_player::zoom(p, r.center(), 7.0 / 6.0, c, false)), app, "Zoom Out").clicked() && app.prefs.zoom + 1 < ZOOMS.len() {
@@ -1059,8 +1061,8 @@ fn shared_controls(app: &mut App, ui: &mut Ui, g: &TwoGeom) {
     // Waveform link: a 30 pt tile at the right end of the waveform area.
     let lr = Rect::from_min_max(pos2(g.mx1 - 30.0, t + 173.0), pos2(g.mx1, t + 203.0));
     let resp = ui.interact(lr, ui.id().with("wavelink"), Sense::click());
-    p.rect_filled(lr, 0.0, if resp.hovered() { hex(0x1E1E1E) } else { hex(0x0A0A0A) });
-    crate::icons_player::link(&p, lr.center(), 1.25, if app.px.wave_link { BLUE } else { hex(0x686868) });
+    p.rect_filled(lr, 0.0, if resp.hovered() { gy(0x1E1E1E) } else { gy(0x0A0A0A) });
+    crate::icons_player::link(&p, lr.center(), 1.25, if app.px.wave_link { BLUE.c() } else { gy(0x686868) });
     if tip(resp, app, "Link the waveforms:\nScrolling one enlarged waveform moves both decks.").clicked() {
         app.px.wave_link = !app.px.wave_link;
     }
@@ -1070,7 +1072,7 @@ fn shared_controls(app: &mut App, ui: &mut Ui, g: &TwoGeom) {
         let c = pos2(l + 35.0, t + 188.0);
         let resp = ui.interact(Rect::from_center_size(c, vec2(30.0, 26.0)), ui.id().with("dualctl"), Sense::click());
         if resp.hovered() {
-            p.rect_filled(resp.rect, 2.0, hex(0x2A2A2A));
+            p.rect_filled(resp.rect, 2.0, gy(0x2A2A2A));
         }
         crate::icons_player::dual_control(&p, c, app.px.dual_control);
         if tip(resp, app, "Dual control:\nBeat jumps move both decks together.").clicked() {
@@ -1107,19 +1109,19 @@ pub fn simple_player(app: &mut App, ui: &mut Ui) {
     let (x_artist, x_time, x_key, x_bpm) = (x(640.0), x(1011.0), x(1168.0), x(1224.0));
     if let Some(tr) = &track {
         let clip = p.with_clip_rect(Rect::from_min_max(pos2(l + 120.0, t), pos2(x_artist - 8.0, t + 27.0)));
-        clip.text(pos2(l + 119.3, t + 16.3), Align2::LEFT_CENTER, tr.display_title(), bold(15.5), WHITE);
+        clip.text(pos2(l + 119.3, t + 16.3), Align2::LEFT_CENTER, tr.display_title(), bold(15.5), WHITE.c());
         let clip = p.with_clip_rect(Rect::from_min_max(pos2(x_artist, t), pos2(x_time - 8.0, t + 27.0)));
-        clip.text(pos2(x_artist + 16.5, t + 16.7), Align2::LEFT_CENTER, &tr.artist, FontId::proportional(12.25), DIM);
-        p.text(pos2((x_key + x_bpm) / 2.0 + 0.5, t + 16.2), Align2::CENTER_CENTER, tr.key_label(app.prefs.key_alnum), FontId::proportional(13.0), WHITE);
+        clip.text(pos2(x_artist + 16.5, t + 16.7), Align2::LEFT_CENTER, &tr.artist, FontId::proportional(12.25), DIM.c());
+        p.text(pos2((x_key + x_bpm) / 2.0 + 0.5, t + 16.2), Align2::CENTER_CENTER, tr.key_label(app.prefs.key_alnum), FontId::proportional(13.0), WHITE.c());
         let b = app.current_bpm();
-        p.text(pos2(x(1263.0), t + 16.2), Align2::CENTER_CENTER, if b > 0.0 { format!("{b:.2}") } else { "--.--".into() }, FontId::proportional(13.0), WHITE);
+        p.text(pos2(x(1263.0), t + 16.2), Align2::CENTER_CENTER, if b > 0.0 { format!("{b:.2}") } else { "--.--".into() }, FontId::proportional(13.0), WHITE.c());
     }
     for dx in [x_artist, x_time, x_key, x_bpm] {
         p.rect_filled(Rect::from_min_max(pos2(dx.floor(), t + 8.0), pos2(dx.floor() + 1.0, t + 24.5)), 0.0, OFF);
     }
     // Remaining and elapsed time; tenths smaller on the same baseline.
     let remain = (app.deck.duration - pos).max(0.0);
-    let (dim_t, bright_t) = if loaded { (DIM, WHITE) } else { (OFF, OFF) };
+    let (dim_t, bright_t) = if loaded { (DIM.c(), WHITE.c()) } else { (OFF.c(), OFF.c()) };
     let (c1, c2) = if app.prefs.time_remain { (bright_t, dim_t) } else { (dim_t, bright_t) };
     let ty = t + 15.4;
     let (big, small) = split_time(if loaded { remain } else { 0.0 });

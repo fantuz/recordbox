@@ -95,7 +95,7 @@ pub struct Item<'a> {
 
 /// An item `h` pt tall on rekordbox's item background (#1E1E1E), followed by the 4 pt gap.
 pub fn item<R>(ui: &mut Ui, name: &'static str, h: f32, add: impl FnOnce(&mut Item) -> R) -> R {
-    item_bg(ui, name, h, Some(BG2), add)
+    item_bg(ui, name, h, Some(BG2.c()), add)
 }
 
 /// An item without a background: rekordbox's section headings ("SAMPLER", "Quantize") and the
@@ -166,7 +166,7 @@ impl Item<'_> {
 
     /// The item's heading: a label at (20, 20, 580 x 22), Font(20, bold).
     pub fn title(&mut self, s: &str) {
-        pf::label(self.ui, self.rect(20.0, 20.0, 580.0, 22.0), s, 20.0, true, WHITE, Just::TopLeft);
+        pf::label(self.ui, self.rect(20.0, 20.0, 580.0, 22.0), s, 20.0, true, WHITE.c(), Just::TopLeft);
     }
 
     /// The heading with its "?" hint.
@@ -177,7 +177,7 @@ impl Item<'_> {
 
     /// A sub heading: a label at (x, y, 550 x 20), Font(18, bold).
     pub fn sub(&mut self, x: f32, y: f32, s: &str) {
-        pf::label(self.ui, self.rect(x, y, 550.0, 20.0), s, 18.0, true, WHITE, Just::TopLeft);
+        pf::label(self.ui, self.rect(x, y, 550.0, 20.0), s, 18.0, true, WHITE.c(), Just::TopLeft);
     }
 
     pub fn sub_tip(&mut self, x: f32, y: f32, s: &str, tip: &str) {
@@ -187,18 +187,18 @@ impl Item<'_> {
 
     /// A label in the regular face at font height `fh`.
     pub fn text(&mut self, x: f32, y: f32, w: f32, h: f32, s: &str, fh: f32, just: Just) -> Rect {
-        let c = if self.en { WHITE } else { WHITE.gamma_multiply(0.5) };
+        let c = if self.en { WHITE.c() } else { WHITE.gamma_multiply(0.5) };
         pf::label(self.ui, self.rect(x, y, w, h), s, fh, false, c, just)
     }
 
     /// A label in the bold face.
     pub fn text_bold(&mut self, x: f32, y: f32, w: f32, h: f32, s: &str, fh: f32, just: Just) -> Rect {
-        pf::label(self.ui, self.rect(x, y, w, h), s, fh, true, WHITE, just)
+        pf::label(self.ui, self.rect(x, y, w, h), s, fh, true, WHITE.c(), just)
     }
 
     /// The 1 pt line rekordbox draws 16 pt above a section of an item, from 20 to 608.
     pub fn sep(&mut self, y: f32) {
-        self.sep_col(y, SEP);
+        self.sep_col(y, SEP.c());
     }
 
     pub fn sep_col(&mut self, y: f32, col: Color32) {
@@ -231,7 +231,7 @@ impl Item<'_> {
     // -------------------------------------------------------------- toggles
 
     fn toggle_row(&mut self, kind: &'static str, x: f32, y: f32, h: f32, cap_x: f32, s: &str, opacity: f32) -> (Rect, Response, bool) {
-        let c = if self.en { WHITE } else { WHITE.gamma_multiply(opacity) };
+        let c = if self.en { WHITE.c() } else { WHITE.gamma_multiply(opacity) };
         let lines = s.lines().count().max(1) as f32;
         let t = 0.85 * h / lines;
         let g = pf::galley(self.ui, s, t, false, c);
@@ -328,7 +328,7 @@ impl Item<'_> {
             }
         } else {
             // As rekordbox shows a disabled dropdown: the value at half strength, the arrow at 0.2.
-            let resp = egui::ComboBox::from_id_salt(id).width(w).selected_text(egui::RichText::new(value).font(pf::pref_bold(16.0)).color(hex(0x878787))).icon(kit::chevron_dim).show_ui(&mut child, |ui| {
+            let resp = egui::ComboBox::from_id_salt(id).width(w).selected_text(egui::RichText::new(value).font(pf::pref_bold(16.0)).color(gy(0x878787))).icon(kit::chevron_dim).show_ui(&mut child, |ui| {
                 if let Some(h) = &hint {
                     ui.label(kit::text(h.as_str(), 12.0).color(DIM));
                 }
@@ -408,8 +408,8 @@ impl Item<'_> {
     /// but not chosen from a list.
     pub fn field(&mut self, x: f32, y: f32, w: f32, s: &str) -> Response {
         let r = self.rect(x, y, w, 22.0);
-        self.ui.painter().rect_filled(r, 3.0, Color32::BLACK);
-        let c = if self.en { WHITE } else { hex(0x878787) };
+        self.ui.painter().rect_filled(r, 3.0, gy(0x000000));
+        let c = if self.en { WHITE.c() } else { gy(0x878787) };
         let g = pf::galley(self.ui, s, 16.0, true, c);
         self.ui.painter().with_clip_rect(r.shrink2(vec2(4.0, 0.0))).galley(pos2(r.min.x + 6.0, r.center().y - 8.0), g, c);
         let id = self.id();
@@ -467,12 +467,12 @@ pub fn paint_knob(p: &egui::Painter, r: Rect, t: f32, enabled: bool) {
     let pt = |a: f32, rr: f32| pos2(c.x + rr * a.sin(), c.y - rr * a.cos());
     let arc = |from: f32, to: f32| -> Vec<Pos2> { (0..=40).map(|i| pt(from + (to - from) * i as f32 / 40.0, rad)).collect() };
     let fade = |col: Color32| if enabled { col } else { col.gamma_multiply(0.35) };
-    p.add(egui::Shape::line(arc(a0, a1), egui::Stroke::new(wd, fade(SEP))));
+    p.add(egui::Shape::line(arc(a0, a1), egui::Stroke::new(wd, fade(SEP.c()))));
     let av = a0 + (a1 - a0) * t.clamp(0.0, 1.0);
     if t > 0.0 {
         p.add(egui::Shape::line(arc(a0, av), egui::Stroke::new(wd, fade(PBLUE))));
     }
-    p.line_segment([pt(av, rad - wd / 2.0 - 2.0), pt(av, rad + wd / 2.0 + 2.5)], egui::Stroke::new(1.5, fade(WHITE)));
+    p.line_segment([pt(av, rad - wd / 2.0 - 2.0), pt(av, rad + wd / 2.0 + 2.5)], egui::Stroke::new(1.5, fade(WHITE.c())));
     let _ = GREY;
 }
 

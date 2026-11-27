@@ -89,6 +89,31 @@ pub(super) const ANALYSIS_BASE_BYTES: u64 = 32 * 1024 * 1024;
 /// passes, resampling and spectral buffers. Budget low-rate inputs at the
 /// internal analysis rate as several detectors resample them to 44.1/48 kHz.
 const ANALYSIS_BYTES_PER_FRAME: u64 = 48;
+/// Optional first-load model weights (up to 32 MiB graph, 16 MiB tensors plus
+/// copies), at most one minute of mono/features and the compact DBN backpointers.
+/// Both models can be resident. The ordinary PCM/track scratch is counted separately.
+const MODEL_WORK_BYTES: u64 = 192 * 1024 * 1024;
+
+impl AnalysisSettings {
+    pub(super) fn estimated_batch_bytes(&self, seconds: f64, rate: u32) -> u64 {
+        let base = estimated_working_bytes(seconds, rate);
+        // Duration hints include a small tolerance. Check the actual unpadded
+        // length again on the worker. Default jobs never touch the model paths.
+        if self.do_grid && self.model_grid_mode != 0 && seconds <= 950.0 &&
+            (rate == 0 || ((8000..=200_000).contains(&rate) && rate % 50 == 0)) &&
+            rb_hp::models_present(self.model_grid_mode) {
+            base.saturating_add(MODEL_WORK_BYTES)
+        } else { base }
+    }
+
+    fn within_model_budget(&self, dec: &Decoded, budget: u64) -> std::borrow::Cow<'_, Self> {
+        if self.do_grid && self.model_grid_mode != 0 &&
+            estimated_working_bytes(dec.duration(), dec.sr).saturating_add(MODEL_WORK_BYTES) > budget {
+            std::borrow::Cow::Owned(Self { model_grid_mode: 0, ..self.clone() })
+        } else { std::borrow::Cow::Borrowed(self) }
+    }
+}
+
 
 pub(super) fn estimated_working_bytes(seconds: f64, rate: u32) -> u64 {
     let frames = (seconds * f64::from(rate.max(48_000))).ceil() as u64;
@@ -123,7 +148,22 @@ pub(super) fn analyze_file_on_worker(path: &str, s: &AnalysisSettings, bytes: u6
     }
     let dec = crate::audio::decode_for_analysis(path, bytes, &cancelled)?;
     anyhow::ensure!(!cancelled(), "stopped");
-    Ok(analyze_passes(&dec, s, true))
+    Ok(analyze_passes(&dec, &s.within_model_budget(&dec, bytes), true))
+}
+
+#[cfg(test)]
+#[test]
+fn actual_audio_length_cannot_spend_the_optional_model_reserve_twice() {
+    let dec = Decoded { sr: 8_000, samples: vec![0.0; 8_000 * 4 * 2], raw_frames: 32_000, damaged: 0, truncated: false };
+    let settings = AnalysisSettings { model_grid_mode: rb_hp::MODE_DYNAMIC, dynamic: true, ..Default::default() };
+    let short_hint = estimated_working_bytes(1.0, dec.sr) + MODEL_WORK_BYTES;
+    let actual = estimated_working_bytes(dec.duration(), dec.sr);
+    let fallback = settings.within_model_budget(&dec, short_hint);
+    assert_eq!(fallback.model_grid_mode, 0);
+    assert!(fallback.dynamic && fallback.do_grid);
+    assert_eq!(settings.within_model_budget(&dec, actual + MODEL_WORK_BYTES).model_grid_mode, rb_hp::MODE_DYNAMIC);
+    let plain = AnalysisSettings { model_grid_mode: 0, ..settings };
+    assert_eq!(plain.estimated_batch_bytes(dec.duration(), dec.sr), actual);
 }
 
 fn analyze_grid(dec: &Decoded, mono: &[f32], settings: &AnalysisSettings) -> (f64, Option<BeatGrid>) {
@@ -133,14 +173,17 @@ fn analyze_grid(dec: &Decoded, mono: &[f32], settings: &AnalysisSettings) -> (f6
         return (0.0, None);
     }
     let sr = f64::from(dec.sr);
+    let mut shared = None;
     let ported = if settings.use_recordbox_estimator || own_beat_engine() {
         None
     } else {
-        rb_beat1::tempo_and_grid(&dec.samples, dec.sr, settings.dynamic, lo, hi)
+        let share = matches!(dec.sr, 44_100 | 48_000) &&
+            rb_hp::eligible(dec, settings.model_grid_mode) && rb_hp::models_present(settings.model_grid_mode);
+        rb_beat1::grid_with_front(&dec.samples, dec.sr, settings.dynamic, lo, hi, share.then_some(&mut shared))
             .filter(|(_, grid)| grid.is_some())
     };
     let using_port = ported.is_some();
-    let (bpm, mut grid) = ported.unwrap_or_else(|| {
+    let (mut bpm, mut grid) = ported.unwrap_or_else(|| {
         let detect = if settings.dynamic { dynamic::tempo_and_grid_dynamic } else { tempo_and_grid };
         let (bpm, grid) = detect(mono, sr, lo, hi);
         (grid.as_ref().map_or(bpm, BeatGrid::first_bpm), grid)
@@ -149,9 +192,9 @@ fn analyze_grid(dec: &Decoded, mono: &[f32], settings: &AnalysisSettings) -> (f6
         precision::refine(mono, sr, g, lo, hi);
         // A dynamic detection reports the track tempo as well as local anchor tempi.
         // Refining a local anchor must not replace the overall track tempo.
-        if !settings.dynamic || !using_port { return (g.first_bpm(), grid); }
+        if !settings.dynamic || !using_port { bpm = g.first_bpm(); }
     }
-    (bpm, grid)
+    rb_hp::dispatch(dec, mono, settings, bpm, grid, shared)
 }
 
 #[cfg(test)]
@@ -168,7 +211,6 @@ fn analyze_passes(dec: &Decoded, s: &AnalysisSettings, parallel: bool) -> Analys
     // are independent and only borrow the decoded samples.
     let timing = || {
         let (bpm, grid) = analyze_grid(dec, &mono, s);
-        let (bpm, grid) = rb_hp::dispatch(dec, s, bpm, grid);
         let key = if s.do_key {
             crate::key::detect_key_stereo_with_mono(&dec.samples, Some(&mono), dec.sr, bpm, grid.as_ref())
         } else { -1 };

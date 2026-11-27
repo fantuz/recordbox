@@ -23,7 +23,7 @@ impl AnalysisJob {
         if self.duration.is_finite() && self.duration > 0.0 {
             // Imported durations may be rounded; allow a little extra before
             // falling back to a second decode with the whole batch budget.
-            crate::analysis::estimated_working_bytes(self.duration * 1.05 + 2.0, self.sample_rate).min(budget)
+            self.settings.estimated_batch_bytes(self.duration * 1.05 + 2.0, self.sample_rate).min(budget)
         } else {
             budget
         }

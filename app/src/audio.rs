@@ -1526,9 +1526,15 @@ fn render_cue(states: &[Arc<Mutex<PlayState>>], out: &mut [f32], cue: &mut [f32]
     crate::recorder::restore_master(&mut guards, rec_lift);
     drop(guards);
     crate::edit_audio::mix(out, channels, rate);
-    // The master section (Performance mixer): peak limiter, then the master level meter.
+    // The master section (Performance mixer): measure the pre-limiter level so overload is visible.
     use std::sync::atomic::Ordering::Relaxed;
     crate::recorder::tap(out, channels, rate, rec_lift);
+    for (c, m) in MASTER_PEAK.iter().enumerate().take(channels.min(2)) {
+        let p = out.iter().skip(c).step_by(channels.max(1)).fold(0.0f32, |a, v| a.max(v.abs()));
+        if p > f32::from_bits(m.load(Relaxed)) {
+            m.store(p.to_bits(), Relaxed);
+        }
+    }
     if let Some(mut lim) = MASTER_LIMITER.try_lock() {
         lim.process(out, channels, rate, LIMITER_ON.load(Relaxed));
     }
@@ -1539,18 +1545,12 @@ fn render_cue(states: &[Arc<Mutex<PlayState>>], out: &mut [f32], cue: &mut [f32]
             *c += *o * hp_master;
         }
     }
-    for (c, m) in MASTER_PEAK.iter().enumerate().take(channels.min(2)) {
-        let p = out.iter().skip(c).step_by(channels.max(1)).fold(0.0f32, |a, v| a.max(v.abs()));
-        if p > f32::from_bits(m.load(Relaxed)) {
-            m.store(p.to_bits(), Relaxed);
-        }
-    }
 }
 
 static MASTER_LIMITER: Mutex<crate::mixer::Limiter> = Mutex::new(crate::mixer::Limiter::new());
 /// The master peak limiter is in the signal path (the Performance mixer; off in Export).
 pub static LIMITER_ON: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-/// Highest master output level since the meter last read it (L, R; f32 bits).
+/// Highest pre-limiter master level since the meter last read it (L, R; f32 bits).
 pub static MASTER_PEAK: [std::sync::atomic::AtomicU32; 2] = [std::sync::atomic::AtomicU32::new(0), std::sync::atomic::AtomicU32::new(0)];
 
 /// Read and clear the master meter's peaks.

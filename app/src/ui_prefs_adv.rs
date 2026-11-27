@@ -217,8 +217,8 @@ fn browse(app: &mut App, ui: &mut Ui, mode: Mode) {
             let o = it.painter().1;
             it.ui.painter().rect_filled(egui::Rect::from_min_size(egui::pos2(o.x + x, o.y + y + 3.0), egui::vec2(16.0, 16.0)), 0.0, label_color(i as u8 + 1));
             let r = egui::Rect::from_min_size(egui::pos2(o.x + x + 26.0, o.y + y), egui::vec2(200.0, 22.0));
-            it.ui.painter().rect_filled(r, 3.0, egui::Color32::BLACK);
-            let resp = it.ui.put(r.shrink2(egui::vec2(4.0, 1.0)), egui::TextEdit::singleline(&mut app.prefs.color_names[i]).frame(false).font(crate::ui_kit::pref(16.0)).text_color(WHITE).hint_text(crate::model::COLOR_NAMES[i + 1]));
+            it.ui.painter().rect_filled(r, 3.0, crate::theme::gy(0x000000));
+            let resp = it.ui.put(r.shrink2(egui::vec2(4.0, 1.0)), egui::TextEdit::singleline(&mut app.prefs.color_names[i]).frame(false).font(crate::ui_kit::pref(16.0)).text_color(WHITE.c()).hint_text(crate::model::COLOR_NAMES[i + 1]));
             dirty |= resp.changed();
         }
     });
@@ -292,7 +292,7 @@ fn others(app: &mut App, ui: &mut Ui, mode: Mode) {
             it.sub(52.0, 56.0, "Export Name");
             let o = it.painter().1;
             let r = egui::Rect::from_min_size(egui::pos2(o.x + 88.0, o.y + 90.0), egui::vec2(520.0, 22.0));
-            it.ui.painter().rect_filled(r, 3.0, egui::Color32::BLACK);
+            it.ui.painter().rect_filled(r, 3.0, crate::theme::gy(0x000000));
             let host = it.ui.ctx().data_mut(|d| d.get_temp_mut_or_insert_with(egui::Id::new("prefs_host"), || {
                 #[cfg(target_os = "macos")]
                 if let Some(name) = std::process::Command::new("/usr/sbin/scutil").args(["--get", "ComputerName"]).output().ok()
@@ -302,7 +302,7 @@ fn others(app: &mut App, ui: &mut Ui, mode: Mode) {
                 std::env::var("COMPUTERNAME").or_else(|_| std::env::var("HOSTNAME")).ok().filter(|name| !name.is_empty())
                     .unwrap_or_else(|| "This computer".into())
             }).clone());
-            it.ui.put(r.shrink2(egui::vec2(4.0, 1.0)), egui::TextEdit::singleline(&mut app.prefs.rb.export_name).frame(false).font(crate::ui_kit::pref_bold(16.0)).text_color(WHITE).hint_text(host)).on_hover_text(format!("The name this computer has for players and devices. {STORED}"));
+            it.ui.put(r.shrink2(egui::vec2(4.0, 1.0)), egui::TextEdit::singleline(&mut app.prefs.rb.export_name).frame(false).font(crate::ui_kit::pref_bold(16.0)).text_color(WHITE.c()).hint_text(host)).on_hover_text(format!("The name this computer has for players and devices. {STORED}"));
         });
         item(ui, "DetailQuantizeBeat", 98.0, |it| {
             it.title("QUANTIZE BEAT VALUE");
@@ -389,6 +389,10 @@ fn others(app: &mut App, ui: &mut Ui, mode: Mode) {
         it.button(508.0, 90.0, 100.0, 22.0, "Browse");
     });
     own(app, ui, &mut dirty);
+    // (EXPORT's Preferences have no Extensions page: the stem export's settings are here too.)
+    if export {
+        crate::ui_stem_export::prefs_group(app, ui);
+    }
     if dirty {
         app.save_prefs();
     }
@@ -496,8 +500,8 @@ pub fn dj_general_more(app: &mut App, ui: &mut Ui) {
         }
         let o = it.painter().1;
         let r = egui::Rect::from_min_size(egui::pos2(o.x + 88.0, o.y + 142.0), egui::vec2(100.0, 100.0));
-        it.ui.painter().rect_filled(r, 0.0, egui::Color32::BLACK);
-        it.ui.painter().circle_stroke(r.center(), 46.0, egui::Stroke::new(1.0, hex(0x323232)));
+        it.ui.painter().rect_filled(r, 0.0, crate::theme::gy(0x000000));
+        it.ui.painter().circle_stroke(r.center(), 46.0, egui::Stroke::new(1.0, gy(0x323232)));
         it.en = false;
         it.text(245.0, 163.0, 325.0, 20.0, "Import image file", 15.0, Just::Left);
         it.text(245.0, 201.0, 325.0, 20.0, "Delete image", 15.0, Just::Left);
@@ -674,6 +678,7 @@ pub fn page_stems(app: &mut App, ui: &mut Ui) {
         it.pill(52.0, 56.0, &mut p.drum_auto_import, "Automatically import audio files");
     });
     crate::ui_prefs::stem_model_card(app, ui);
+    crate::ui_stem_export::prefs_group(app, ui);
     let after = (app.prefs.rb.clone(), app.prefs.show_stems, app.prefs.stem_parts, app.prefs.stem_waveform, app.prefs.stem_reset_on_load);
     if after != before {
         app.save_prefs();

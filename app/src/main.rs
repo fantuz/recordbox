@@ -12,6 +12,7 @@ mod cfx;
 mod cfx_space;
 mod browser_ext;
 mod collection_cleanup;
+mod contrast;
 mod db;
 mod cue_tools;
 mod deck;
@@ -27,7 +28,23 @@ mod edit_selftest;
 mod export;
 mod fx;
 mod fx_core;
+mod fx_lfo;
+mod fx_verb;
+mod fx_spin;
+mod fx_spiral;
+mod fx_helix;
+mod fx_noise;
+mod fx_roll;
+mod fx_sweep;
+mod fx_rev;
+mod fx_echo;
+mod fx_echo_plus;
+#[cfg(test)]
+mod fx7b_tests;
+#[cfg(test)]
+mod fx9_tests;
 mod mfx;
+mod mfx_att;
 mod icons;
 mod icons_player;
 mod icons_src;
@@ -93,6 +110,8 @@ mod prefs_shell;
 mod rbimport;
 mod recorder;
 mod stems;
+mod stem_export;
+mod ui_stem_export;
 mod smart;
 mod playlist_art;
 mod theme;
@@ -249,7 +268,7 @@ fn window_input(app: &mut App, ctx: &egui::Context) {
 }
 
 fn library_panel(app: &mut App, ctx: &egui::Context) {
-    egui::CentralPanel::default().frame(egui::Frame::default().fill(theme::BG)).show(ctx, |ui| {
+    egui::CentralPanel::default().frame(egui::Frame::default().fill(theme::BG.c())).show(ctx, |ui| {
         ui_browser::browser(app, ui);
     });
 }
@@ -356,6 +375,7 @@ impl eframe::App for Gui {
         step!(menus::sync(app));
         step!(ui_edit::frame(app, ctx));
         window_input(app, ctx);
+        theme::sync(ctx, app.prefs.rb.color_theme == 2 && !ui_edit::is_edit(app));
         // Preferences > View > Tooltips off: no hover text anywhere, including the ones drawn
         // with egui's own `on_hover_text` (a delay that never runs out; infinity would panic
         // in egui's repaint timer).
@@ -367,7 +387,7 @@ impl eframe::App for Gui {
         let recording_strip = !app.performance() && app.prefs.rec.panel_export;
         let deck_height = if ui_edit::is_edit(app) { 293.0 } else { app.player_height() };
         let deck_height = deck_height + if recording_strip { ui_rec::EXPORT_H } else { 0.0 };
-        let toggle_library = egui::TopBottomPanel::top("header").exact_height(28.0).show_separator_line(false).frame(egui::Frame::default().fill(theme::BG1)).show(ctx, |ui| {
+        let toggle_library = egui::TopBottomPanel::top("header").exact_height(28.0).show_separator_line(false).frame(egui::Frame::default().fill(theme::HEADER.c())).show(ctx, |ui| {
             ui_browser::header_bar(app, ui)
         }).inner;
         let menu_toggle = std::mem::take(&mut app.toggle_library_window);
@@ -380,12 +400,12 @@ impl eframe::App for Gui {
                 app.library_window = Some(window);
             }
         }
-        egui::TopBottomPanel::bottom("footer").exact_height(28.0).show_separator_line(false).frame(egui::Frame::default().fill(theme::BG)).show(ctx, |ui| {
+        egui::TopBottomPanel::bottom("footer").exact_height(28.0).show_separator_line(false).frame(egui::Frame::default().fill(theme::BG.c())).show(ctx, |ui| {
             ui_browser::footer(app, ui);
         });
         // EXPORT mode's recording panel, a strip under the top bar.
         if recording_strip {
-            egui::TopBottomPanel::top("recstrip").exact_height(ui_rec::EXPORT_H).show_separator_line(false).frame(egui::Frame::default().fill(theme::BG2)).show(ctx, |ui| ui_rec::export_strip(app, ui));
+            egui::TopBottomPanel::top("recstrip").exact_height(ui_rec::EXPORT_H).show_separator_line(false).frame(egui::Frame::default().fill(theme::BG2.c())).show(ctx, |ui| ui_rec::export_strip(app, ui));
         }
         let decks_visible = !ui_edit::is_edit(app) && (!app.full_browser() || app.performance());
         if ui_edit::is_edit(app) {
@@ -397,7 +417,7 @@ impl eframe::App for Gui {
             let h = app.player_height();
             let perf = app.performance();
             let draw_players = |app: &mut App| {
-                egui::TopBottomPanel::top(egui::Id::new(("player", if perf { 9 } else { app.prefs.player_layout.min(3) }))).exact_height(h).show_separator_line(false).frame(egui::Frame::default().fill(theme::BG)).show(ctx, |ui| match app.prefs.player_layout {
+                egui::TopBottomPanel::top(egui::Id::new(("player", if perf { 9 } else { app.prefs.player_layout.min(3) }))).exact_height(h).show_separator_line(false).frame(egui::Frame::default().fill(theme::BG.c())).show(ctx, |ui| match app.prefs.player_layout {
                     _ if perf => step!(ui_perf::performance(app, ui)),
                     1 | 3 => step!(ui_player2::two_players(app, ui)),
                     2 => step!(ui_player2::simple_player(app, ui)),
@@ -429,6 +449,7 @@ impl eframe::App for Gui {
                     request.finish(child);
                 }
                 window_input(app, child);
+                theme::sync(child, app.prefs.rb.color_theme == 2 && !ui_edit::is_edit(app));
                 step!(library_panel(app, child));
                 step!(ui_dialogs::library_dialogs(app, child));
                 false
@@ -459,6 +480,7 @@ impl eframe::App for Gui {
         if app.dialogs.prefs_open || app.ctx.cumulative_pass_nr() < 3 {
             app.prefs_bridge();
         }
+        step!(ui_stem_export::frame(app, ctx));
         step!(dupes::windows(app, ctx));
         step!(cue_tools::windows(app, ctx));
         step!(ui_midi::window(app, ctx));
@@ -527,6 +549,9 @@ impl eframe::App for Gui {
             // synced library (up to ~20 s).
             static ASKED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
             if frames >= 120 + bench && (app.rb_job.is_none() || frames >= 1200 + bench) && !ASKED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                if let Ok(report) = std::env::var("PREPDECK_CONTRAST") {
+                    contrast::dump(ctx, &report);
+                }
                 ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(egui::UserData::default()));
             }
             if frames > 1500 + bench {

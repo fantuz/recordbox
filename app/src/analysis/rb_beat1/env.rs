@@ -10,6 +10,7 @@ use super::BeatInfo;
 
 const BLOCK: i32 = 128;
 
+#[derive(Clone)]
 pub(super) struct Uem {
     total: i32,
     sr: i32,

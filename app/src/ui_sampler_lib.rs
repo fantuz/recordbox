@@ -60,7 +60,9 @@ fn row(ui: &mut Ui, depth: usize, text: &str, count: Option<usize>, selected: bo
     use crate::icons_src as src;
     let (rr, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 15.0), Sense::click());
     let p = ui.painter();
-    let bg = if selected { ROW_SEL } else if resp.hovered() { hex(0x262626) } else { BG2 };
+    let bg = if selected { ROW_SEL.c() } else if resp.hovered() { gy(0x262626) } else { BG2.c() };
+    // (A selected row keeps rekordbox's fixed blue and white text in Light: `ListViewer::findTextColour`.)
+    let _sel_dark = crate::theme::dark_scope(selected);
     if selected || resp.hovered() {
         p.rect_filled(rr, 0.0, bg);
     }
@@ -71,14 +73,14 @@ fn row(ui: &mut Ui, depth: usize, text: &str, count: Option<usize>, selected: bo
     let mut tx = rr.min.x + 43.0 + d;
     match glyph {
         Glyph::Root(open) => {
-            src::tree_arrow(p, pos2(rr.min.x + 15.0 + d, cy), open, WHITE);
+            src::tree_arrow(p, pos2(rr.min.x + 15.0 + d, cy), open, WHITE.c());
             tx = rr.min.x + 28.0 + d;
         }
         Glyph::Folder(open) => {
-            src::tree_arrow(p, pos2(ic.x - 23.5, cy), open, WHITE);
-            src::tree_folder(p, ic, col);
+            src::tree_arrow(p, pos2(ic.x - 23.5, cy), open, WHITE.c());
+            src::tree_folder(p, ic, col.c());
         }
-        Glyph::List => src::tree_list(p, ic, col, bg),
+        Glyph::List => src::tree_list(p, ic, col.c(), bg),
         Glyph::All => {
             // Two sheets, one behind the other (`samplerAllSample_icon`).
             p.rect_filled(Rect::from_min_max(ic + vec2(-1.5, -1.0), ic + vec2(6.5, 5.5)), 0.0, col);
@@ -95,9 +97,9 @@ fn row(ui: &mut Ui, depth: usize, text: &str, count: Option<usize>, selected: bo
         }
     }
     let right = if count.is_some() { rr.max.x - 62.0 } else { rr.max.x - 4.0 };
-    p.with_clip_rect(Rect::from_min_max(pos2(tx, rr.min.y), pos2(right.max(tx + 20.0), rr.max.y))).text(pos2(tx, cy), Align2::LEFT_CENTER, text, rb(TREE_FONT), WHITE);
+    p.with_clip_rect(Rect::from_min_max(pos2(tx, rr.min.y), pos2(right.max(tx + 20.0), rr.max.y))).text(pos2(tx, cy), Align2::LEFT_CENTER, text, rb(TREE_FONT), WHITE.c());
     if let Some(c) = count {
-        p.text(pos2(rr.max.x - 30.5, cy), Align2::RIGHT_CENTER, c.to_string(), rb(TREE_FONT), WHITE);
+        p.text(pos2(rr.max.x - 30.5, cy), Align2::RIGHT_CENTER, c.to_string(), rb(TREE_FONT), WHITE.c());
     }
     resp
 }
@@ -308,8 +310,8 @@ pub fn drag_frame(app: &mut App, ctx: &egui::Context) {
         let lp = ctx.layer_painter(egui::LayerId::new(egui::Order::Tooltip, egui::Id::new("smplib_drag")));
         let name = if rows.len() == 1 { rows[0].name.clone() } else { format!("{} samples", rows.len()) };
         let r = Rect::from_min_size(pp + vec2(12.0, 6.0), vec2(8.0 + name.chars().count().min(40) as f32 * 6.5, 18.0));
-        lp.rect_filled(r, 3.0, hex(0x2A2A2A));
-        lp.text(r.left_center() + vec2(4.0, 0.0), Align2::LEFT_CENTER, name, FontId::proportional(10.5), WHITE);
+        lp.rect_filled(r, 3.0, gy(0x2A2A2A));
+        lp.text(r.left_center() + vec2(4.0, 0.0), Align2::LEFT_CENTER, name, FontId::proportional(10.5), WHITE.c());
         ctx.request_repaint();
     }
     // (Kept through the frame the button is let go in, so that the slot under it sees it.)
@@ -330,7 +332,7 @@ pub fn list(app: &mut App, ui: &mut Ui, id: i64) {
     let bar = Rect::from_min_max(pos2(r.min.x, r.min.y + 5.0), pos2(r.max.x, r.min.y + 27.0));
     ui.painter().rect_filled(bar, 0.0, BG2);
     if !app.performance() {
-        ui.painter().text(pos2(bar.min.x + 10.5, bar.center().y), Align2::LEFT_CENTER, "Sampler list is not available in Export mode.", FontId::proportional(11.5), WHITE);
+        ui.painter().text(pos2(bar.min.x + 10.5, bar.center().y), Align2::LEFT_CENTER, "Sampler list is not available in Export mode.", FontId::proportional(11.5), WHITE.c());
         return;
     }
     app.smplib_ready();
@@ -344,7 +346,7 @@ pub fn list(app: &mut App, ui: &mut Ui, id: i64) {
     }
     let rows = app.mixx.lib.rows.clone();
     let is_list = id > 0 && app.mixx.lib.lists.iter().any(|l| l.id == id && l.attribute == ATTR_LIST);
-    ui.painter().text(pos2(bar.min.x + 10.5, bar.center().y), Align2::LEFT_CENTER, format!("Sampler › {} ({} {})", view_name(app, id), rows.len(), if rows.len() == 1 { "Track" } else { "Tracks" }), FontId::proportional(11.5), WHITE);
+    ui.painter().text(pos2(bar.min.x + 10.5, bar.center().y), Align2::LEFT_CENTER, format!("Sampler › {} ({} {})", view_name(app, id), rows.len(), if rows.len() == 1 { "Track" } else { "Tracks" }), FontId::proportional(11.5), WHITE.c());
     let body = Rect::from_min_max(pos2(r.min.x, bar.max.y + 4.0), r.max);
     let mut bui = ui.new_child(egui::UiBuilder::new().max_rect(body));
     bui.spacing_mut().item_spacing = vec2(0.0, 0.0);
@@ -355,9 +357,9 @@ pub fn list(app: &mut App, ui: &mut Ui, id: i64) {
     let mut x = hr.min.x;
     for (c, w, right) in cols.iter() {
         if *right {
-            bui.painter().text(pos2(x + w - 6.0, hr.center().y), Align2::RIGHT_CENTER, *c, FontId::proportional(11.0), WHITE);
+            bui.painter().text(pos2(x + w - 6.0, hr.center().y), Align2::RIGHT_CENTER, *c, FontId::proportional(11.0), WHITE.c());
         } else {
-            bui.painter().text(pos2(x + 5.0, hr.center().y), Align2::LEFT_CENTER, *c, FontId::proportional(11.0), WHITE);
+            bui.painter().text(pos2(x + 5.0, hr.center().y), Align2::LEFT_CENTER, *c, FontId::proportional(11.0), WHITE.c());
         }
         bui.painter().line_segment([pos2(x + w - 0.5, hr.min.y + 1.0), pos2(x + w - 0.5, hr.max.y - 1.0)], Stroke::new(1.0, BG));
         x += w;
@@ -384,6 +386,8 @@ pub fn list(app: &mut App, ui: &mut Ui, id: i64) {
                 start_drag(app, picked);
             }
             let sel = app.mixx.lib.selected.contains(&ri);
+            // (A selected row keeps rekordbox's fixed blue and white text in Light: `ListViewer::findTextColour`.)
+            let _sel_dark = crate::theme::dark_scope(sel);
             ui.painter().rect_filled(rr, 0.0, if sel { ROW_SEL } else if ri % 2 == 0 { BG1 } else { BG2 });
             let vals = [format!("{}", ri + 1), String::new(), s.name.clone(), if s.bpm100 > 0 { format!("{:.2}", s.bpm100 as f64 / 100.0) } else { String::new() }, if s.duration > 0.0 { fmt_time(s.duration, false) } else { String::new() }, s.path.clone()];
             let mut x = rr.min.x;
@@ -404,9 +408,9 @@ pub fn list(app: &mut App, ui: &mut Ui, id: i64) {
                         _ => {}
                     }
                 } else if *right {
-                    p.text(pos2(cr.max.x - 6.0, cr.center().y), Align2::RIGHT_CENTER, v, font.clone(), TEXT);
+                    p.text(pos2(cr.max.x - 6.0, cr.center().y), Align2::RIGHT_CENTER, v, font.clone(), TEXT.c());
                 } else {
-                    p.text(pos2(cr.min.x + 6.0, cr.center().y), Align2::LEFT_CENTER, v, font.clone(), TEXT);
+                    p.text(pos2(cr.min.x + 6.0, cr.center().y), Align2::LEFT_CENTER, v, font.clone(), TEXT.c());
                 }
                 x += w;
             }

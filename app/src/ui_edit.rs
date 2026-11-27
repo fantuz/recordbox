@@ -517,7 +517,7 @@ pub fn intercept_load(app: &mut App, id: i64) -> bool {
         return false;
     }
     // (PREPDECK_SHOT_VIEW=edit is the screen with nothing loaded.)
-    if app.screenshot.is_some() && std::env::var("PREPDECK_SHOT_VIEW").map(|v| v == "edit" || v == "edittools" || v == "editpads").unwrap_or(false) {
+    if app.screenshot.is_some() && std::env::var("PREPDECK_SHOT_VIEW").map(|v| v.trim_start_matches("light,").to_string()).map(|v| v == "edit" || v == "edittools" || v == "editpads").unwrap_or(false) {
         return true;
     }
     load_track(app, id);
@@ -930,10 +930,11 @@ fn poll_render(app: &mut App) {
 pub fn edited_set(app: &mut App) -> &std::collections::HashSet<i64> {
     if app.edit.edited.is_none() {
         let mut set = std::collections::HashSet::new();
-        if let Ok(mut st) = app.db.conn.prepare("SELECT key FROM settings WHERE substr(key, 1, 8) = 'edit_of_'") {
+        // (Stem exports, `stem_of_<id>`, count as tracks recordbox made from another: stem_export.rs.)
+        if let Ok(mut st) = app.db.conn.prepare("SELECT key FROM settings WHERE substr(key, 1, 8) IN ('edit_of_', 'stem_of_')") {
             if let Ok(rows) = st.query_map([], |r| r.get::<_, String>(0)) {
                 for k in rows.flatten() {
-                    if let Some(id) = k.strip_prefix("edit_of_").and_then(|v| v.parse::<i64>().ok()) {
+                    if let Some(id) = k.strip_prefix("edit_of_").or_else(|| k.strip_prefix("stem_of_")).and_then(|v| v.parse::<i64>().ok()) {
                         set.insert(id);
                     }
                 }
@@ -984,7 +985,7 @@ pub fn attribute_icons(app: &mut App, p: &egui::Painter, cell: egui::Rect, id: i
     if edited {
         // (At 75 %: 14 x 12 pt in the 30 pt cell.)
         attribute_icon(p, egui::pos2(x, cy - 6.0), 0.75, col);
-        tips.push("Tracks created in EDIT mode.");
+        tips.push(if crate::stem_export::is_stem_track(app, id) { "Stem track exported from another track." } else { "Tracks created in EDIT mode." });
         x += 16.0;
     }
     match ty {
@@ -1009,7 +1010,7 @@ pub fn attribute_icons(app: &mut App, p: &egui::Painter, cell: egui::Rect, id: i
 pub fn attribute_header(app: &mut App, ui: &mut egui::Ui, resp: &egui::Response, cell: egui::Rect) -> bool {
     use egui::{vec2, Align2, RichText};
     let on = app.edit.attr_filter.is_some();
-    crate::icons_src::funnel(ui.painter(), egui::pos2(cell.center().x, cell.center().y - 1.0), if on { crate::theme::TILE_ON } else { crate::theme::DIM });
+    crate::icons_src::funnel(ui.painter(), egui::pos2(cell.center().x, cell.center().y - 1.0), if on { crate::theme::TILE_ON.c() } else { crate::theme::DIM.c() });
     let hit = resp.clicked() && resp.interact_pointer_pos().map(|pp| cell.contains(pp)).unwrap_or(false);
     if hit {
         app.edit.attr_popup = !app.edit.attr_popup;

@@ -324,6 +324,13 @@ jobs:
             export::usb_fix_test::a1_aligned_rows_paginate_at_row_group_boundaries_without_overlap; do
             cargo test --manifest-path app/Cargo.toml --release --locked "$test_filter" -- --test-threads=1
           done
+      - name: Check audio rendering and stem export on the native package target
+        shell: bash
+        run: |
+          for test_filter in edit_render::tests:: stem_export::tests::; do
+            cargo test --manifest-path app/Cargo.toml --release --locked --bin recordbox "$test_filter" -- --test-threads=1 | tee "$RUNNER_TEMP/encode-tests.log"
+            grep -Eq '^test result: ok\. [1-9][0-9]* passed;' "$RUNNER_TEMP/encode-tests.log"
+          done
       - name: Check bulk collection analysis on Windows
         if: runner.os == 'Windows'
         shell: bash
@@ -335,13 +342,12 @@ jobs:
             cargo test --manifest-path app/Cargo.toml --release --locked --bin recordbox "$test_name" -- --exact | tee "$RUNNER_TEMP/bulk-analysis-tests.log"
             grep -Fq 'test result: ok. 1 passed;' "$RUNNER_TEMP/bulk-analysis-tests.log"
           done
-      - name: Check the macOS encoder, CoreMIDI loopback and supported Metal tensor operations
+      - name: Check macOS CoreMIDI loopback and supported Metal tensor operations
         if: runner.os == 'macOS'
         shell: bash
         env:
           RECORDBOX_REQUIRE_MIDI_LOOPBACK: "1"
         run: |
-          cargo test --manifest-path app/Cargo.toml --release --locked edit_render::tests::m4a_is_written_by_the_system_encoder_when_it_is_there -- --exact
           cargo test --manifest-path app/Cargo.toml --release --locked midi::tests::a_virtual_controller_plays_a_deck_moves_the_mixer_and_gets_its_leds -- --exact
           cargo test --manifest-path app/Cargo.toml --release --locked tensor_gemm_matches_reference_on_apple10 -- --nocapture
       - name: Create macOS app bundle

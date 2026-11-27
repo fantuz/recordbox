@@ -155,10 +155,10 @@ fn header_output(app: &mut App, ui: &mut Ui, r: Rect) {
     let p = ui.painter().clone();
     let rx = r.max.x;
     let ty = r.min.y;
-    p.text(pos2(rx - 32.0, ty + 13.8), Align2::RIGHT_CENTER, chrono::Local::now().format("%H:%M").to_string(), FontId::proportional(10.7), WHITE);
+    p.text(pos2(rx - 32.0, ty + 13.8), Align2::RIGHT_CENTER, chrono::Local::now().format("%H:%M").to_string(), FontId::proportional(10.7), WHITE.c());
     let gear_r = Rect::from_center_size(pos2(rx - 261.0, ty + 13.0), vec2(14.0, 14.0));
     let gear = ui.interact(gear_r.expand(4.0), ui.id().with("gear"), Sense::click());
-    crate::icons_player::gear(&p, gear_r.center(), 1.0, WHITE, BG1);
+    crate::icons_player::gear(&p, gear_r.center(), 1.0, WHITE.c(), HEADER.c());
     if crate::ui_player::tip(gear, app, "Preferences").clicked() { app.dialogs.prefs_open = true; }
 
     let volume = app.player.state.lock().volume;
@@ -167,19 +167,19 @@ fn header_output(app: &mut App, ui: &mut Ui, r: Rect) {
     }
     for (channel, &db) in app.px.master_db.iter().enumerate() {
         let bar = Rect::from_min_size(pos2(rx - 204.0, ty + 9.0 + 6.0 * channel as f32), vec2(80.0, 3.0));
-        p.rect_filled(bar, 0.0, hex(0x323232));
+        p.rect_filled(bar, 0.0, gy(0x323232));
         let level = ((db + 40.0) / 40.0).clamp(0.0, 1.0);
         if level > 0.0 {
-            let color = if !app.performance() { hex(0xB0B0B0) } else if db >= -0.1 { hex(0xF00000) } else if db > -6.0 { hex(0xFF8C19) } else { hex(0x2DD728) };
+            let color = if !app.performance() { tc(0xB0B0B0, 0x4F4F4F).c() } else if db >= -0.1 { hex(0xF00000) } else if db > -6.0 { hex(0xFF8C19) } else { hex(0x2DD728) };
             p.rect_filled(Rect::from_min_size(bar.min, vec2(bar.width() * level, 3.0)), 0.0, color);
         }
     }
     let bar = Rect::from_min_size(pos2(rx - 102.0, ty + 13.0), vec2(32.0, 3.0));
-    p.rect_filled(bar, 0.0, hex(0x323232));
+    p.rect_filled(bar, 0.0, gy(0x323232));
     let load = app.player.buffer_load_percent();
     if let Some(percent) = load {
         let width = bar.width() * (percent / 100.0).min(1.0);
-        p.rect_filled(Rect::from_min_size(bar.min, vec2(width, bar.height())), 0.0, if percent >= 100.0 { CAUTION_TX } else { BLUE });
+        p.rect_filled(Rect::from_min_size(bar.min, vec2(width, bar.height())), 0.0, if percent >= 100.0 { CAUTION_TX } else { BLUE.c() });
     }
     if app.prefs.tooltips {
         ui.interact(bar.expand2(vec2(3.0, 6.0)), ui.id().with("buffer_load"), Sense::hover()).on_hover_ui(|ui| {
@@ -201,16 +201,16 @@ pub fn header_bar(app: &mut App, ui: &mut Ui) -> bool {
     let library_detached = app.library_window.is_some();
     let r = ui.max_rect();
     let p = ui.painter().clone();
-    p.rect_filled(r, 0.0, BG1);
+    p.rect_filled(r, 0.0, HEADER);
     let tips_on = app.prefs.tooltips;
     let tipf = move |resp: egui::Response, t: &str| if tips_on { resp.on_hover_text(t) } else { resp };
     // Measured on rekordbox (28 pt header): EXPORT in 10.3 pt Arial Bold from x = 16.5 (caps
     // 9.5–17), pull-down chevrons (8 × 4, 1 pt) centred at 115.75 and 170.75, y 14.5.
     let ip = crate::icons_player::chevron_down;
     let perf = app.performance();
-    p.text(pos2(r.min.x + 16.0, r.min.y + 14.0), Align2::LEFT_CENTER, if perf { "PERFORMANCE" } else if crate::ui_edit::is_edit(app) { "EDIT" } else { "EXPORT" }, caps(10.3), WHITE);
+    p.text(pos2(r.min.x + 16.0, r.min.y + 14.0), Align2::LEFT_CENTER, if perf { "PERFORMANCE" } else if crate::ui_edit::is_edit(app) { "EDIT" } else { "EXPORT" }, caps(10.3), WHITE.c());
     let mode_r = Rect::from_min_max(pos2(r.min.x + 8.0, r.min.y), pos2(r.min.x + 124.0, r.max.y));
-    ip(&p, pos2(r.min.x + 115.75, r.min.y + 14.5), 1.0, WHITE);
+    ip(&p, pos2(r.min.x + 115.75, r.min.y + 14.5), 1.0, WHITE.c());
     // The mode list: EXPORT and PERFORMANCE (rekordbox also has LIGHTING and EDIT).
     let mode = ui.interact(mode_r, ui.id().with("mode"), Sense::click());
     dropdown(ui, &mode, "modepop", |ui| {
@@ -232,7 +232,7 @@ pub fn header_bar(app: &mut App, ui: &mut Ui) -> bool {
     let label = if library_detached { "Reattach library browser" } else { "Detach library browser" };
     let response = ui.interact(window_button, ui.id().with("detach_library"), Sense::click());
     response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, label));
-    let bg = if response.hovered() { BTN } else { BG1 };
+    let bg = if response.hovered() { BTN } else { HEADER };
     p.rect_filled(window_button, 0.0, bg);
     let outline = Stroke::new(1.3, if library_detached { BLUE } else { WHITE });
     for offset in [vec2(-2.0, 2.0), vec2(2.0, -2.0)] {
@@ -253,10 +253,10 @@ pub fn header_bar(app: &mut App, ui: &mut Ui) -> bool {
     let lay_r = Rect::from_min_max(pos2(r.min.x + 130.0, r.min.y + 3.0), pos2(r.min.x + 180.0, r.max.y - 3.0));
     let lay = ui.interact(lay_r, ui.id().with("layout"), Sense::click());
     if lay.hovered() {
-        p.rect_filled(lay_r, 2.0, hex(0x1E1E1E));
+        p.rect_filled(lay_r, 2.0, gy(0x1E1E1E));
     }
-    crate::icons_player::layout_mark(&p, pos2(r.min.x + 145.0, r.min.y + 14.0), app.player_layout(), WHITE);
-    ip(&p, pos2(r.min.x + 170.75, r.min.y + 14.5), 1.0, WHITE);
+    crate::icons_player::layout_mark(&p, pos2(r.min.x + 145.0, r.min.y + 14.0), app.player_layout(), WHITE.c());
+    ip(&p, pos2(r.min.x + 170.75, r.min.y + 14.5), 1.0, WHITE.c());
     dropdown(ui, &lay, "layout", |ui| {
         // Layouts of the player, in rekordbox's order, each with its mark
         // (App::set_player_layout: 0–3 player layouts, 4 = browser only).
@@ -264,7 +264,7 @@ pub fn header_bar(app: &mut App, ui: &mut Ui) -> bool {
         for (i, name) in ["1 Player", "2 Players", "Dual Player", "Simple Player", "Full Browser"].iter().enumerate() {
             let resp = ui.add_enabled(!library_detached || i != 4, egui::SelectableLabel::new(cur == i as u8, format!("        {name}")))
                 .on_disabled_hover_text("Reattach the library to use Full Browser.");
-            crate::icons_player::layout_mark(ui.painter(), pos2(resp.rect.min.x + 15.0, resp.rect.center().y), i as u8, WHITE);
+            crate::icons_player::layout_mark(ui.painter(), pos2(resp.rect.min.x + 15.0, resp.rect.center().y), i as u8, WHITE.c());
             if resp.clicked() {
                 app.set_player_layout(i as u8);
                 ui.memory_mut(|m| m.close_popup());
@@ -275,13 +275,13 @@ pub fn header_bar(app: &mut App, ui: &mut Ui) -> bool {
     // at x 310–330, y 4–24 with a 13 pt ring and a 7 pt dot.
     let rec_r = Rect::from_min_size(pos2(r.min.x + 310.0, r.min.y + 4.0), vec2(20.0, 20.0));
     let rec = ui.interact(rec_r, ui.id().with("autoan"), Sense::click());
-    p.rect_filled(rec_r, 2.0, if rec.hovered() { hex(0x323232) } else { BTN });
+    p.rect_filled(rec_r, 2.0, if rec.hovered() { gy(0x323232) } else { BTN.c() });
     // (rekordbox's circle mark here is the recording panel's button; Auto Analysis has its
     // switch in Preferences > Analysis.)
     if app.prefs.rec.panel_export {
         p.rect_filled(rec_r, 2.0, BLUE);
     }
-    crate::icons_player::record(&p, rec_r.center(), WHITE);
+    crate::icons_player::record(&p, rec_r.center(), WHITE.c());
     if tipf(rec, "Show/Hide Rec panel").clicked() {
         app.rec_toggle_panel();
     }
@@ -425,7 +425,7 @@ pub fn footer(app: &mut App, ui: &mut Ui) {
     // The recordbox logo where the original shows its wordmark, at the same size and place
     // (references 01/02): the mark starts 10 pt from the left, the letters' x-height is 8.5 pt
     // and their baseline 8 pt above the window's foot (0.169 pt per logo unit).
-    crate::brand::paint_logo(ui, Rect::from_min_size(pos2(r.min.x + 9.66, r.max.y - 19.7), vec2(104.1, 14.0)), WHITE);
+    crate::brand::paint_logo(ui, Rect::from_min_size(pos2(r.min.x + 9.66, r.max.y - 19.7), vec2(104.1, 14.0)), WHITE.c());
     // totals
     let total = match &app.view {
         View::Device { root, .. } | View::DeviceHistory { root, .. } => app.devices.iter().find(|d| d.root == *root).map(|d| {
@@ -438,7 +438,7 @@ pub fn footer(app: &mut App, ui: &mut Ui) {
             format!("{n} Tracks, {} hours {} minutes, {:.1} GB", h, m, bytes as f64 / 1e9)
         }
     };
-    p.text(pos2(r.max.x - 34.5, r.center().y), Align2::RIGHT_CENTER, total, rb_bold(11.5), DIM);
+    p.text(pos2(r.max.x - 34.5, r.center().y), Align2::RIGHT_CENTER, total, rb_bold(11.5), DIM.c());
     // status / messages
     let mid = Rect::from_min_max(pos2(r.min.x + 120.0, r.min.y + 3.0), pos2(r.max.x - 300.0, r.max.y - 3.0));
     app.toasts.retain(|t| t.until > std::time::Instant::now());
@@ -447,21 +447,22 @@ pub fn footer(app: &mut App, ui: &mut Ui) {
             p.rect_filled(mid, 0.0, CAUTION_BG);
             p.text(pos2(mid.min.x + 8.0, mid.center().y), Align2::LEFT_CENTER, &t.text, rb(11.5), CAUTION_TX);
         } else {
-            p.text(pos2(mid.min.x + 8.0, mid.center().y), Align2::LEFT_CENTER, &t.text, rb(11.5), TEXT);
+            p.text(pos2(mid.min.x + 8.0, mid.center().y), Align2::LEFT_CENTER, &t.text, rb(11.5), TEXT.c());
         }
         ui.ctx().request_repaint_after(std::time::Duration::from_millis(500));
+    } else if crate::ui_stem_export::footer(app, ui, &p, mid) {
     } else if let Some(job) = &app.export_job {
         let (d, t, txt) = &job.last;
-        p.text(pos2(mid.min.x + 8.0, mid.center().y), Align2::LEFT_CENTER, format!("Exporting {}/{} · {}", d, t, txt), rb(11.5), TEXT);
+        p.text(pos2(mid.min.x + 8.0, mid.center().y), Align2::LEFT_CENTER, format!("Exporting {}/{} · {}", d, t, txt), rb(11.5), TEXT.c());
     } else if app.analysis_total > 0 {
-        p.text(pos2(mid.min.x + 8.0, mid.center().y), Align2::LEFT_CENTER, format!("Analyzing… {} of {}", app.analysis_done, app.analysis_total), rb(11.5), TEXT);
+        p.text(pos2(mid.min.x + 8.0, mid.center().y), Align2::LEFT_CENTER, format!("Analyzing… {} of {}", app.analysis_done, app.analysis_total), rb(11.5), TEXT.c());
         let stop = ui.interact(Rect::from_min_size(pos2(mid.max.x - 120.0, mid.min.y), vec2(110.0, mid.height())), ui.id().with("stopan"), Sense::click());
-        p.text(pos2(mid.max.x - 64.0, mid.center().y), Align2::CENTER_CENTER, "Stop Analyzing", rb(11.0), BLUE);
+        p.text(pos2(mid.max.x - 64.0, mid.center().y), Align2::CENTER_CENTER, "Stop Analyzing", rb(11.0), BLUE.c());
         if stop.clicked() {
             app.pool.stop();
         }
     } else if app.importing.is_some() {
-        p.text(pos2(mid.min.x + 8.0, mid.center().y), Align2::LEFT_CENTER, format!("Importing… {}", app.import_count), rb(11.5), TEXT);
+        p.text(pos2(mid.min.x + 8.0, mid.center().y), Align2::LEFT_CENTER, format!("Importing… {}", app.import_count), rb(11.5), TEXT.c());
     } else if let Some((id, progress)) = app.stem.separating {
         let title = app.track(id).map(|t| t.display_title()).unwrap_or_default();
         let text = if app.stem.cancel.load(std::sync::atomic::Ordering::Relaxed) {
@@ -469,19 +470,19 @@ pub fn footer(app: &mut App, ui: &mut Ui) {
         } else {
             format!("Stem separation · {:.0}% · {title}", progress * 100.0)
         };
-        p.with_clip_rect(mid).text(mid.left_center(), Align2::LEFT_CENTER, text, rb(11.5), TEXT);
+        p.with_clip_rect(mid).text(mid.left_center(), Align2::LEFT_CENTER, text, rb(11.5), TEXT.c());
     } else if let Some((done, total)) = app.stem.downloading {
         let text = if total > 0 { format!("Downloading stem model · {:.0}%", 100.0 * done as f64 / total as f64) } else { "Downloading stem model…".to_owned() };
-        p.text(mid.left_center(), Align2::LEFT_CENTER, text, rb(11.5), TEXT);
+        p.text(mid.left_center(), Align2::LEFT_CENTER, text, rb(11.5), TEXT.c());
     } else if app.stem.reading_cache() {
-        p.text(mid.left_center(), Align2::LEFT_CENTER, "Reading cached stems…", rb(11.5), TEXT);
+        p.text(mid.left_center(), Align2::LEFT_CENTER, "Reading cached stems…", rb(11.5), TEXT.c());
     } else if let Some(status) = app.dialogs.library_sync_review.as_ref().and_then(|review| review.status()) {
-        p.with_clip_rect(mid).text(mid.left_center(), Align2::LEFT_CENTER, status, rb(11.5), TEXT);
+        p.with_clip_rect(mid).text(mid.left_center(), Align2::LEFT_CENTER, status, rb(11.5), TEXT.c());
     } else if app.rb_job.is_some() {
-        p.with_clip_rect(mid).text(mid.left_center(), Align2::LEFT_CENTER, "Reading the AlphaTheta Rekordbox library…", rb(11.5), TEXT);
+        p.with_clip_rect(mid).text(mid.left_center(), Align2::LEFT_CENTER, "Reading the AlphaTheta Rekordbox library…", rb(11.5), TEXT.c());
     } else if mid.width() > 0.0 {
         let path = app.db.active_library_path();
-        p.with_clip_rect(mid).text(mid.left_center(), Align2::LEFT_CENTER, format!("Active library · {path}"), rb(11.5), DIM);
+        p.with_clip_rect(mid).text(mid.left_center(), Align2::LEFT_CENTER, format!("Active library · {path}"), rb(11.5), DIM.c());
         if app.prefs.tooltips {
             ui.interact(mid, ui.id().with("active_library_path"), Sense::hover()).on_hover_text(path);
         }
@@ -567,16 +568,16 @@ pub fn browser(app: &mut App, panel: &mut Ui) {
     p.rect_filled(right_strip, 0.0, BG2);
     // Top row of the tree area: collapse chevron and the tile that puts the sub-browser under
     // the browser (skin subBrowse_vertical; lit: blue with a white frame).
-    crate::icons_src::chevron(&p, Rect::from_min_size(pos2(full.min.x + 12.0, full.min.y + 5.0), vec2(6.0, 10.0)), OFF);
+    crate::icons_src::chevron(&p, Rect::from_min_size(pos2(full.min.x + 12.0, full.min.y + 5.0), vec2(6.0, 10.0)), OFF.c());
     let wt = Rect::from_min_size(pos2(full.min.x + 50.0, full.min.y + 2.5), vec2(16.0, 16.0));
     let wresp = ui.interact(wt, ui.id().with("sub_below_tile"), Sense::click());
     if app.prefs.bx.sub_horizontal {
         p.rect_filled(wt.expand(1.0), 0.0, TILE_ON);
         p.rect_stroke(wt, 1.5, Stroke::new(1.0, WHITE), egui::StrokeKind::Inside);
-        crate::icons_src::window_split(&p, wt, WHITE, TILE_ON);
+        crate::icons_src::window_split(&p, wt, WHITE.c(), TILE_ON.c());
     } else {
-        p.rect_stroke(wt, 1.5, Stroke::new(1.0, if wresp.hovered() { hex(0x8C8C8C) } else { OFF }), egui::StrokeKind::Inside);
-        crate::icons_src::window_split(&p, wt, WHITE, BG2);
+        p.rect_stroke(wt, 1.5, Stroke::new(1.0, if wresp.hovered() { gy(0x8C8C8C) } else { OFF.c() }), egui::StrokeKind::Inside);
+        crate::icons_src::window_split(&p, wt, WHITE.c(), BG2.c());
     }
     let wresp = if app.prefs.tooltips { wresp.on_hover_text("Display sub-browser window.") } else { wresp };
     if wresp.clicked() {
@@ -626,7 +627,7 @@ pub fn browser(app: &mut App, panel: &mut Ui) {
         if ui.input(|i| i.pointer.any_released()) {
             app.node_drag = None;
         } else if let (Some(pp), Some(n)) = (ui.ctx().pointer_latest_pos(), app.node(id)) {
-            ui.painter().text(pp + vec2(12.0, 4.0), Align2::LEFT_CENTER, &n.name, rb(11.5), WHITE);
+            ui.painter().text(pp + vec2(12.0, 4.0), Align2::LEFT_CENTER, &n.name, rb(11.5), WHITE.c());
         }
     }
     // Playlist Palette: a 26 pt strip of four slots under the track list.
@@ -670,8 +671,10 @@ pub fn browser(app: &mut App, panel: &mut Ui) {
             let label = if ids.len() == 1 { app.track(ids[0]).map(|t| t.display_title()).unwrap_or_default() } else { format!("{} tracks", ids.len()) };
             let lp = ui.ctx().layer_painter(egui::LayerId::new(egui::Order::Tooltip, egui::Id::new("dragl")));
             let rr = Rect::from_min_size(pp + vec2(12.0, 6.0), vec2(8.0 + label.len() as f32 * 6.5, 18.0));
+            // (A selected row keeps rekordbox's fixed blue and white text in Light: `ListViewer::findTextColour`.)
+            let _sel_dark = crate::theme::dark_scope(true);
             lp.rect_filled(rr, 3.0, ROW_SEL);
-            lp.text(rr.left_center() + vec2(4.0, 0.0), Align2::LEFT_CENTER, label, rb(11.0), WHITE);
+            lp.text(rr.left_center() + vec2(4.0, 0.0), Align2::LEFT_CENTER, label, rb(11.0), WHITE.c());
             for (r, _id) in &drop_targets {
                 if r.contains(pp) {
                     lp.rect_stroke(*r, 2.0, Stroke::new(1.5, BLUE), egui::StrokeKind::Inside);
@@ -766,11 +769,11 @@ fn icon_strip(app: &mut App, ui: &mut Ui, r: Rect) {
             p.rect_filled(Rect::from_min_max(pos2(r.min.x + 2.0, rr.min.y), pos2(r.min.x + 4.0, rr.max.y)), 0.0, hi);
             p.rect_filled(Rect::from_min_max(pos2(r.min.x + 6.0, rr.min.y), pos2(r.min.x + 27.0, rr.max.y)), 0.0, hi);
             p.rect_stroke(rr, 1.5, Stroke::new(1.0, WHITE), egui::StrokeKind::Inside);
-            hi
+            hi.c()
         } else {
-            src::tile(p, rr, false, resp.hovered(), *tile != Tile::Off, BG2)
+            src::tile(p, rr, false, resp.hovered(), *tile != Tile::Off, BG2.c())
         };
-        let col = if *tile == Tile::Off { hex(0x4A4A4A) } else { WHITE };
+        let col = if *tile == Tile::Off { gy(0x4A4A4A) } else { WHITE.c() };
         draw(p, rr, col, bg);
         let tip = match tile {
             Tile::Suggest => crate::browser_ext::SUGGEST_TIPS[0],
@@ -822,7 +825,7 @@ fn icon_strip(app: &mut App, ui: &mut Ui, r: Rect) {
     let busy = status.is_some();
     let resp = ui.interact(sr.expand(3.0), ui.id().with("strip_sync"), Sense::click());
     resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, !busy && app.can_review_library_sync(), "Review desktop library sync"));
-    src::sync_arrows(ui.painter(), sr, if busy { BLUE } else if resp.hovered() { WHITE } else { hex(0xDCDCDC) });
+    src::sync_arrows(ui.painter(), sr, if busy { BLUE.c() } else if resp.hovered() { WHITE.c() } else { gy(0xDCDCDC) });
     let resp = if app.prefs.tooltips {
         resp.on_hover_text(status.unwrap_or("Choose a sync direction between AlphaTheta Rekordbox and recordbox."))
     } else { resp };
@@ -857,14 +860,14 @@ fn right_icons(app: &mut App, ui: &mut Ui, r: Rect) {
         let bg = if on {
             ui.painter().rect_filled(rr.expand(1.0), 0.0, TILE_ON);
             ui.painter().rect_stroke(rr, 1.5, Stroke::new(1.0, WHITE), egui::StrokeKind::Inside);
-            TILE_ON
+            TILE_ON.c()
         } else {
-            let fill = hex(0x212121);
+            let fill = gy(0x212121);
             ui.painter().rect_filled(rr, 1.5, fill);
-            ui.painter().rect_stroke(rr, 1.5, Stroke::new(1.0, if dim { hex(0x2E2E2E) } else if resp.hovered() { hex(0x8C8C8C) } else { hex(0x565656) }), egui::StrokeKind::Inside);
+            ui.painter().rect_stroke(rr, 1.5, Stroke::new(1.0, if dim { gy(0x2E2E2E) } else if resp.hovered() { gy(0x8C8C8C) } else { gy(0x565656) }), egui::StrokeKind::Inside);
             fill
         };
-        draw(ui.painter(), rr, if dim { hex(0x4A4A4A) } else { WHITE }, bg);
+        draw(ui.painter(), rr, if dim { gy(0x4A4A4A) } else { WHITE.c() }, bg);
         let resp = if app.prefs.tooltips { resp.on_hover_text(*tipt) } else { resp };
         if resp.clicked() {
             crate::ui_browser_ext::set_right_panel(app, if on { 0 } else { i as u8 + 1 });
@@ -898,7 +901,9 @@ pub(crate) fn tree_row(ui: &mut Ui, depth: usize, text: &str, count: Option<usiz
     use crate::icons_src as src;
     let (rr, resp) = ui.allocate_exact_size(vec2(ui.available_width(), pitch), Sense::click_and_drag());
     let p = ui.painter();
-    let bg = if selected { ROW_SEL } else if resp.hovered() { hex(0x262626) } else { BG2 };
+    let bg = if selected { ROW_SEL.c() } else if resp.hovered() { gy(0x262626) } else { BG2.c() };
+    // (A selected row keeps rekordbox's fixed blue and white text in Light: `ListViewer::findTextColour`.)
+    let _sel_dark = crate::theme::dark_scope(selected);
     if selected || resp.hovered() {
         p.rect_filled(rr, 0.0, bg);
     }
@@ -910,25 +915,25 @@ pub(crate) fn tree_row(ui: &mut Ui, depth: usize, text: &str, count: Option<usiz
     match icon {
         TreeIcon::None => tx = rr.min.x + 28.0 + d,
         TreeIcon::Open | TreeIcon::Closed => {
-            src::tree_arrow(p, pos2(rr.min.x + 15.0 + d, cy), icon == TreeIcon::Open, WHITE);
+            src::tree_arrow(p, pos2(rr.min.x + 15.0 + d, cy), icon == TreeIcon::Open, WHITE.c());
             tx = rr.min.x + 28.0 + d;
         }
         TreeIcon::FolderOpen | TreeIcon::FolderClosed => {
-            src::tree_arrow(p, pos2(ic.x - 23.5, cy), icon == TreeIcon::FolderOpen, WHITE);
-            src::tree_folder(p, ic, col);
+            src::tree_arrow(p, pos2(ic.x - 23.5, cy), icon == TreeIcon::FolderOpen, WHITE.c());
+            src::tree_folder(p, ic, col.c());
         }
-        TreeIcon::Lock => src::tree_lock(p, ic, col, bg),
-        TreeIcon::Note => src::tree_note(p, ic, col),
-        TreeIcon::Playlist => src::tree_list(p, ic, col, bg),
-        TreeIcon::Smart => src::tree_smart(p, ic + vec2(2.5, 2.5), col, bg),
-        TreeIcon::Device => src::tree_device(p, ic, col, bg),
-        TreeIcon::CuePlaylist => src::tree_cue_list(p, ic, col),
+        TreeIcon::Lock => src::tree_lock(p, ic, col.c(), bg),
+        TreeIcon::Note => src::tree_note(p, ic, col.c()),
+        TreeIcon::Playlist => src::tree_list(p, ic, col.c(), bg),
+        TreeIcon::Smart => src::tree_smart(p, ic + vec2(2.5, 2.5), col.c(), bg),
+        TreeIcon::Device => src::tree_device(p, ic, col.c(), bg),
+        TreeIcon::CuePlaylist => src::tree_cue_list(p, ic, col.c()),
     }
     let right = if icon == TreeIcon::CuePlaylist { rr.max.x - 114.0 } else if count.is_some() { rr.max.x - 62.0 } else { rr.max.x - 4.0 };
     let clip = p.with_clip_rect(Rect::from_min_max(pos2(tx, rr.min.y), pos2(right.max(tx + 20.0), rr.max.y)));
-    clip.text(pos2(tx, cy), Align2::LEFT_CENTER, text, rb(TREE_FONT), if icon == TreeIcon::Lock && !selected { DIM } else { WHITE });
+    clip.text(pos2(tx, cy), Align2::LEFT_CENTER, text, rb(TREE_FONT), if icon == TreeIcon::Lock && !selected { DIM.c() } else { WHITE.c() });
     if let Some(c) = count {
-        p.text(pos2(rr.max.x - 30.5, cy), Align2::RIGHT_CENTER, c.to_string(), rb(TREE_FONT), WHITE);
+        p.text(pos2(rr.max.x - 30.5, cy), Align2::RIGHT_CENTER, c.to_string(), rb(TREE_FONT), WHITE.c());
     }
     resp
 }
@@ -951,19 +956,21 @@ fn collection_row(ui: &mut Ui, text: &str, arrow: Option<bool>, indent: f32, cou
 fn paint_collection_row(ui: &Ui, rr: Rect, resp: &egui::Response, text: &str, arrow: Option<bool>, indent: f32, count: Option<usize>, selected: bool) {
     let p = ui.painter();
     let bar = Rect::from_min_max(pos2(rr.min.x + 1.0, rr.min.y), pos2(rr.max.x - 1.0, rr.max.y));
+    // (A selected row keeps rekordbox's fixed blue and white text in Light: `ListViewer::findTextColour`.)
+    let _sel_dark = crate::theme::dark_scope(selected);
     if selected {
         p.rect_filled(bar, 0.0, ROW_SEL);
     } else if resp.hovered() {
-        p.rect_filled(bar, 0.0, hex(0x262626));
+        p.rect_filled(bar, 0.0, gy(0x262626));
     }
     if let Some(open) = arrow {
-        crate::icons_src::tree_arrow(p, pos2(rr.min.x + 9.0 + indent, rr.center().y), open, WHITE);
+        crate::icons_src::tree_arrow(p, pos2(rr.min.x + 9.0 + indent, rr.center().y), open, WHITE.c());
     }
     let tx = rr.min.x + 20.0 + indent;
     let right = if count.is_some() { rr.max.x - 40.0 } else { rr.max.x - 4.0 };
-    p.with_clip_rect(Rect::from_min_max(pos2(tx, rr.min.y), pos2(right, rr.max.y))).text(pos2(tx, rr.center().y), Align2::LEFT_CENTER, text, rb(TREE_FONT), WHITE);
+    p.with_clip_rect(Rect::from_min_max(pos2(tx, rr.min.y), pos2(right, rr.max.y))).text(pos2(tx, rr.center().y), Align2::LEFT_CENTER, text, rb(TREE_FONT), WHITE.c());
     if let Some(c) = count {
-        p.text(pos2(rr.max.x - 10.0, rr.center().y), Align2::RIGHT_CENTER, c.to_string(), rb(TREE_FONT), WHITE);
+        p.text(pos2(rr.max.x - 10.0, rr.center().y), Align2::RIGHT_CENTER, c.to_string(), rb(TREE_FONT), WHITE.c());
     }
 }
 
@@ -1003,7 +1010,7 @@ pub(crate) fn tree_pane(app: &mut App, ui: &mut Ui, drop: &mut Vec<(Rect, i64)>)
             // Reference 01: "Collection" heading in a 12 pt band, a 1 pt line under it, "All"
             // 17 pt high, then the categories on an 18 pt pitch.
             let (hr, _) = ui.allocate_exact_size(vec2(ui.available_width(), 12.0), Sense::hover());
-            ui.painter().text(pos2(hr.min.x + 5.0, hr.center().y), Align2::LEFT_CENTER, "Collection", rb(TREE_FONT), WHITE);
+            ui.painter().text(pos2(hr.min.x + 5.0, hr.center().y), Align2::LEFT_CENTER, "Collection", rb(TREE_FONT), WHITE.c());
             let (lr, _) = ui.allocate_exact_size(vec2(ui.available_width(), 1.0), Sense::hover());
             ui.painter().rect_filled(Rect::from_min_max(lr.min, pos2(lr.max.x + 7.0, lr.max.y)), 0.0, BG);
             egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
@@ -1037,10 +1044,10 @@ pub(crate) fn tree_pane(app: &mut App, ui: &mut Ui, drop: &mut Vec<(Rect, i64)>)
                 ui.painter().rect_filled(st, 1.5, TILE_ON);
                 ui.painter().rect_stroke(st, 1.5, Stroke::new(1.0, WHITE), egui::StrokeKind::Inside);
             } else {
-                ui.painter().rect_stroke(st, 1.5, Stroke::new(1.0, if sresp.hovered() { hex(0x8C8C8C) } else { OFF }), egui::StrokeKind::Inside);
+                ui.painter().rect_stroke(st, 1.5, Stroke::new(1.0, if sresp.hovered() { gy(0x8C8C8C) } else { OFF.c() }), egui::StrokeKind::Inside);
             }
             if filter_on {
-                crate::icons_src::playlist_search(ui.painter(), st, if app.ext.tree_search_open { WHITE } else { hex(0xC7C7C7) }, if app.ext.tree_search_open { TILE_ON } else { BG2 });
+                crate::icons_src::playlist_search(ui.painter(), st, if app.ext.tree_search_open { WHITE.c() } else { gy(0xC7C7C7) }, if app.ext.tree_search_open { TILE_ON.c() } else { BG2.c() });
             }
             if sresp.clicked() {
                 app.ext.tree_search_open = !app.ext.tree_search_open;
@@ -1058,8 +1065,8 @@ pub(crate) fn tree_pane(app: &mut App, ui: &mut Ui, drop: &mut Vec<(Rect, i64)>)
                 let on = cv_on == (i == 1);
                 let resp = ui.interact(tr, ui.id().with(("tree_tab", i)), Sense::click());
                 let wide = ui.painter().with_clip_rect(Rect::from_min_max(row.min, pos2(row.max.x + 12.0, row.max.y)));
-                wide.rect_filled(tr, 0.0, if on { TILE_ON } else if resp.hovered() { hex(0x3A3A3A) } else { hex(0x323232) });
-                wide.text(tr.center(), Align2::CENTER_CENTER, *name, rb(12.0), if on { WHITE } else { DIM });
+                wide.rect_filled(tr, 0.0, if on { TILE_ON.c() } else if resp.hovered() { gy(0x3A3A3A) } else { gy(0x323232) });
+                wide.text(tr.center(), Align2::CENTER_CENTER, *name, rb(12.0), if on { WHITE.c() } else { DIM.c() });
                 if resp.clicked() && !on {
                     app.prefs.bx.column_view = i == 1;
                     app.save_prefs();
@@ -1377,7 +1384,7 @@ fn devices_tree(app: &mut App, ui: &mut Ui) {
                 ui.close_menu();
             }
         });
-        let format_row = ui.label(RichText::new(catalog).size(10.5).color(if export_blocker.is_some() { CAUTION_TX } else { DIM }));
+        let format_row = ui.label(RichText::new(catalog).size(10.5).color(if export_blocker.is_some() { CAUTION_TX } else { DIM.c() }));
         if let Some(reason) = &export_blocker {
             format_row.on_hover_text(reason);
         } else if mixed {
@@ -1493,7 +1500,7 @@ fn explorer_list(app: &mut App, ui: &mut Ui, dir: &str) {
     let in_collection: HashMap<String, i64> = files.iter().filter_map(|f| { let s = f.to_string_lossy().to_string(); in_collection.get(s.as_str()).map(|id| (s, *id)) }).collect();
     let bar = Rect::from_min_size(r.min, vec2(r.width(), 24.0));
     ui.painter().rect_filled(bar, 0.0, BG2);
-    ui.painter().text(pos2(bar.min.x + 12.0, bar.center().y), Align2::LEFT_CENTER, format!("{} ({} files)", dir, files.len()), rb(12.0), WHITE);
+    ui.painter().text(pos2(bar.min.x + 12.0, bar.center().y), Align2::LEFT_CENTER, format!("{} ({} files)", dir, files.len()), rb(12.0), WHITE.c());
     let ib = Rect::from_min_max(pos2(bar.max.x - 150.0, bar.min.y + 2.0), pos2(bar.max.x - 8.0, bar.max.y - 2.0));
     if !files.is_empty() && ui.put(ib, egui::Button::new(RichText::new("Import this folder").size(11.5))).clicked() {
         let pl = app.is_manual_playlist();
@@ -1505,7 +1512,7 @@ fn explorer_list(app: &mut App, ui: &mut Ui, dir: &str) {
     body.painter().rect_filled(hdr, 0.0, BG2);
     let mut x = hdr.min.x + 8.0;
     for (c, w) in cols {
-        body.painter().text(pos2(x, hdr.center().y), Align2::LEFT_CENTER, c, rb(11.0), WHITE);
+        body.painter().text(pos2(x, hdr.center().y), Align2::LEFT_CENTER, c, rb(11.0), WHITE.c());
         x += w;
     }
     if files.is_empty() {
@@ -1521,10 +1528,12 @@ fn explorer_list(app: &mut App, ui: &mut Ui, dir: &str) {
             let fs = f.to_string_lossy().to_string();
             let (rr, resp) = ui.allocate_exact_size(vec2(ui.available_width(), ROW_H), Sense::click());
             let in_col = in_collection.get(&fs).copied();
+            // (A selected row keeps rekordbox's fixed blue and white text in Light: `ListViewer::findTextColour`.)
+            let _sel_dark = crate::theme::dark_scope(sel.as_deref() == Some(fs.as_str()));
             if sel.as_deref() == Some(fs.as_str()) {
                 ui.painter().rect_filled(rr, 0.0, ROW_SEL);
             } else if i % 2 == 1 {
-                ui.painter().rect_filled(rr, 0.0, hex(0x0E0E0E));
+                ui.painter().rect_filled(rr, 0.0, gy(0x0E0E0E));
             }
             let size = files_sz[i].1;
             let vals = [
@@ -1535,9 +1544,10 @@ fn explorer_list(app: &mut App, ui: &mut Ui, dir: &str) {
             ];
             let mut x = rr.min.x + 8.0;
             for (v, (_, w)) in vals.iter().zip(cols) {
-                ui.painter().with_clip_rect(Rect::from_min_max(pos2(x, rr.min.y), pos2(x + w - 6.0, rr.max.y))).text(pos2(x, rr.center().y), Align2::LEFT_CENTER, v, rb(11.5), if in_col.is_some() { WHITE } else { TEXT });
+                ui.painter().with_clip_rect(Rect::from_min_max(pos2(x, rr.min.y), pos2(x + w - 6.0, rr.max.y))).text(pos2(x, rr.center().y), Align2::LEFT_CENTER, v, rb(11.5), if in_col.is_some() { WHITE.c() } else { TEXT.c() });
                 x += w;
             }
+            drop(_sel_dark);
             if resp.clicked() {
                 sel = Some(fs.clone());
             }
@@ -1578,7 +1588,7 @@ fn device_list(app: &mut App, ui: &mut Ui, root: &str, node: Option<u32>, histor
         let bar = Rect::from_min_max(r.min, pos2(r.max.x, r.min.y + 26.0));
         let p = ui.painter().clone();
         p.rect_filled(bar, 0.0, BG2);
-        p.text(pos2(bar.min.x + 10.0, bar.center().y), Align2::LEFT_CENTER, if history.is_some() { "Histories" } else { "Devices" }, rb(TITLE_FONT), WHITE);
+        p.text(pos2(bar.min.x + 10.0, bar.center().y), Align2::LEFT_CENTER, if history.is_some() { "Histories" } else { "Devices" }, rb(TITLE_FONT), WHITE.c());
         p.rect_filled(Rect::from_min_max(pos2(bar.min.x + 340.0, bar.min.y), pos2(bar.min.x + 341.0, bar.max.y)), 0.0, BG);
         let with_art = app.prefs.columns.contains(&Col::Artwork);
         let icons: [(f32, IconFn, bool); 4] = [
@@ -1589,13 +1599,13 @@ fn device_list(app: &mut App, ui: &mut Ui, root: &str, node: Option<u32>, histor
         ];
         for (dx, draw, on) in icons {
             let vr = Rect::from_center_size(pos2(bar.max.x - dx, bar.center().y), vec2(18.0, 18.0));
-            p.rect_stroke(vr, 1.5, Stroke::new(1.0, if on { hex(0x1B385B) } else { hex(0x2E2E2E) }), egui::StrokeKind::Inside);
-            draw(&p, vr, hex(0x616161));
+            p.rect_stroke(vr, 1.5, Stroke::new(1.0, if on { hex(0x1B385B) } else { gy(0x2E2E2E) }), egui::StrokeKind::Inside);
+            draw(&p, vr, gy(0x616161));
         }
         let wide = p.with_clip_rect(ui.ctx().screen_rect());
         let cmr = Rect::from_center_size(pos2(ui.ctx().screen_rect().max.x - 12.5, bar.min.y + 14.0), vec2(18.0, 18.0));
         wide.rect_filled(cmr, 2.0, BTN);
-        crate::icons_src::bullet_rows(&wide, cmr, WHITE);
+        crate::icons_src::bullet_rows(&wide, cmr, WHITE.c());
         p.rect_filled(Rect::from_min_max(pos2(r.min.x, r.max.y - 10.0), pos2(r.min.x + 1121.0_f32.min(r.width() - 113.0), r.max.y - 2.0)), 0.0, SCROLL);
         return;
     }
@@ -1621,12 +1631,12 @@ fn device_list(app: &mut App, ui: &mut Ui, root: &str, node: Option<u32>, histor
     let r = ui.max_rect();
     let bar = Rect::from_min_size(r.min, vec2(r.width(), 26.0));
     ui.painter().rect_filled(bar, 0.0, BG2);
-    ui.painter().text(pos2(bar.min.x + 10.0, bar.center().y), Align2::LEFT_CENTER, if dev.lib.is_some() { format!("{title} ({} Tracks)", tracks.len()) } else { title }, rb(TITLE_FONT), WHITE);
+    ui.painter().text(pos2(bar.min.x + 10.0, bar.center().y), Align2::LEFT_CENTER, if dev.lib.is_some() { format!("{title} ({} Tracks)", tracks.len()) } else { title }, rb(TITLE_FONT), WHITE.c());
     let space = match (dev.free, dev.total) {
         (Some(f), Some(t)) => format!("Available Space {:.1} GB / Total Space {:.1} GB", f as f64 / 1e9, t as f64 / 1e9),
         _ => String::new(),
     };
-    ui.painter().text(pos2(bar.max.x - 12.0, bar.center().y), Align2::RIGHT_CENTER, space, rb(11.0), DIM);
+    ui.painter().text(pos2(bar.max.x - 12.0, bar.center().y), Align2::RIGHT_CENTER, space, rb(11.0), DIM.c());
     let mut body = ui.new_child(egui::UiBuilder::new().max_rect(Rect::from_min_max(pos2(r.min.x, r.min.y + 27.0), r.max)));
     if dev.lib.is_none() {
         body.add_space(30.0);
@@ -1657,7 +1667,7 @@ fn device_list(app: &mut App, ui: &mut Ui, root: &str, node: Option<u32>, histor
     body.painter().rect_filled(hdr, 0.0, BG2);
     let mut x = hdr.min.x + 8.0;
     for (c, w) in cols.iter().zip(widths) {
-        body.painter().text(pos2(x, hdr.center().y), Align2::LEFT_CENTER, *c, rb(TITLE_FONT), WHITE);
+        body.painter().text(pos2(x, hdr.center().y), Align2::LEFT_CENTER, *c, rb(TITLE_FONT), WHITE.c());
         x += w;
     }
     egui::ScrollArea::vertical().auto_shrink([false, false]).show_rows(&mut body, ROW_H, tracks.len(), |ui, range| {
@@ -1686,12 +1696,9 @@ fn device_list(app: &mut App, ui: &mut Ui, root: &str, node: Option<u32>, histor
                 }
             }
             let selected = app.device_ui.sel.contains(&t.id);
+            // (A selected row keeps rekordbox's fixed blue and white text in Light: `ListViewer::findTextColour`.)
+            let _sel_dark = crate::theme::dark_scope(selected);
             ui.painter().rect_filled(rr, 0.0, if selected { ROW_SEL } else if i % 2 == 0 { BG1 } else { BG2 });
-            let r3 = root.to_string();
-            row.context_menu(|ui| {
-                let ids: Vec<u32> = app.device_ui.sel.iter().copied().collect();
-                crate::device_ext::device_track_menu(app, ui, &r3, &ids);
-            });
             let vals = [
                 t.title.clone(),
                 t.artist.clone(),
@@ -1706,9 +1713,15 @@ fn device_list(app: &mut App, ui: &mut Ui, root: &str, node: Option<u32>, histor
             let mut x = rr.min.x + 8.0;
             for (v, w) in vals.iter().zip(widths) {
                 let clip = ui.painter().with_clip_rect(Rect::from_min_max(pos2(x, rr.min.y), pos2(x + w - 6.0, rr.max.y)));
-                clip.text(pos2(x, rr.center().y), Align2::LEFT_CENTER, v, rb(10.5), TEXT);
+                clip.text(pos2(x, rr.center().y), Align2::LEFT_CENTER, v, rb(10.5), TEXT.c());
                 x += w;
             }
+            drop(_sel_dark);
+            let r3 = root.to_string();
+            row.context_menu(|ui| {
+                let ids: Vec<u32> = app.device_ui.sel.iter().copied().collect();
+                crate::device_ext::device_track_menu(app, ui, &r3, &ids);
+            });
         }
     });
 }
@@ -1764,13 +1777,13 @@ pub(crate) fn track_list(app: &mut App, ui: &mut Ui) {
     let gx = if search_w >= smax { rx - tail - smax - 20.0 - group } else { bar.min.x + title_w + lead };
     let path_menu = !in_sub && matches!(app.view, View::Playlist(_));
     let title_clip = Rect::from_min_max(bar.min, pos2(bar.min.x + title_w - if path_menu { 71.0 } else if in_sub { 22.0 } else { 6.0 }, bar.max.y));
-    p.with_clip_rect(title_clip.intersect(ui.clip_rect())).text(pos2(bar.min.x + 10.0, bar.center().y), Align2::LEFT_CENTER, format!("{} ({} Tracks)", view_title(app), app.list.len()), rb(TITLE_FONT), WHITE);
+    p.with_clip_rect(title_clip.intersect(ui.clip_rect())).text(pos2(bar.min.x + 10.0, bar.center().y), Align2::LEFT_CENTER, format!("{} ({} Tracks)", view_title(app), app.list.len()), rb(TITLE_FONT), WHITE.c());
     p.rect_filled(Rect::from_min_max(pos2(bar.min.x + title_w, bar.min.y), pos2(bar.min.x + title_w + 1.0, bar.max.y)), 0.0, BG);
     if path_menu {
         // Skin brws_list_pathsystem_pulldown (10 x 16, #646464): the folders the playlist is in.
         let ar = Rect::from_center_size(pos2(bar.min.x + title_w - 51.0, bar.center().y), vec2(10.0, 16.0));
         let aresp = ui.interact(ar.expand(4.0), ui.id().with("path_pulldown"), Sense::click());
-        crate::icons_src::path_pulldown(&p, ar, if aresp.hovered() { DIM } else { OFF });
+        crate::icons_src::path_pulldown(&p, ar, if aresp.hovered() { DIM.c() } else { OFF.c() });
         dropdown(ui, &aresp, "path_pulldown_menu", |ui| crate::ui_browser_ext::path_menu(app, ui));
     }
     let two = app.two_players();
@@ -1785,7 +1798,7 @@ pub(crate) fn track_list(app: &mut App, ui: &mut Ui) {
         let left = Rect::from_min_max(pa.min, pos2(pa.max.x - 16.5, pa.max.y));
         let right = Rect::from_min_max(pos2(pa.max.x - 16.0, pa.min.y), pa.max);
         crate::traffic::paint_button(&p, left, right, on);
-        p.text(pos2(pa.min.x + 7.0, pa.center().y), Align2::LEFT_CENTER, label, rb_bold(9.75), WHITE);
+        p.text(pos2(pa.min.x + 7.0, pa.center().y), Align2::LEFT_CENTER, label, rb_bold(9.75), WHITE.c());
         {
             let c = pos2(pa.max.x - 8.0, pa.center().y + 0.5);
             p.add(egui::Shape::line(vec![c + vec2(-3.6, -1.8), c + vec2(0.0, 1.8), c + vec2(3.6, -1.8)], Stroke::new(1.0, WHITE)));
@@ -1824,8 +1837,8 @@ pub(crate) fn track_list(app: &mut App, ui: &mut Ui) {
             continue;
         }
         let resp = ui.interact(vr, ui.id().with(("viewmode", i)), if on.is_some() { Sense::click() } else { Sense::hover() });
-        p.rect_stroke(vr, 1.5, Stroke::new(1.0, if on == Some(true) { TILE_ON } else if resp.hovered() { hex(0x8C8C8C) } else { OFF }), egui::StrokeKind::Inside);
-        draw(&p, vr, WHITE);
+        p.rect_stroke(vr, 1.5, Stroke::new(1.0, if on == Some(true) { TILE_ON.c() } else if resp.hovered() { gy(0x8C8C8C) } else { OFF.c() }), egui::StrokeKind::Inside);
+        draw(&p, vr, WHITE.c());
         let resp = if app.prefs.tooltips || on.is_none() { resp.on_hover_text(tipt) } else { resp };
         if resp.clicked() && i == 3 {
             crate::ui_browser_ext::set_right_panel(app, if app.prefs.sub_browser { 0 } else { 5 });
@@ -1854,7 +1867,7 @@ pub(crate) fn track_list(app: &mut App, ui: &mut Ui) {
     let sr = if sr.width() < 40.0 { Rect::from_min_size(pos2(bar.max.x + 50.0, bar.min.y + 1.0), vec2(60.0, 24.0)) } else { sr };
     p.rect_filled(sr, 0.0, BG);
     // Skin searchSelect: a 25 x 14 pt magnifier with its scope triangle, #646464.
-    crate::icons_src::search_select(&p, Rect::from_min_size(pos2(sr.min.x + 9.0, sr.min.y + 5.5), vec2(25.0, 14.0)), OFF);
+    crate::icons_src::search_select(&p, Rect::from_min_size(pos2(sr.min.x + 9.0, sr.min.y + 5.5), vec2(25.0, 14.0)), OFF.c());
     let scope_btn = ui.interact(Rect::from_min_max(sr.min, pos2(sr.min.x + 35.0, sr.max.y)).intersect(bar), ui.id().with("search_scope"), Sense::click());
     dropdown(ui, &scope_btn, "search_scope_menu", |ui| {
         for (i, name) in crate::app::SEARCH_SCOPES.iter().enumerate() {
@@ -1883,8 +1896,8 @@ pub(crate) fn track_list(app: &mut App, ui: &mut Ui) {
         ui.set_clip_rect(ui.ctx().screen_rect());
         let cmr = Rect::from_center_size(pos2(ui.ctx().screen_rect().max.x - 12.5, bar.min.y + 14.0), vec2(18.0, 18.0));
         let cm = ui.interact(cmr, ui.id().with("palette_toggle"), Sense::click());
-        ui.painter().rect_filled(cmr, 2.0, if app.prefs.palette_open { BLUE } else if cm.hovered() { hex(0x3A3A3A) } else { BTN });
-        crate::icons_src::bullet_rows(ui.painter(), cmr, WHITE);
+        ui.painter().rect_filled(cmr, 2.0, if app.prefs.palette_open { BLUE.c() } else if cm.hovered() { gy(0x3A3A3A) } else { BTN.c() });
+        crate::icons_src::bullet_rows(ui.painter(), cmr, WHITE.c());
         ui.set_clip_rect(clip);
         let cm = if app.prefs.tooltips { cm.on_hover_text("Show/Hide Playlist Palette") } else { cm };
         if cm.clicked() {
@@ -1926,10 +1939,10 @@ pub(crate) fn track_list(app: &mut App, ui: &mut Ui) {
         interact_handle_opacity: 1.0,
         ..egui::style::ScrollStyle::solid()
     };
-    aui.visuals_mut().extreme_bg_color = Color32::BLACK;
-    aui.visuals_mut().widgets.inactive.bg_fill = hex(0x323232);
-    aui.visuals_mut().widgets.hovered.bg_fill = hex(0x4A4A4A);
-    aui.visuals_mut().widgets.active.bg_fill = hex(0x5A5A5A);
+    aui.visuals_mut().extreme_bg_color = FIELD.c();
+    aui.visuals_mut().widgets.inactive.bg_fill = gy(0x323232);
+    aui.visuals_mut().widgets.hovered.bg_fill = gy(0x4A4A4A);
+    aui.visuals_mut().widgets.active.bg_fill = gy(0x5A5A5A);
     let mut vstate: Option<(Rect, f32, f32)> = None;
     let cols = app.prefs.columns.clone();
     let mut all_cols = vec![Col::Status];
@@ -1978,18 +1991,18 @@ pub(crate) fn track_list(app: &mut App, ui: &mut Ui) {
                 // Three 30 pt cells: the Track Filter funnel, the My Tag filter funnel, and the
                 // attribute icons' cell.
                 if !app.ext.in_sub {
-                    crate::icons_src::funnel(ui.painter(), pos2(cr.min.x + 15.0, cr.center().y - 1.0), if app.filter_open { TILE_ON } else { DIM });
-                    crate::icons_src::funnel(ui.painter(), pos2(cr.min.x + 45.0, cr.center().y - 1.0), if !app.filter_tags.is_empty() { TILE_ON } else { DIM });
+                    crate::icons_src::funnel(ui.painter(), pos2(cr.min.x + 15.0, cr.center().y - 1.0), if app.filter_open { TILE_ON.c() } else { DIM.c() });
+                    crate::icons_src::funnel(ui.painter(), pos2(cr.min.x + 45.0, cr.center().y - 1.0), if !app.filter_tags.is_empty() { TILE_ON.c() } else { DIM.c() });
                 }
                 ui.painter().rect_filled(Rect::from_min_max(pos2(cr.min.x + 29.0, cr.min.y), pos2(cr.min.x + 30.0, cr.max.y)), 0.0, BG);
                 ui.painter().rect_filled(Rect::from_min_max(pos2(cr.min.x + 59.0, cr.min.y), pos2(cr.min.x + 60.0, cr.max.y)), 0.0, BG);
             }
             let label = if *c == Col::Status { "" } else { c.label() };
-            ui.painter().with_clip_rect(cr).text(pos2(cr.min.x + 7.0, cr.center().y), Align2::LEFT_CENTER, label, rb(TITLE_FONT), if sorted { TILE_ON } else { WHITE });
+            ui.painter().with_clip_rect(cr).text(pos2(cr.min.x + 7.0, cr.center().y), Align2::LEFT_CENTER, label, rb(TITLE_FONT), if sorted { TILE_ON.c() } else { WHITE.c() });
             if sorted {
                 // Skins sortUp / sortDown: the arrow sits 14 pt from the column's right edge.
                 let ac = if label.is_empty() { pos2(cr.min.x + 74.0, cr.center().y) } else { pos2(cr.max.x - 14.0, cr.center().y) };
-                crate::icons_src::sort_arrow(&ui.painter().with_clip_rect(cr), ac, app.prefs.sort_asc, TILE_ON);
+                crate::icons_src::sort_arrow(&ui.painter().with_clip_rect(cr), ac, app.prefs.sort_asc, TILE_ON.c());
             }
             ui.painter().rect_filled(Rect::from_min_max(pos2(cr.max.x - 1.0, cr.min.y), cr.max), 0.0, BG);
             if *c == Col::Status && app.ext.in_sub {
@@ -2084,6 +2097,8 @@ pub(crate) fn track_list(app: &mut App, ui: &mut Ui) {
                 let Some(t) = app.track(id).cloned() else { continue };
                 let (rr, resp) = ui.allocate_exact_size(vec2(w, rh), Sense::click_and_drag());
                 let sel = app.selected.contains(&id);
+                // (A selected row keeps rekordbox's fixed blue and white text in Light: `ListViewer::findTextColour`.)
+                let _sel_dark = crate::theme::dark_scope(sel);
                 let loaded = app.deck.track == Some(id);
                 let bg = if sel { ROW_SEL } else if i % 2 == 0 { BG1 } else { BG2 };
                 ui.painter().rect_filled(rr, 0.0, bg);
@@ -2099,6 +2114,8 @@ pub(crate) fn track_list(app: &mut App, ui: &mut Ui) {
                     // Column lines run through the rows: the last point of each column, #323232.
                     ui.painter().rect_filled(Rect::from_min_max(pos2(x - 1.0, rr.min.y), pos2(x, rr.max.y)), 0.0, SCROLL);
                 }
+                // Inline editors and context menus use the window appearance.
+                drop(_sel_dark);
                 // The cell under the pointer.
                 let cell_at = |app: &App, px: f32| -> Option<(Col, Rect)> {
                     let mut x = rr.min.x;
@@ -2129,11 +2146,11 @@ pub(crate) fn track_list(app: &mut App, ui: &mut Ui) {
                 if let Some(b) = art_btn {
                     let pp = ui.painter();
                     pp.circle_filled(b.center(), 6.5, Color32::from_black_alpha(190));
-                    pp.circle_stroke(b.center(), 5.8, Stroke::new(1.0, WHITE));
+                    pp.circle_stroke(b.center(), 5.8, Stroke::new(1.0, ON_ACCENT));
                     if previewing {
-                        pp.rect_filled(Rect::from_center_size(b.center(), vec2(4.2, 4.2)), 0.0, WHITE);
+                        pp.rect_filled(Rect::from_center_size(b.center(), vec2(4.2, 4.2)), 0.0, ON_ACCENT);
                     } else {
-                        pp.add(egui::Shape::convex_polygon(vec![b.center() + vec2(-1.8, -3.0), b.center() + vec2(3.2, 0.0), b.center() + vec2(-1.8, 3.0)], WHITE, Stroke::NONE));
+                        pp.add(egui::Shape::convex_polygon(vec![b.center() + vec2(-1.8, -3.0), b.center() + vec2(3.2, 0.0), b.center() + vec2(-1.8, 3.0)], ON_ACCENT, Stroke::NONE));
                     }
                     if app.prefs.tooltips && ui.rect_contains_pointer(b) {
                         ui.interact(b, ui.id().with(("pv_tip", i)), Sense::hover()).on_hover_text("Preview : Play/Stop");
@@ -2325,7 +2342,7 @@ pub(crate) fn track_list(app: &mut App, ui: &mut Ui) {
         let p = ui.painter();
         // The header band runs on over the scroll bar's column.
         p.rect_filled(Rect::from_min_max(pos2(vbar_x, area.min.y), pos2(r.max.x, area.min.y + 14.0)), 0.0, BG2);
-        p.rect_filled(track, 0.0, Color32::BLACK);
+        p.rect_filled(track, 0.0, gy(0x000000));
         // The square where the two scroll bars meet (10 pt, #323232).
         p.rect_filled(Rect::from_min_max(pos2(vbar_x + 1.0, r.max.y - 11.0), pos2(vbar_x + 11.0, r.max.y - 1.0)), 0.0, SCROLL);
         let view_h = inner.height().max(1.0);
@@ -2335,7 +2352,7 @@ pub(crate) fn track_list(app: &mut App, ui: &mut Ui) {
             let y0 = track.min.y + (track.height() - len) * (off / max_off).clamp(0.0, 1.0);
             let thumb = Rect::from_min_size(pos2(track.min.x + 2.0, y0), vec2(8.0, len));
             let resp = ui.interact(track, ui.id().with("list_vbar"), Sense::click_and_drag());
-            p.rect_filled(thumb, 2.0, if resp.dragged() { hex(0x5A5A5A) } else if resp.hovered() { hex(0x4A4A4A) } else { hex(0x323232) });
+            p.rect_filled(thumb, 2.0, if resp.dragged() { gy(0x5A5A5A) } else if resp.hovered() { gy(0x4A4A4A) } else { gy(0x323232) });
             if resp.dragged() || resp.clicked() {
                 if let Some(pp) = resp.interact_pointer_pos() {
                     let f = ((pp.y - track.min.y - len / 2.0) / (track.height() - len).max(1.0)).clamp(0.0, 1.0);
@@ -2367,7 +2384,7 @@ fn column_browser(app: &mut App, ui: &mut Ui, r: Rect) {
         }
         let hr = Rect::from_min_size(cr.min, vec2(w, 14.0));
         ui.painter().rect_filled(hr, 0.0, BG2);
-        ui.painter().text(pos2(hr.min.x + 6.0, hr.center().y), Align2::LEFT_CENTER, *name, rb(11.0), WHITE);
+        ui.painter().text(pos2(hr.min.x + 6.0, hr.center().y), Align2::LEFT_CENTER, *name, rb(11.0), WHITE.c());
         let body = Rect::from_min_max(pos2(cr.min.x + 1.0, hr.max.y), pos2(cr.max.x - 1.0, cr.max.y));
         let mut bui = ui.new_child(egui::UiBuilder::new().max_rect(body));
         bui.spacing_mut().item_spacing = vec2(0.0, 0.0);
@@ -2383,7 +2400,7 @@ fn column_browser(app: &mut App, ui: &mut Ui, r: Rect) {
                 } else if resp.hovered() {
                     ui.painter().rect_filled(rr, 0.0, BG2);
                 }
-                ui.painter().text(pos2(rr.min.x + 6.0, rr.center().y), Align2::LEFT_CENTER, label, rb(11.0), if on { WHITE } else { TEXT });
+                ui.painter().text(pos2(rr.min.x + 6.0, rr.center().y), Align2::LEFT_CENTER, label, rb(11.0), if on { WHITE.c() } else { TEXT.c() });
                 if resp.clicked() {
                     pick = Some(val);
                 }
@@ -2435,7 +2452,7 @@ pub(crate) fn draw_cell(app: &mut App, ui: &mut Ui, c: Col, t: &Track, r: Rect, 
     let p = ui.painter().with_clip_rect(r.shrink2(vec2(3.0, 0.0)));
     let text_pos = |right: bool| if right { pos2(r.max.x - 4.5, r.center().y) } else { pos2(r.min.x + 5.0, r.center().y) };
     let font = list_font(app);
-    let col = if t.missing { CAUTION_TX } else { TEXT };
+    let col = if t.missing { CAUTION_TX } else { TEXT.c() };
     let txt = |s: String| {
         let right = c.right_aligned();
         p.text(text_pos(right), if right { Align2::RIGHT_CENTER } else { Align2::LEFT_CENTER }, s, font.clone(), col);
@@ -2455,7 +2472,7 @@ pub(crate) fn draw_cell(app: &mut App, ui: &mut Ui, c: Col, t: &Track, r: Rect, 
             // row's foot, at most 9 pt high.
             let (x0, x1) = (r.min.x + 30.0, r.max.x - 5.0);
             if r.width() > 40.0 {
-                ui.painter().with_clip_rect(r).rect_filled(Rect::from_min_max(pos2(r.min.x + 1.0, r.min.y + 1.0), pos2(r.max.x - 1.0, r.max.y - 1.0)), 0.0, if row % 2 == 0 { BG } else { hex(0x191919) });
+                ui.painter().with_clip_rect(r).rect_filled(Rect::from_min_max(pos2(r.min.x + 1.0, r.min.y + 1.0), pos2(r.max.x - 1.0, r.max.y - 1.0)), 0.0, if row % 2 == 0 { BG.c() } else { gy(0x191919) });
             }
             if let Some(pv) = app.previews.get(&t.id) {
                 let n = (x1 - x0).max(1.0) as usize;
@@ -2537,7 +2554,7 @@ pub(crate) fn draw_cell(app: &mut App, ui: &mut Ui, c: Col, t: &Track, r: Rect, 
                         let x = x0 + (*start / dur) as f32 * n as f32;
                         let cr = Rect::from_min_size(pos2(x - 3.0, r.min.y + 4.0), vec2(7.0, 7.0));
                         p.rect_filled(cr, 0.0, hotcue_color(*color));
-                        p.text(cr.center() + vec2(0.0, 0.3), Align2::CENTER_CENTER, ((b'A' + *slot as u8) as char).to_string(), rb_bold(7.5), hex(0x1E1E1E));
+                        p.text(cr.center() + vec2(0.0, 0.3), Align2::CENTER_CENTER, ((b'A' + *slot as u8) as char).to_string(), rb_bold(7.5), gy(0x1E1E1E));
                     }
                 }
             }
@@ -2562,7 +2579,7 @@ pub(crate) fn draw_cell(app: &mut App, ui: &mut Ui, c: Col, t: &Track, r: Rect, 
         Col::Artwork => {
             if t.artwork.is_empty() {
                 // No artwork: the top of the original's dim 49 pt disc.
-                ui.painter().with_clip_rect(Rect::from_min_max(r.min, pos2(r.max.x - 1.0, r.max.y))).circle_filled(pos2(r.center().x - 0.5, r.min.y + 26.5), 24.5, if row % 2 == 0 { hex(0x1E1E1E) } else { hex(0x242424) });
+                ui.painter().with_clip_rect(Rect::from_min_max(r.min, pos2(r.max.x - 1.0, r.max.y))).circle_filled(pos2(r.center().x - 0.5, r.min.y + 26.5), 24.5, if row % 2 == 0 { gy(0x1E1E1E) } else { gy(0x242424) });
             }
             if let Some(tex) = artwork_texture(app, &t.artwork) {
                 let cell = r.shrink2(vec2(0.0, 0.5));
@@ -2586,7 +2603,7 @@ pub(crate) fn draw_cell(app: &mut App, ui: &mut Ui, c: Col, t: &Track, r: Rect, 
         Col::Rating => {
             for s in 1..=5u8 {
                 // Skins rating_on / rating_off: 12 x 11 pt stars on a 16 pt pitch, the first centred 14 pt in.
-                crate::icons_src::star(&p, pos2(r.min.x + 14.0 + (s - 1) as f32 * 16.0, r.center().y), t.rating >= s, TEXT);
+                crate::icons_src::star(&p, pos2(r.min.x + 14.0 + (s - 1) as f32 * 16.0, r.center().y), t.rating >= s, TEXT.c());
             }
         }
         Col::Time => txt(if t.duration > 0.0 { fmt_time(t.duration, false) } else { String::new() }),

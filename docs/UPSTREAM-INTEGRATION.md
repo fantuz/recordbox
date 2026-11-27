@@ -2,6 +2,44 @@
 
 The integration brings Adam Sardo’s EDIT timeline, additional Performance layouts, MIDI and keyboard mappings, recorder, sampler and effects into the fork. New beat analysis also uses his port of the AlphaTheta Rekordbox 7.2.19 Normal and Dynamic detector. The fork’s library and device-export tools continue to use its existing database and ANLZ checks. [Upstream beat detector](https://github.com/adamsardo/recordbox/blob/74ba5e9/app/src/analysis/rb_beat1.rs) · [Integration PR](https://github.com/fantuz/recordbox/pull/28)
 
+## Changes through upstream ae3d557
+
+Eight upstream snapshots followed the November 27 comparison at `26a4cca`. This integration is based on fork main after the whole-library memory fix and the Homebrew update. It also includes earlier effect and beat-analyzer components on which the new snapshots depend. [Compared upstream revisions](https://github.com/adamsardo/recordbox/compare/26a4ccaebbe55dd0b2f8eb0b57bec525951208eb...ae3d557ed1551ee86211f7e305921bff14050fb2) · [Fork baseline](https://github.com/fantuz/recordbox/tree/fa8db4f247949884b5d868b7d547f6bedba2d5ee)
+
+| Upstream change | What it brings to the fork |
+| --- | --- |
+| `5d4889c` and `a913c9f` | Model the band-pass, high-pass, low-pass and crush echoes, including their feedback and modulation. Prepare first-use rack buffers outside the audio callback lock. The fork already did this for some effects. |
+| `c6da4b0` and `921b571` | Update SPIRAL, HELIX, NOISE, reverb, filtering, stretch and vinyl-brake behavior. MERGE FX smooths discontinuities when clips restart. The master meter samples the signal before the limiter, so it can show peaks that the limiter subsequently reduces. |
+| `4891eed` | Add a selectable Light appearance to EXPORT and PERFORMANCE. The fork applies the palette to the detached library as well. EDIT keeps its dark appearance. |
+| `8e4f60f` | Add the legacy beat analyzer’s constant-versus-changing-tempo decision to the optional installed-model path. Extend its sample-rate coverage. The fork retains its classic and compatible estimators, optional transient refinement and memory-aware collection queue. |
+| `3eae535` | Export vocals and instrumentals to standalone files, add the results to the collection and optionally to the source playlist. Extend contrast coverage across the browser and dialogs. |
+| `ae3d557` | Extend the optional model to changing-tempo tracks. Run the downbeat network in sections, repair the joins and estimate local tempo. The fork limits the model’s working memory and falls back to the selected ordinary Dynamic estimator when a section cannot be resolved. |
+
+The MIDI window gains the new palette. Controller message coverage, physical MIDI validation, USB catalog formats and desktop-library write-back protocols are outside the changes in these eight snapshots.
+
+### What the precision checks establish
+
+With generated 44.1 kHz audio, the ported tempo classifier reported 124.00 BPM and constant tempo on a steady 124 BPM track. On a track stepping from 128 to 86 BPM it reported 128.00 BPM with the changing-tempo flag. Those match the two published reference observations. The 128.00 figure is the detector’s reported track tempo. The flag determines how Auto handles the changing section. The optional model can now convert eligible rates such as 32, 88.2, 96 and 192 kHz. A track that exceeds the 15-minute limit stays on the selected ordinary estimator. Dynamic and Auto can use the new changing-tempo pipeline. Too few beats, unresolved half-beat offsets and some half/double or fractional tempo interpretations still need the ordinary estimator. [Upstream tempo classifier](https://github.com/adamsardo/recordbox/blob/8e4f60f/app/src/analysis/rb_hp_bia2.rs)
+
+The ordinary compatible estimator returned identical BPM and grid anchors on the fork baseline, upstream and the integration for the three synthetic tracks under **Preparing tracks** below. The median timing errors were 0.25–0.29 ms. Those fixtures test steady tempo.
+
+The fork shares intermediate analysis data within the current track. Each track owns that data, which avoids reusing a prior song’s results when a worker receives a buffer at the same address. The grid keeps timestamp changes below one millisecond for formats that can store them. A synthetic 48 kHz test retains beat positions at 100000, 600020, 1100833 and 1600416 microseconds and checks their bar numbers. This measures how accurately the fork stores detected beats. Assessing musical accuracy across recordings requires reference grids and, for the full optional model, locally installed weights.
+
+### Effect selection and playback cost
+
+At 48 kHz, one selection of a preallocated single-mode BPF Echo cleared 68,464,000 bytes of delay buffers in the upstream implementation. The fork marks the old samples unreadable and reuses the allocated buffers. On one Linux Xeon core, selecting the effect took a median 2.744 ms upstream and 0.345 µs with this change. Ten batches of twenty selections were timed for each implementation after warm-up. Forward and reverse output matched sample for sample after a reset, including silence between the old and new input. This measurement isolates selection. Audio-driver latency, the rest of the callback and a physical controller were outside the test.
+
+### Exporting vocals and instrumentals
+
+Use **Track → Export Stems**, the track context menu, or the deck’s STEMS strip. **Vocals** writes the separated vocal. **Instrumental** subtracts the vocal from the original mix, which preserves material the separator did not assign to a part. Each result gets an unused filename and its own recordbox entry. The first export explains the destination and offers playlist placement. Library Protection applies to this write.
+
+- A completed separation can be reused from the deck or the cache for the chosen model. The worker can read the two vocal channels from disk in blocks. It may still decode the original to bounded stereo PCM. The export queue runs one track at a time.
+- An uncached track already on a deck can use the existing separation engine and its device limits. For an uncached track elsewhere in the library, load it on a free deck and separate it before export. This keeps a bulk export from replacing a playing deck or launching competing GPU jobs.
+- Choose WAV, AIFF or FLAC for lossless output. MP3 uses the bundled encoder. AAC uses the system encoder on macOS. With **Same as the original**, an unavailable AAC encoder produces FLAC with a format notice. For lossy exports, recordbox measures the codec delay on its own decoder when placing the copied cues and grid. Another player can use a different MP3 time origin.
+- The application stages the file in the destination folder, then publishes it under an unused name. It imports metadata, cues, grid and playlist placement in a database transaction. If the database import fails after publication, the error gives the path of the finished audio.
+
+The exported files are separate from the reusable four-part STEMS cache. Desktop sync and USB export keep their own review and write rules.
+
 ## Preparing tracks
 
 In **Preferences → Analysis**, **Rekordbox-compatible** is the default beat grid estimator. Choose **recordbox classic** for the fork’s earlier estimator. Normal and Dynamic modes support both choices. **High precision: refine beat timing** aligns a detected grid to consistent transients. It is a separate option from the locally installed beat model. The compatible detector retries with classic when it cannot produce a usable grid or the track exceeds its 15-minute limit. The choice applies when analysis runs. A previously prepared collection can be explored as it is.

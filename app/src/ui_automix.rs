@@ -69,7 +69,7 @@ fn tile_icon(p: &Painter, r: Rect, c: Color32) {
 /// stopped, rekordbox's blue (0, 125, 225) while Automix runs.
 fn play_icon(p: &Painter, r: Rect, on: bool) {
     let c = r.center();
-    let (ring, glyph) = if on { (BEAT_BLUE, BEAT_BLUE) } else { (hex(0x4B4B4B), hex(0x969696)) };
+    let (ring, glyph) = if on { (BEAT_BLUE.c(), BEAT_BLUE.c()) } else { (gy(0x4B4B4B), gy(0x969696)) };
     p.circle_stroke(c, 10.5, Stroke::new(1.0, ring));
     let o = r.min;
     // The two loops and the arrow head (skin coordinates, 22 x 22).
@@ -117,10 +117,10 @@ pub fn strip_tile(app: &mut App, ui: &mut Ui, r: Rect, y0: f32) {
         ui.painter().rect_filled(rr.expand(1.0), 0.0, TILE_ON);
         ui.painter().rect_stroke(rr, 1.5, Stroke::new(1.0, WHITE), egui::StrokeKind::Inside);
     } else {
-        ui.painter().rect_filled(rr, 1.5, hex(0x212121));
-        ui.painter().rect_stroke(rr, 1.5, Stroke::new(1.0, if resp.hovered() { hex(0x8C8C8C) } else { hex(0x565656) }), egui::StrokeKind::Inside);
+        ui.painter().rect_filled(rr, 1.5, gy(0x212121));
+        ui.painter().rect_stroke(rr, 1.5, Stroke::new(1.0, if resp.hovered() { gy(0x8C8C8C) } else { gy(0x565656) }), egui::StrokeKind::Inside);
     }
-    tile_icon(ui.painter(), rr, WHITE);
+    tile_icon(ui.painter(), rr, WHITE.c());
     let resp = if app.prefs.tooltips { resp.on_hover_text(TIP_TILE) } else { resp };
     if resp.clicked() {
         toggle_pane(app);
@@ -170,9 +170,9 @@ pub fn pane(app: &mut App, ui: &mut Ui, list: Rect) -> Rect {
     p.rect_filled(bar, 0.0, BG2);
     let n = app.mixx.automix.list.len();
     let title = format!("Automix ({n} {}) ", if n == 1 { "Track" } else { "Tracks" });
-    let g = p.layout_no_wrap(title, FontId::proportional(11.5), WHITE);
+    let g = p.layout_no_wrap(title, FontId::proportional(11.5), WHITE.c());
     let tw = g.size().x.min((bar.width() - 200.0).max(40.0));
-    p.with_clip_rect(Rect::from_min_max(bar.min, pos2(bar.min.x + 10.0 + tw, bar.max.y))).galley(pos2(bar.min.x + 10.0, bar.center().y - g.size().y / 2.0), g, WHITE);
+    p.with_clip_rect(Rect::from_min_max(bar.min, pos2(bar.min.x + 10.0 + tw, bar.max.y))).galley(pos2(bar.min.x + 10.0, bar.center().y - g.size().y / 2.0), g, WHITE.c());
     let x0 = bar.min.x + (bar.width() - 168.0).max(tw + 17.0);
     for dx in [-20.0f32, 40.0] {
         p.rect_filled(Rect::from_min_size(pos2(x0 + dx, bar.min.y), vec2(1.0, bar.height())), 0.0, BG);
@@ -186,9 +186,9 @@ pub fn pane(app: &mut App, ui: &mut Ui, list: Rect) -> Rect {
     }
     let small = |dx: f32| Rect::from_min_size(pos2(x0 + dx, bar.min.y + 3.0), vec2(20.0, 20.0));
     let (cr, sr, gr) = (small(60.0), small(100.0), small(140.0));
-    let grey = |resp: &egui::Response| if resp.hovered() { WHITE } else { hex(0x969696) };
+    let grey = |resp: &egui::Response| if resp.hovered() { WHITE.c() } else { gy(0x969696) };
     let resp = icon_button(ui, cr, "amx_clear", TIP_CLEAR, tips);
-    clear_icon(&p, cr, grey(&resp), BG2);
+    clear_icon(&p, cr, grey(&resp), BG2.c());
     if resp.clicked() {
         // An empty list is simply cleared; otherwise rekordbox asks about saving it first.
         if app.mixx.automix.list.is_empty() {
@@ -198,7 +198,7 @@ pub fn pane(app: &mut App, ui: &mut Ui, list: Rect) -> Rect {
         }
     }
     let resp = icon_button(ui, sr, "amx_save", TIP_SAVE, tips);
-    save_icon(&p, sr, grey(&resp), BG2);
+    save_icon(&p, sr, grey(&resp), BG2.c());
     if resp.clicked() {
         if let Some(id) = app.automix_save_as_playlist() {
             let name = app.node(id).map(|x| x.name.clone()).unwrap_or_default();
@@ -206,7 +206,7 @@ pub fn pane(app: &mut App, ui: &mut Ui, list: Rect) -> Rect {
         }
     }
     let resp = icon_button(ui, gr, "amx_settings", TIP_SETTINGS, tips);
-    crate::icons_src::gear(&p, gr.center(), grey(&resp), BG2);
+    crate::icons_src::gear(&p, gr.center(), grey(&resp), BG2.c());
     if resp.clicked() {
         app.mixx.automix.settings_open = true;
     }
@@ -241,16 +241,16 @@ pub fn pane(app: &mut App, ui: &mut Ui, list: Rect) -> Rect {
     let mut x = hr.min.x;
     for (c, w, right) in cols.iter() {
         if *right {
-            bui.painter().text(pos2(x + w - 6.0, hr.center().y), Align2::RIGHT_CENTER, *c, FontId::proportional(11.0), WHITE);
+            bui.painter().text(pos2(x + w - 6.0, hr.center().y), Align2::RIGHT_CENTER, *c, FontId::proportional(11.0), WHITE.c());
         } else {
-            bui.painter().text(pos2(x + 5.0, hr.center().y), Align2::LEFT_CENTER, *c, FontId::proportional(11.0), WHITE);
+            bui.painter().text(pos2(x + 5.0, hr.center().y), Align2::LEFT_CENTER, *c, FontId::proportional(11.0), WHITE.c());
         }
         bui.painter().line_segment([pos2(x + w - 0.5, hr.min.y + 1.0), pos2(x + w - 0.5, hr.max.y - 1.0)], Stroke::new(1.0, BG));
         x += w;
     }
     if n == 0 {
         // `AutomixEmpty`.
-        bui.painter().text(body.center(), Align2::CENTER_CENTER, EMPTY, FontId::proportional(12.0), DIM);
+        bui.painter().text(body.center(), Align2::CENTER_CENTER, EMPTY, FontId::proportional(12.0), DIM.c());
         return rest;
     }
     let font = list_font(app);
@@ -268,6 +268,8 @@ pub fn pane(app: &mut App, ui: &mut Ui, list: Rect) -> Rect {
             let (rr, resp) = ui.allocate_exact_size(vec2(ui.available_width(), ROW_H), Sense::click());
             rects.push(rr);
             let sel = app.mixx.automix.selected.contains(&ri);
+            // (A selected row keeps rekordbox's fixed blue and white text in Light: `ListViewer::findTextColour`.)
+            let _sel_dark = crate::theme::dark_scope(sel);
             let deck = (0..2).find(|d| on_deck[*d].is_some_and(|(row, _)| row == ri));
             ui.painter().rect_filled(rr, 0.0, if sel { ROW_SEL } else if ri % 2 == 0 { BG1 } else { BG2 });
             let t = app.track(ids[ri]);
@@ -290,16 +292,17 @@ pub fn pane(app: &mut App, ui: &mut Ui, list: Rect) -> Rect {
                     if let Some(d) = deck {
                         let active = on_deck[d].is_some_and(|(_, s)| s == State::Active);
                         let br = Rect::from_center_size(cr.center(), vec2(13.0, 11.0));
-                        p.rect_filled(br, 1.5, if active { BLUE } else { hex(0x505050) });
-                        p.text(br.center(), Align2::CENTER_CENTER, format!("{}", d + 1), caps(8.0), WHITE);
+                        p.rect_filled(br, 1.5, if active { BLUE.c() } else { gy(0x505050) });
+                        p.text(br.center(), Align2::CENTER_CENTER, format!("{}", d + 1), caps(8.0), WHITE.c());
                     }
                 } else if *right {
-                    p.text(pos2(cr.max.x - 6.0, cr.center().y), Align2::RIGHT_CENTER, v, font.clone(), if missing { OFF } else { TEXT });
+                    p.text(pos2(cr.max.x - 6.0, cr.center().y), Align2::RIGHT_CENTER, v, font.clone(), if missing { OFF.c() } else { TEXT.c() });
                 } else {
-                    p.text(pos2(cr.min.x + 6.0, cr.center().y), Align2::LEFT_CENTER, v, font.clone(), if missing { OFF } else { TEXT });
+                    p.text(pos2(cr.min.x + 6.0, cr.center().y), Align2::LEFT_CENTER, v, font.clone(), if missing { OFF.c() } else { TEXT.c() });
                 }
                 x += w;
             }
+            drop(_sel_dark);
             if resp.clicked() || (resp.secondary_clicked() && !sel) {
                 let (cmd, shift) = ui.input(|i| (i.modifiers.command, i.modifiers.shift));
                 let s = &mut app.mixx.automix;
@@ -479,13 +482,13 @@ fn settings_dialog(app: &mut App, ctx: &egui::Context) {
         .title_bar(false)
         .resizable(false)
         .anchor(Align2::CENTER_CENTER, vec2(0.0, 0.0))
-        .frame(egui::Frame::window(&ctx.style()).fill(BG2).stroke(Stroke::new(1.0, hex(0x3A3A3A))).inner_margin(0.0).corner_radius(4.0))
+        .frame(egui::Frame::window(&ctx.style()).fill(BG2.c()).stroke(Stroke::new(1.0, gy(0x3A3A3A))).inner_margin(0.0).corner_radius(4.0))
         .show(ctx, |ui| {
             kit::apply_style(ui);
             let (r, _) = ui.allocate_exact_size(vec2(w, h), Sense::hover());
             let p = ui.painter().clone();
             let o = r.min;
-            p.text(pos2(o.x + w / 2.0, o.y + 26.0), Align2::CENTER_CENTER, "Automix settings", kit::inter_bold(17.0), WHITE);
+            p.text(pos2(o.x + w / 2.0, o.y + 26.0), Align2::CENTER_CENTER, "Automix settings", kit::inter_bold(17.0), WHITE.c());
             let o2 = app.prefs.mixx.automix.clone();
             let rows: [(f32, f32, &str, bool); 3] = [
                 (48.0, 16.0, "Repeat playback", o2.repeat),
@@ -497,8 +500,8 @@ fn settings_dialog(app: &mut App, ctx: &egui::Context) {
                 let lr = Rect::from_min_size(o + vec2(36.0, *y - 1.0), vec2(466.0 - 4.0, *lh));
                 let resp = ui.interact(br.union(Rect::from_min_size(lr.min, vec2(lr.width(), 16.0))), ui.id().with(("amx_set", i)), Sense::click());
                 kit::paint_checkbox(&p, Rect::from_center_size(br.center(), vec2(14.0, 14.0)), *on, true);
-                let g = p.layout(label.to_string(), kit::inter(13.5), WHITE, lr.width());
-                p.galley(pos2(lr.min.x + 4.0, if *lh > 16.0 { lr.min.y } else { br.center().y - g.size().y / 2.0 }), g, WHITE);
+                let g = p.layout(label.to_string(), kit::inter(13.5), WHITE.c(), lr.width());
+                p.galley(pos2(lr.min.x + 4.0, if *lh > 16.0 { lr.min.y } else { br.center().y - g.size().y / 2.0 }), g, WHITE.c());
                 map[i] = Some(br);
                 if resp.clicked() {
                     let a = &mut app.prefs.mixx.automix;
@@ -510,7 +513,7 @@ fn settings_dialog(app: &mut App, ctx: &egui::Context) {
                     app.save_prefs();
                 }
             }
-            p.text(o + vec2(20.0, 172.0), Align2::LEFT_CENTER, "Auto crossfade manual start", kit::inter(13.5), WHITE);
+            p.text(o + vec2(20.0, 172.0), Align2::LEFT_CENTER, "Auto crossfade manual start", kit::inter(13.5), WHITE.c());
             // The pull-down: rekordbox's order (ids 2, 3, 1).
             let cr = Rect::from_min_size(o + vec2(36.0, 184.0), vec2(460.0, 22.0));
             map[3] = Some(cr);
@@ -533,7 +536,7 @@ fn settings_dialog(app: &mut App, ctx: &egui::Context) {
             map[4] = Some(ok);
             let resp = ui.interact(ok, ui.id().with("amx_set_ok"), Sense::click());
             kit::paint_button(&p, ok, resp.hovered(), resp.is_pointer_button_down_on());
-            p.text(ok.center(), Align2::CENTER_CENTER, "OK", kit::inter(13.0), WHITE);
+            p.text(ok.center(), Align2::CENTER_CENTER, "OK", kit::inter(13.0), WHITE.c());
             if resp.clicked() || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
                 close = true;
             }

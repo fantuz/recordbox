@@ -27,8 +27,9 @@ const STEM_ROW: f32 = 21.0;
 /// Extra height while the phrase bar is shown under the overview.
 pub const PHRASE_ROW: f32 = 6.0;
 
-const PANEL: Color32 = hex(0x1E1E1E);
-const PAD: Color32 = hex(0x141414);
+/// Deck panels: 0x03000061 (`PlayerPanelL::paint` 0x102282eb4 in PERFORMANCE) D #1E1E1E L #F0F0F0.
+const PANEL: Tc = tc(0x1E1E1E, 0xF0F0F0);
+const PAD: Tc = gr(0x141414);
 const PART: [(&str, usize, Color32); 4] = [("VOCAL", 3, Color32::from_rgb(0x02, 0xDA, 0x0C)), ("INST", 2, Color32::from_rgb(0xDA, 0x1B, 0x02)), ("BASS", 1, Color32::from_rgb(0xD2, 0x00, 0x90)), ("DRUMS", 0, Color32::from_rgb(0x46, 0x55, 0xFF))];
 
 pub fn performance(app: &mut App, ui: &mut Ui) {
@@ -130,7 +131,7 @@ pub(crate) fn deck(app: &mut App, ui: &mut Ui, r: Rect, n: u8, is_active: bool, 
     let pos = app.pos();
     let loaded = app.deck.track.is_some();
     let track = app.deck.track.and_then(|id| app.track(id)).cloned();
-    let dim = hex(0x323232);
+    let dim = gy(0x323232);
     let dk = lay::dk(c4);
     let g = lay::deck_geo(dk);
     // Rows the View preferences add to the overview: vocal (above it) and phrase (under it).
@@ -146,7 +147,7 @@ pub(crate) fn deck(app: &mut App, ui: &mut Ui, r: Rect, n: u8, is_active: bool, 
         p.rect_filled(at(0.0, info_h + 3.0, w, 1.0), 0.0, PANEL);
     }
 
-    p.text(r.min + g.num.to_vec2() + vec2(1.0, 0.0), Align2::CENTER_CENTER, format!("{}", n + 1), lay::arial_b(10.0), if is_active { WHITE } else { DIM });
+    p.text(r.min + g.num.to_vec2() + vec2(1.0, 0.0), Align2::CENTER_CENTER, format!("{}", n + 1), lay::arial_b(10.0), if is_active { WHITE.c() } else { DIM.c() });
     // (View > "Hide Title, Artist, and Artwork": the empty artwork and no names.)
     let hide = crate::prefs_bridge::hide_deck_info(app);
     crate::ui_player2::artwork(app, ui, g.art.translate(r.min.to_vec2()), if hide { &None } else { &track });
@@ -174,22 +175,22 @@ pub(crate) fn deck(app: &mut App, ui: &mut Ui, r: Rect, n: u8, is_active: bool, 
     }
     let sub_font = if g.sub_bold { lay::arial_b(g.sub_f) } else { lay::arial(g.sub_f) };
     let text_clip = p.with_clip_rect(at(tx0, 0.0, title_w, g.hdr_h));
-    text_clip.text(pos2(x0 + tx0, y0 + g.title_y), Align2::LEFT_CENTER, title, lay::arial_b(g.title_f), if loaded { WHITE } else { dim });
+    text_clip.text(pos2(x0 + tx0, y0 + g.title_y), Align2::LEFT_CENTER, title, lay::arial_b(g.title_f), if loaded { WHITE.c() } else { dim });
     let artist_clip = p.with_clip_rect(at(tx0, 0.0, g.bpm_right - 44.0 - 4.0 - tx0, g.hdr_h));
-    artist_clip.text(pos2(x0 + tx0, y0 + g.sub_y), Align2::LEFT_CENTER, artist, sub_font.clone(), hex(0x8C8C8C));
+    artist_clip.text(pos2(x0 + tx0, y0 + g.sub_y), Align2::LEFT_CENTER, artist, sub_font.clone(), gy(0x8C8C8C));
     if loaded {
         let bpm = app.effective_bpm();
-        p.text(pos2(x0 + g.bpm_right, y0 + g.sub_y), Align2::RIGHT_CENTER, format!("{bpm:.2}"), sub_font.clone(), WHITE);
-        p.text(pos2(x0 + g.key_x, y0 + g.sub_y), Align2::LEFT_CENTER, app.result_key_label(), sub_font.clone(), WHITE);
+        p.text(pos2(x0 + g.bpm_right, y0 + g.sub_y), Align2::RIGHT_CENTER, format!("{bpm:.2}"), sub_font.clone(), WHITE.c());
+        p.text(pos2(x0 + g.key_x, y0 + g.sub_y), Align2::LEFT_CENTER, app.result_key_label(), sub_font.clone(), WHITE.c());
     }
     // Remaining and elapsed time, right-aligned before the key controls.
     let remain = (app.deck.duration - pos).max(0.0);
     let (b2, s2) = split_time(if loaded { pos } else { 0.0 });
-    let tcol = if loaded { WHITE } else { dim };
+    let tcol = if loaded { WHITE.c() } else { dim };
     let time_font = lay::arial(g.time_f);
     // (Elapsed in colour id 0x3000076 = #878787, remaining 0x3000074 = white: `TimeView::
     // setSongTime`.)
-    p.text(pos2(x0 + w - g.elapsed_r, y0 + g.time_y), Align2::RIGHT_CENTER, format!("{b2}.{s2}"), time_font.clone(), if loaded { hex(0x878787) } else { dim });
+    p.text(pos2(x0 + w - g.elapsed_r, y0 + g.time_y), Align2::RIGHT_CENTER, format!("{b2}.{s2}"), time_font.clone(), if loaded { gy(0x878787) } else { dim });
     let (b1, s1) = split_time(if loaded { remain } else { 0.0 });
     p.text(pos2(x0 + w - g.remain_r, y0 + g.time_y), Align2::RIGHT_CENTER, format!("-{b1}.{s1}"), time_font.clone(), tcol);
     if dk == lay::Dk::Browse && loaded {
@@ -199,8 +200,8 @@ pub(crate) fn deck(app: &mut App, ui: &mut Ui, r: Rect, n: u8, is_active: bool, 
         let tdim = if crate::automix::tempo_dimmed(app, n) { 0.3 } else { 1.0 };
         let shown = ((pct.abs() + 0.005) * 10.0).floor() / 10.0;
         let sign = if pct < -0.05 { "-" } else if pct > 0.05 { "+" } else { "" };
-        p.text(pos2(x0 + w - 248.0, y0 + 18.25), Align2::RIGHT_CENTER, format!("{:.2}", app.effective_bpm()), lay::arial(14.0), hex(0x8C8C8C));
-        p.text(pos2(x0 + w - 190.5, y0 + 18.25), Align2::RIGHT_CENTER, format!("{sign}{shown:.1}%"), lay::arial(14.0), hex(0x8C8C8C).gamma_multiply(tdim));
+        p.text(pos2(x0 + w - 248.0, y0 + 18.25), Align2::RIGHT_CENTER, format!("{:.2}", app.effective_bpm()), lay::arial(14.0), gy(0x8C8C8C));
+        p.text(pos2(x0 + w - 190.5, y0 + 18.25), Align2::RIGHT_CENTER, format!("{sign}{shown:.1}%"), lay::arial(14.0), gy(0x8C8C8C).gamma_multiply(tdim));
     }
 
     // KEY SYNC, key shift, BEAT SYNC and MASTER at the right (rekordbox's TrackInfoView:
@@ -209,24 +210,24 @@ pub(crate) fn deck(app: &mut App, ui: &mut Ui, r: Rect, n: u8, is_active: bool, 
     let rx = x0 + w;
     let by = y0 + g.y0;
     let ks = app.deck.x.key_sync;
-    if tip(flat(ui, Rect::from_min_size(pos2(rx - 162.0, by + 4.0), vec2(70.0, 13.0)), "keysync", "KEY SYNC", 8.5, if ks { hex(0x007DE1) } else { BTN }, WHITE), app, "KEY SYNC").clicked() {
+    if tip(flat(ui, Rect::from_min_size(pos2(rx - 162.0, by + 4.0), vec2(70.0, 13.0)), "keysync", "KEY SYNC", 8.5, if ks { hex(0x007DE1) } else { BTN.c() }, WHITE.c()), app, "KEY SYNC").clicked() {
         app.toggle_key_sync();
     }
     let ky = by + 32.0;
     let kl = ui.interact(Rect::from_center_size(pos2(rx - 157.0, ky), vec2(12.0, 14.0)), ui.id().with("keydn"), Sense::click());
-    crate::icons_player::chevron_left(&p, pos2(rx - 157.0, ky), 0.9, if loaded { WHITE } else { dim });
+    crate::icons_player::chevron_left(&p, pos2(rx - 157.0, ky), 0.9, if loaded { WHITE.c() } else { dim });
     if tip(kl, app, "Key Shift Down").clicked() {
         app.key_shift_step(-1);
     }
     let kr = ui.interact(Rect::from_center_size(pos2(rx - 97.0, ky), vec2(12.0, 14.0)), ui.id().with("keyup"), Sense::click());
-    crate::icons_player::chevron_right(&p, pos2(rx - 97.0, ky), 0.9, if loaded { WHITE } else { dim });
+    crate::icons_player::chevron_right(&p, pos2(rx - 97.0, ky), 0.9, if loaded { WHITE.c() } else { dim });
     if tip(kr, app, "Key Shift Up").clicked() {
         app.key_shift_step(1);
     }
     if loaded {
         let reset = ui.interact(Rect::from_min_max(pos2(rx - 150.0, ky - 7.0), pos2(rx - 104.0, ky + 7.0)), ui.id().with("keyreset"), Sense::click());
-        p.text(pos2(rx - 148.0, ky), Align2::LEFT_CENTER, app.result_key_label(), lay::arial_b(12.5), WHITE);
-        p.text(pos2(rx - 106.0, ky), Align2::RIGHT_CENTER, crate::player_ext::shift_text(app.deck.x.key_shift), lay::arial_b(12.5), WHITE);
+        p.text(pos2(rx - 148.0, ky), Align2::LEFT_CENTER, app.result_key_label(), lay::arial_b(12.5), WHITE.c());
+        p.text(pos2(rx - 106.0, ky), Align2::RIGHT_CENTER, crate::player_ext::shift_text(app.deck.x.key_shift), lay::arial_b(12.5), WHITE.c());
         if tip(reset, app, "Key Reset").clicked() {
             app.key_reset();
         }
@@ -234,10 +235,10 @@ pub(crate) fn deck(app: &mut App, ui: &mut Ui, r: Rect, n: u8, is_active: bool, 
     let bs = app.deck.x.beat_sync;
     let bsr = Rect::from_min_size(pos2(rx - 78.0, by - 0.5), vec2(44.0, 23.0));
     let bresp = ui.interact(bsr, ui.id().with("beatsync"), Sense::click());
-    p.rect_filled(bsr, 2.0, if bs { BLUE } else if bresp.hovered() { lighten(BTN) } else { BTN });
-    p.text(pos2(bsr.center().x, bsr.min.y + 6.75), Align2::CENTER_CENTER, if app.prefs.deck.beat_sync { "BEAT" } else { "BPM" }, caps(8.5), WHITE);
+    p.rect_filled(bsr, 2.0, if bs { BLUE.c() } else if bresp.hovered() { lighten(BTN.c()) } else { BTN.c() });
+    p.text(pos2(bsr.center().x, bsr.min.y + 6.75), Align2::CENTER_CENTER, if app.prefs.deck.beat_sync { "BEAT" } else { "BPM" }, caps(8.5), WHITE.c());
     crate::deck::sync_rate_hook(app, ui, n, bsr);
-    p.text(pos2(bsr.center().x, bsr.min.y + 16.5), Align2::CENTER_CENTER, "SYNC", caps(8.5), WHITE);
+    p.text(pos2(bsr.center().x, bsr.min.y + 16.5), Align2::CENTER_CENTER, "SYNC", caps(8.5), WHITE.c());
     if tip(bresp, app, "BEAT SYNC").clicked() {
         app.toggle_beat_sync();
     }
@@ -245,9 +246,9 @@ pub(crate) fn deck(app: &mut App, ui: &mut Ui, r: Rect, n: u8, is_active: bool, 
     let is_master = app.px.master == n && !app.sampler_is_master();
     let mrect = Rect::from_min_size(pos2(rx - 78.0, by + 26.0), vec2(70.0, 13.0));
     let mresp = ui.interact(mrect, ui.id().with("master"), Sense::click());
-    p.rect_filled(mrect, 1.0, if mresp.hovered() { lighten(PANEL) } else { PANEL });
-    p.rect_stroke(mrect, 1.0, Stroke::new(1.0_f32, if is_master { BLUE } else { hex(0xC8C8C8) }), egui::StrokeKind::Inside);
-    p.text(mrect.center(), Align2::CENTER_CENTER, "MASTER", caps(8.5), WHITE);
+    p.rect_filled(mrect, 1.0, if mresp.hovered() { lighten(PANEL.c()) } else { PANEL.c() });
+    p.rect_stroke(mrect, 1.0, Stroke::new(1.0_f32, if is_master { BLUE.c() } else { gy(0xC8C8C8) }), egui::StrokeKind::Inside);
+    p.text(mrect.center(), Align2::CENTER_CENTER, "MASTER", caps(8.5), WHITE.c());
     if tip(mresp, app, "MASTER").clicked() {
         app.set_master();
     }
@@ -262,16 +263,16 @@ pub(crate) fn deck(app: &mut App, ui: &mut Ui, r: Rect, n: u8, is_active: bool, 
         let three = app.prefs.stem_parts == 3;
         let parts: Vec<(&str, Vec<usize>, Color32)> = PART.iter().filter(|x| !(three && x.0 == "BASS")).map(|x| (x.0, if three && x.0 == "INST" { vec![2, 1] } else { vec![x.1] }, x.2)).collect();
         let mut bx = if right { x0 + 46.0 } else { rx - 5.0 - parts.len() as f32 * 50.0 + 5.0 };
-        p.text(pos2(bx - 27.0, sy + 9.0), Align2::CENTER_CENTER, if app.prefs.stem_solo { "SOLO" } else { "MUTE" }, lay::arial(11.0), hex(0x8C8C8C));
+        p.text(pos2(bx - 27.0, sy + 9.0), Align2::CENTER_CENTER, if app.prefs.stem_solo { "SOLO" } else { "MUTE" }, lay::arial(11.0), gy(0x8C8C8C));
         for (i, (label, srcs, col)) in parts.iter().enumerate() {
             let br = Rect::from_min_size(pos2(bx, sy + 1.0), vec2(45.0, 16.0));
             let resp = ui.interact(br, ui.id().with(("part", i)), Sense::click());
             let lit = srcs.iter().all(|s| on[*s]);
-            p.rect_filled(br, 1.0, if resp.hovered() { hex(0x1E1E1E) } else { hex(0x0F0F0F) });
+            p.rect_filled(br, 1.0, if resp.hovered() { gy(0x1E1E1E) } else { gy(0x0F0F0F) });
             if lit {
                 p.rect_stroke(br, 1.0, Stroke::new(1.0_f32, *col), egui::StrokeKind::Inside);
             }
-            p.text(br.center(), Align2::CENTER_CENTER, *label, lay::arial(11.0), if lit { *col } else { hex(0x8C8C8C) });
+            p.text(br.center(), Align2::CENTER_CENTER, *label, lay::arial(11.0), if lit { *col } else { gy(0x8C8C8C) });
             if resp.on_hover_text(format!("STEM MUTE ({label}):\nThe {label} Stem is output when set to on. The {label} Stem is muted when set to off.")).clicked() && loaded {
                 crate::prefs_ext::stem_part_click(app, srcs);
             }
@@ -339,14 +340,14 @@ pub(crate) fn pads(app: &mut App, ui: &mut Ui, r: Rect, n: u8, c4: bool) {
                 let pr = pad(c, row);
                 let resp = ui.interact(pr, ui.id().with(("stempad", c, row)), Sense::click());
                 let active = if c == 0 { lit } else { app.px.stem_fx[row] };
-                p.rect_filled(pr, 0.0, if resp.hovered() && enabled { hex(0x1A1A1A) } else { hex(0x0A0A0A) });
+                p.rect_filled(pr, 0.0, if resp.hovered() && enabled { gy(0x1A1A1A) } else { gy(0x0A0A0A) });
                 if active && enabled {
                     p.rect_stroke(pr, 0.0, Stroke::new(1.0_f32, BLUE), egui::StrokeKind::Inside);
                 }
                 let a = if enabled && loaded { 1.0 } else { 0.5 };
                 p.rect_filled(Rect::from_min_size(pos2(pr.min.x + 3.0, pr.center().y - 4.0), vec2(8.0, 8.0)), 0.0, col.gamma_multiply(a));
                 let text = if c == 0 { label.to_string() } else { format!("FX {label}") };
-                p.text(pos2(pr.min.x + 15.0, pr.center().y), Align2::LEFT_CENTER, text, FontId::proportional(11.5), if !enabled || !loaded { OFF } else if active { hex(0x3C8CFF) } else { WHITE });
+                p.text(pos2(pr.min.x + 15.0, pr.center().y), Align2::LEFT_CENTER, text, FontId::proportional(11.5), if !enabled || !loaded { OFF.c() } else if active { hex(0x3C8CFF) } else { WHITE.c() });
                 if c == 0 {
                     if press_fired(ui, &resp) && enabled && loaded {
                         crate::prefs_ext::stem_part_click(app, &srcs);
@@ -362,20 +363,20 @@ pub(crate) fn pads(app: &mut App, ui: &mut Ui, r: Rect, n: u8, c4: bool) {
         let lens: [f64; 8] = if page == 0 { [1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 64.0, 128.0] } else { [0.125, 0.25, 0.5, 0.0, 0.0, 0.0, 0.0, 0.0] };
         for (i, b) in lens.iter().enumerate() {
             let pr = pad(i / 4, i % 4);
-            p.rect_filled(pr, 0.0, hex(0x161616));
+            p.rect_filled(pr, 0.0, gy(0x161616));
             if *b <= 0.0 {
                 continue;
             }
-            p.text(pr.center(), Align2::CENTER_CENTER, crate::player_ext::beats_text(*b), bold(10.5), if loaded { WHITE } else { OFF });
+            p.text(pr.center(), Align2::CENTER_CENTER, crate::player_ext::beats_text(*b), bold(10.5), if loaded { WHITE.c() } else { OFF.c() });
             for (dir, x) in [(-1.0, pr.min.x), (1.0, pr.max.x - 30.0)] {
                 let br = Rect::from_min_size(pos2(x, pr.min.y), vec2(30.0, pr.height()));
                 let resp = ui.interact(br, ui.id().with(("bjpad", i, dir as i32)), Sense::click());
-                p.rect_filled(br, 0.0, if resp.hovered() && loaded { lighten(BTN) } else { BTN });
+                p.rect_filled(br, 0.0, if resp.hovered() && loaded { lighten(BTN.c()) } else { BTN.c() });
                 let col = if loaded { WHITE } else { OFF };
                 if dir < 0.0 {
-                    crate::icons_player::chevron_left(&p, br.center(), 1.1, col);
+                    crate::icons_player::chevron_left(&p, br.center(), 1.1, col.c());
                 } else {
-                    crate::icons_player::chevron_right(&p, br.center(), 1.1, col);
+                    crate::icons_player::chevron_right(&p, br.center(), 1.1, col.c());
                 }
                 if press_fired(ui, &resp) && loaded {
                     app.beat_jump(dir * *b);
@@ -411,12 +412,12 @@ pub(crate) fn pads(app: &mut App, ui: &mut Ui, r: Rect, n: u8, c4: bool) {
                     let col = if playing { hex(crate::sampler_ext::PAD_COLORS[code as usize]) } else { crate::sampler_ext::pad_color(code) };
                     let col = if muted || !ready { col.gamma_multiply(0.45) } else { col };
                     p.rect_filled(pr, 0.0, if resp.hovered() { lighten(col) } else { col });
-                    p.text(pos2(pr.min.x + 9.0, pr.center().y), Align2::LEFT_CENTER, format!("{}", slot + 1), bold(10.5), hex(0xF4F4F4));
-                    p.with_clip_rect(pr).text(pos2(pr.min.x + 26.0, pr.center().y), Align2::LEFT_CENTER, nm, FontId::proportional(10.5), hex(0xF4F4F4));
+                    p.text(pos2(pr.min.x + 9.0, pr.center().y), Align2::LEFT_CENTER, format!("{}", slot + 1), bold(10.5), gy(0xF4F4F4));
+                    p.with_clip_rect(pr).text(pos2(pr.min.x + 26.0, pr.center().y), Align2::LEFT_CENTER, nm, FontId::proportional(10.5), gy(0xF4F4F4));
                 }
                 None => {
-                    p.rect_filled(pr, 0.0, if resp.hovered() && used { hex(0x1E1E1E) } else { hex(0x161616) });
-                    p.text(pos2(pr.min.x + 9.0, pr.center().y), Align2::LEFT_CENTER, format!("{}", slot + 1), FontId::proportional(10.5), if used { hex(0x8C8C8C) } else { hex(0x3C3C3C) });
+                    p.rect_filled(pr, 0.0, if resp.hovered() && used { gy(0x1E1E1E) } else { gy(0x161616) });
+                    p.text(pos2(pr.min.x + 9.0, pr.center().y), Align2::LEFT_CENTER, format!("{}", slot + 1), FontId::proportional(10.5), if used { gy(0x8C8C8C) } else { gy(0x3C3C3C) });
                 }
             }
             if press_fired(ui, &resp) && used {
@@ -443,15 +444,15 @@ pub(crate) fn pads(app: &mut App, ui: &mut Ui, r: Rect, n: u8, c4: bool) {
             let resp = ui.interact(pr, ui.id().with(("seqpad", i)), Sense::click());
             let saved = app.prefs.sampler.seq.patterns.get(i).is_some_and(|x| x.is_some());
             let lit = (playing && cur == i && reserved.is_none()) || (reserved == Some(i) && blink);
-            p.rect_filled(pr, 0.0, if lit { BLUE } else if resp.hovered() { hex(0x1E1E1E) } else { hex(0x161616) });
-            let tc = if saved || lit { hex(0xF4F4F4) } else { hex(0x8C8C8C) };
+            p.rect_filled(pr, 0.0, if lit { BLUE.c() } else if resp.hovered() { gy(0x1E1E1E) } else { gy(0x161616) });
+            let tc = if saved || lit { gy(0xF4F4F4) } else { gy(0x8C8C8C) };
             p.text(pos2(pr.min.x + 9.0, pr.center().y), Align2::LEFT_CENTER, format!("P{}", i + 1), bold(10.5), tc);
             p.with_clip_rect(Rect::from_min_max(pr.min, pos2(pr.max.x - 56.0, pr.max.y))).text(pos2(pr.min.x + 30.0, pr.center().y), Align2::LEFT_CENTER, app.prefs.sampler.seq.name(i), FontId::proportional(10.5), tc);
             p.text(pos2(pr.max.x - 20.0, pr.center().y), Align2::RIGHT_CENTER, if bars[i] == 1 { "1Bar".to_string() } else { format!("{}Bars", bars[i]) }, FontId::proportional(9.5), tc);
             if saved {
                 let dr = Rect::from_center_size(pos2(pr.max.x - 9.0, pr.center().y), vec2(12.0, 12.0));
                 let dresp = ui.interact(dr, ui.id().with(("seqpad_del", i)), Sense::click());
-                let (c, col) = (dr.center(), if dresp.hovered() { WHITE } else { hex(0xA0A0A0) });
+                let (c, col) = (dr.center(), if dresp.hovered() { WHITE.c() } else { gy(0xA0A0A0) });
                 p.line_segment([c + vec2(-3.0, -3.0), c + vec2(3.0, 3.0)], Stroke::new(1.2_f32, col));
                 p.line_segment([c + vec2(-3.0, 3.0), c + vec2(3.0, -3.0)], Stroke::new(1.2_f32, col));
                 if dresp.on_hover_text("Delete selected sequence").clicked() {
@@ -482,8 +483,8 @@ pub(crate) fn pads(app: &mut App, ui: &mut Ui, r: Rect, n: u8, c4: bool) {
             let pr = pad(i / 4, i % 4);
             let resp = ui.interact(pr, ui.id().with(("blpad", i)), Sense::click());
             let lit = cur.map(|c| (c / b - 1.0).abs() < 0.02).unwrap_or(false);
-            p.rect_filled(pr, 0.0, if lit { LOOP } else if resp.hovered() && loaded { hex(0x1E1E1E) } else { hex(0x161616) });
-            p.text(pr.center(), Align2::CENTER_CENTER, crate::player_ext::beats_text(b), bold(10.5), if loaded { WHITE } else { OFF });
+            p.rect_filled(pr, 0.0, if lit { LOOP } else if resp.hovered() && loaded { gy(0x1E1E1E) } else { gy(0x161616) });
+            p.text(pr.center(), Align2::CENTER_CENTER, crate::player_ext::beats_text(b), bold(10.5), if loaded { WHITE.c() } else { OFF.c() });
             if press_fired(ui, &resp) && loaded {
                 if lit {
                     app.loop_exit();
@@ -504,13 +505,13 @@ pub(crate) fn pads(app: &mut App, ui: &mut Ui, r: Rect, n: u8, c4: bool) {
                 Some(c) => {
                     let col = hotcue_color(c.color);
                     p.rect_filled(pr, 0.0, if resp.hovered() { lighten(col) } else { col });
-                    p.text(pos2(pr.min.x + 9.0, pr.center().y), Align2::LEFT_CENTER, letter, bold(10.5), hex(0xF4F4F4));
+                    p.text(pos2(pr.min.x + 9.0, pr.center().y), Align2::LEFT_CENTER, letter, bold(10.5), gy(0xF4F4F4));
                     let (m, f) = split_time(c.start);
-                    p.with_clip_rect(pr).text(pos2(pr.min.x + 26.0, pr.center().y), Align2::LEFT_CENTER, if c.comment.is_empty() { format!("{m}.{f}") } else { c.comment.clone() }, FontId::proportional(10.5), hex(0xF4F4F4));
+                    p.with_clip_rect(pr).text(pos2(pr.min.x + 26.0, pr.center().y), Align2::LEFT_CENTER, if c.comment.is_empty() { format!("{m}.{f}") } else { c.comment.clone() }, FontId::proportional(10.5), gy(0xF4F4F4));
                 }
                 None => {
-                    p.rect_filled(pr, 0.0, if resp.hovered() && loaded { hex(0x1E1E1E) } else { hex(0x0F0F0F) });
-                    p.text(pos2(pr.min.x + 10.0, pr.center().y), Align2::LEFT_CENTER, letter, lay::arial(13.0), hex(0x6E6E6E));
+                    p.rect_filled(pr, 0.0, if resp.hovered() && loaded { gy(0x1E1E1E) } else { gy(0x0F0F0F) });
+                    p.text(pos2(pr.min.x + 10.0, pr.center().y), Align2::LEFT_CENTER, letter, lay::arial(13.0), gy(0x6E6E6E));
                 }
             }
             if press_fired(ui, &resp) && loaded {
@@ -531,7 +532,7 @@ pub(crate) fn pads(app: &mut App, ui: &mut Ui, r: Rect, n: u8, c4: bool) {
     // (2Deck Vertical shows 160 pt of the pad list: the eighth pad is cut off.)
     if pg.cols == 1 && mode != 1 {
         p.rect_filled(Rect::from_min_max(pos2(r.min.x, r.min.y + 160.0), pos2(r.max.x, r.min.y + 163.0)), 0.0, PANEL);
-        p.rect_filled(pg.scroll_bar(0).0.shrink2(vec2(0.5, 0.0)), 0.0, hex(0x323232));
+        p.rect_filled(pg.scroll_bar(0).0.shrink2(vec2(0.5, 0.0)), 0.0, gy(0x323232));
     }
     // Pad mode pull-down (deck 1 at the left under the pads, deck 2 at the right).
     let label = match mode {
@@ -544,12 +545,12 @@ pub(crate) fn pads(app: &mut App, ui: &mut Ui, r: Rect, n: u8, c4: bool) {
         _ => "HOT CUE",
     };
     // (The pull-down is as wide as its label: 58.5 pt for STEMS, 68 pt for HOT CUE.)
-    let mw = (p.layout_no_wrap(label.to_string(), caps(8.5), WHITE).size().x + 30.0).round();
+    let mw = (p.layout_no_wrap(label.to_string(), caps(8.5), WHITE.c()).size().x + 30.0).round();
     let mr = pg.mode_rect(n % 2 == 1, mw);
     let resp = ui.interact(mr, ui.id().with("padmode"), Sense::click());
-    p.rect_filled(mr, 2.0, if resp.hovered() { lighten(BTN) } else { BTN });
-    p.text(pos2(mr.min.x + 5.0, mr.center().y), Align2::LEFT_CENTER, label, caps(8.5), WHITE);
-    crate::icons_player::chevron_down(&p, pos2(mr.max.x - 9.0, mr.center().y + 0.5), 1.0, WHITE);
+    p.rect_filled(mr, 2.0, if resp.hovered() { lighten(BTN.c()) } else { BTN.c() });
+    p.text(pos2(mr.min.x + 5.0, mr.center().y), Align2::LEFT_CENTER, label, caps(8.5), WHITE.c());
+    crate::icons_player::chevron_down(&p, pos2(mr.max.x - 9.0, mr.center().y + 0.5), 1.0, WHITE.c());
     let stems_on = app.prefs.show_stems;
     crate::ui_browser::dropdown(ui, &resp, "padmodepop", |ui| {
         if ui.selectable_label(mode == 0, "HOT CUE").clicked() {
@@ -592,9 +593,9 @@ pub(crate) fn pads(app: &mut App, ui: &mut Ui, r: Rect, n: u8, c4: bool) {
         let (track, thumb) = pg.scroll_bar(page);
         let resp = ui.interact(track.expand(3.0), ui.id().with("padpage"), Sense::click_and_drag());
         if pg.cols == 2 {
-            p.rect_filled(Rect::from_min_max(pos2(track.min.x, track.max.y - 1.0), track.max), 0.0, hex(0x323232));
+            p.rect_filled(Rect::from_min_max(pos2(track.min.x, track.max.y - 1.0), track.max), 0.0, gy(0x323232));
         }
-        p.rect_filled(thumb, 0.0, if resp.hovered() || resp.dragged() { hex(0x787878) } else { hex(0x555555) });
+        p.rect_filled(thumb, 0.0, if resp.hovered() || resp.dragged() { gy(0x787878) } else { gy(0x555555) });
         if let Some(pp) = resp.interact_pointer_pos().filter(|_| resp.clicked() || resp.dragged()) {
             let second = if track.width() > track.height() { pp.x > track.center().x } else { pp.y > track.center().y };
             app.deck.x.pad_page = second as u8;
@@ -628,27 +629,27 @@ pub(crate) fn loop_box(app: &mut App, ui: &mut Ui, o: Pos2, n: u8, c4: bool) {
     let rr = Rect::from_min_size(o + vec2(35.0, ay), vec2(33.0, ah));
     if manual {
         let re = ui.interact(size_r, ui.id().with("reloop"), Sense::click());
-        p.rect_filled(size_r, 0.0, if looping { LOOP } else if re.hovered() { lighten(BTN) } else { BTN });
-        p.text(size_r.center(), Align2::CENTER_CENTER, if looping { "EXIT" } else { "RELOOP" }, caps(9.0), WHITE);
+        p.rect_filled(size_r, 0.0, if looping { LOOP } else if re.hovered() { lighten(BTN.c()) } else { BTN.c() });
+        p.text(size_r.center(), Align2::CENTER_CENTER, if looping { "EXIT" } else { "RELOOP" }, caps(9.0), WHITE.c());
         if tip(re, app, "Reloop/Exit").clicked() && loaded {
             app.exit_reloop();
         }
         let li = ui.interact(lr, ui.id().with("loopin"), Sense::click());
-        p.rect_filled(lr, 0.0, if li.hovered() { lighten(BTN) } else { BTN });
-        p.text(lr.center(), Align2::CENTER_CENTER, "IN", caps(9.0), WHITE);
+        p.rect_filled(lr, 0.0, if li.hovered() { lighten(BTN.c()) } else { BTN.c() });
+        p.text(lr.center(), Align2::CENTER_CENTER, "IN", caps(9.0), WHITE.c());
         if tip(li, app, "Loop In").clicked() && loaded {
             app.loop_in_pressed();
         }
         let lo = ui.interact(rr, ui.id().with("loopout"), Sense::click());
-        p.rect_filled(rr, 0.0, if lo.hovered() { lighten(BTN) } else { BTN });
-        p.text(rr.center(), Align2::CENTER_CENTER, "OUT", caps(9.0), WHITE);
+        p.rect_filled(rr, 0.0, if lo.hovered() { lighten(BTN.c()) } else { BTN.c() });
+        p.text(rr.center(), Align2::CENTER_CENTER, "OUT", caps(9.0), WHITE.c());
         if tip(lo, app, "Loop Out").clicked() && loaded {
             app.loop_out_pressed();
         }
     } else {
         let sz = ui.interact(size_r, ui.id().with("loopsize"), Sense::click());
-        p.rect_filled(size_r, 0.0, if looping { LOOP } else if sz.hovered() { lighten(BTN) } else { BTN });
-        p.text(size_r.center(), Align2::CENTER_CENTER, crate::player_ext::beats_text(app.prefs.loop_beats), bold(12.0), WHITE);
+        p.rect_filled(size_r, 0.0, if looping { LOOP } else if sz.hovered() { lighten(BTN.c()) } else { BTN.c() });
+        p.text(size_r.center(), Align2::CENTER_CENTER, crate::player_ext::beats_text(app.prefs.loop_beats), bold(12.0), WHITE.c());
         if tip(sz, app, "Auto Beat Loop").clicked() && loaded {
             if looping {
                 app.loop_exit();
@@ -657,29 +658,29 @@ pub(crate) fn loop_box(app: &mut App, ui: &mut Ui, o: Pos2, n: u8, c4: bool) {
             }
         }
         let hl = ui.interact(lr, ui.id().with("loophalf"), Sense::click());
-        p.rect_filled(lr, 0.0, if hl.hovered() { lighten(BTN) } else { BTN });
-        crate::icons_player::chevron_left(&p, lr.center(), 1.35, WHITE);
+        p.rect_filled(lr, 0.0, if hl.hovered() { lighten(BTN.c()) } else { BTN.c() });
+        crate::icons_player::chevron_left(&p, lr.center(), 1.35, WHITE.c());
         if tip(hl, app, "Loop Halve").clicked() {
             app.resize_loop(0.5);
         }
         let dl = ui.interact(rr, ui.id().with("loopdouble"), Sense::click());
-        p.rect_filled(rr, 0.0, if dl.hovered() { lighten(BTN) } else { BTN });
-        crate::icons_player::chevron_right(&p, rr.center(), 1.35, WHITE);
+        p.rect_filled(rr, 0.0, if dl.hovered() { lighten(BTN.c()) } else { BTN.c() });
+        crate::icons_player::chevron_right(&p, rr.center(), 1.35, WHITE.c());
         if tip(dl, app, "Loop Double").clicked() {
             app.resize_loop(2.0);
         }
     }
     let au = Rect::from_min_size(o + vec2(0.0, by), vec2(33.0, bh));
     let ma = Rect::from_min_size(o + vec2(35.0, by), vec2(33.0, bh));
-    if flat(ui, au, "loopau", "AU", 8.5, if manual { BTN } else { BLUE }, WHITE).clicked() {
+    if flat(ui, au, "loopau", "AU", 8.5, if manual { BTN.c() } else { BLUE.c() }, WHITE.c()).clicked() {
         app.px.loop_manual[n as usize] = false;
     }
     let mresp = ui.interact(ma, ui.id().with("loopma"), Sense::click());
-    p.rect_filled(ma, 2.0, if manual { BLUE } else { PAD });
+    p.rect_filled(ma, 2.0, if manual { BLUE.c() } else { PAD.c() });
     if !manual {
-        p.rect_stroke(ma, 2.0, Stroke::new(1.0_f32, hex(0x505050)), egui::StrokeKind::Inside);
+        p.rect_stroke(ma, 2.0, Stroke::new(1.0_f32, gy(0x505050)), egui::StrokeKind::Inside);
     }
-    p.text(ma.center(), Align2::CENTER_CENTER, "MA", caps(8.5), WHITE);
+    p.text(ma.center(), Align2::CENTER_CENTER, "MA", caps(8.5), WHITE.c());
     if mresp.clicked() {
         app.px.loop_manual[n as usize] = true;
     }
@@ -698,8 +699,8 @@ pub(crate) fn platter_panel(app: &mut App, ui: &mut Ui, o: Pos2, n: u8, is_activ
     let int_r = at(0.0, pg.int_y, 40.0, 20.0);
     let int = ui.interact(int_r, ui.id().with("playmode"), Sense::hover());
     p.rect_filled(int_r, 2.0, BTN);
-    p.text(pos2(int_r.min.x + 6.0, int_r.center().y), Align2::LEFT_CENTER, "INT", caps(8.5), WHITE);
-    crate::icons_player::chevron_down(&p, pos2(int_r.max.x - 9.0, int_r.center().y + 0.5), 1.0, WHITE);
+    p.text(pos2(int_r.min.x + 6.0, int_r.center().y), Align2::LEFT_CENTER, "INT", caps(8.5), WHITE.c());
+    crate::icons_player::chevron_down(&p, pos2(int_r.max.x - 9.0, int_r.center().y + 0.5), 1.0, WHITE.c());
     let _ = int.on_hover_text("INTERNAL: the deck plays from the software. (DVS modes are not built in recordbox.)");
     crate::ui_player2::cue_play(app, ui, o + pg.cue_c, o + pg.play_c, (pg.btn - 3.0) / 2.0, is_active);
 
@@ -711,7 +712,7 @@ pub(crate) fn platter_panel(app: &mut App, ui: &mut Ui, o: Pos2, n: u8, is_activ
     let pos = app.pos();
     // (The outer ring is the turning part: on a loaded deck it is white with a gap behind
     // the red marker.)
-    p.circle_filled(c, d / 2.0, if loaded { WHITE } else { hex(0x2A2A2A) });
+    p.circle_filled(c, d / 2.0, if loaded { WHITE.c() } else { gy(0x2A2A2A) });
     p.circle_filled(c, 0.93636 * d / 2.0, PANEL);
     // The turn as rekordbox draws it (`VirtualDeckComp::drawCurrentCuePosition` /
     // `drawTextures`): frac(ms x rpm / 60000) x 360 degrees, less 44.041, from 3 o'clock
@@ -740,10 +741,10 @@ pub(crate) fn platter_panel(app: &mut App, ui: &mut Ui, o: Pos2, n: u8, is_activ
         let (r0, r1) = (0.93 * d / 2.0, d / 2.0 + 1.0);
         let cue_deg = crate::deck::platter_angle_deg(app.deck.cue_point, rpm);
         wedge(cue_deg - 4.0, cue_deg + 4.0, r0, r1, hex(0xEB870F));
-        wedge(deg - 7.5, deg + 7.5, r0, r1, PANEL);
+        wedge(deg - 7.5, deg + 7.5, r0, r1, PANEL.c());
     }
-    p.circle_filled(c, 0.8 * d / 2.0, if loaded { BLUE } else { hex(0x143C6E) });
-    p.circle_filled(c, 0.76364 * d / 2.0, if loaded { BG } else { hex(0x0F0F0F) });
+    p.circle_filled(c, 0.8 * d / 2.0, if loaded { BLUE.c() } else { hex(0x143C6E) });
+    p.circle_filled(c, 0.76364 * d / 2.0, if loaded { BG.c() } else { gy(0x0F0F0F) });
     if loaded {
         // The red mark of the turning platter image, on the band between the blue ring and
         // the outer ring.
@@ -756,7 +757,7 @@ pub(crate) fn platter_panel(app: &mut App, ui: &mut Ui, o: Pos2, n: u8, is_activ
     crate::deck::platter_hook(app, ui, n, c, d / 2.0);
     let plat = ui.interact(Rect::from_center_size(c, vec2(0.76 * d, 0.76 * d)), ui.id().with("platter"), Sense::hover());
     let bpm = if loaded { app.effective_bpm() } else { 0.0 };
-    let tcol = if loaded { hex(0xE0E0E0) } else { hex(0x3C3C3C) };
+    let tcol = if loaded { gy(0xE0E0E0) } else { gy(0x3C3C3C) };
     let whole = format!("{}", bpm.floor() as i64);
     let frac = format!(".{:02}", ((bpm - bpm.floor()) * 100.0).round().min(99.0) as i64);
     // BPM: Arial Bold, the hundredths smaller, centred in its box.
@@ -796,12 +797,12 @@ pub(crate) fn platter_panel(app: &mut App, ui: &mut Ui, o: Pos2, n: u8, is_activ
     let sign = if pct < -0.05 { "-" } else if pct > 0.05 { "+" } else { "" };
     let tr = pg.tempo.translate(pq.to_vec2());
     let small = lay::arial_b(pg.small_f + if pg.small_f > 12.0 { 1.5 } else { 0.5 });
-    p.text(pos2(tr.max.x + pg.pct_w, tr.center().y), Align2::RIGHT_CENTER, format!("{sign}{shown:.1}%"), small.clone(), if loaded { hex(0x969696).gamma_multiply(tdim) } else { hex(0x3C3C3C) });
+    p.text(pos2(tr.max.x + pg.pct_w, tr.center().y), Align2::RIGHT_CENTER, format!("{sign}{shown:.1}%"), small.clone(), if loaded { gy(0x969696).gamma_multiply(tdim) } else { gy(0x3C3C3C) });
     let range = app.tempo_range() * 100.0;
     let rl = if !loaded { "± 0".to_string() } else if range >= 100.0 { "WIDE".to_string() } else { format!("±{range:.0}") };
     let rr = Rect::from_min_size(pos2(tr.max.x + pg.pct_w + 4.0, tr.min.y - 1.0), vec2(pg.range_w, tr.height() + 2.0));
     let rresp = ui.interact(rr, ui.id().with("temporange"), Sense::click());
-    p.text(pos2(rr.min.x + 1.0, tr.center().y), Align2::LEFT_CENTER, rl, small, if loaded { hex(0xE6461E).gamma_multiply(tdim) } else { hex(0x3C3C3C) });
+    p.text(pos2(rr.min.x + 1.0, tr.center().y), Align2::LEFT_CENTER, rl, small, if loaded { hex(0xE6461E).gamma_multiply(tdim) } else { gy(0x3C3C3C) });
     if tip(rresp, app, "Tempo Range").clicked() {
         app.tempo_range_next();
     }
@@ -824,7 +825,7 @@ pub(crate) fn platter_panel(app: &mut App, ui: &mut Ui, o: Pos2, n: u8, is_activ
         }
         let rs = ui.interact(reset, ui.id().with("treset"), Sense::click());
         if rs.hovered() {
-            p.text(pos2(reset.center().x, reset.max.y + 6.0), Align2::CENTER_CENTER, "RESET", caps(7.0), WHITE);
+            p.text(pos2(reset.center().x, reset.max.y + 6.0), Align2::CENTER_CENTER, "RESET", caps(7.0), WHITE.c());
         }
         if tip(rs, app, "Tempo Reset").clicked() {
             app.tempo_reset();
@@ -839,15 +840,15 @@ pub(crate) fn platter_panel(app: &mut App, ui: &mut Ui, o: Pos2, n: u8, is_activ
     if app.slip_running() {
         ui.ctx().request_repaint_after(std::time::Duration::from_millis(100));
     }
-    if tip(flat(ui, at(col_x, ys[0], 30.0, 18.0), "slip", "SLIP", 8.5, if slip_on && !blink { BLUE } else { BTN }, WHITE), app, "Slip").clicked() {
+    if tip(flat(ui, at(col_x, ys[0], 30.0, 18.0), "slip", "SLIP", 8.5, if slip_on && !blink { BLUE.c() } else { BTN.c() }, WHITE.c()), app, "Slip").clicked() {
         app.toggle_slip();
     }
     let q = app.prefs.quantize;
-    if tip(flat(ui, at(col_x, ys[1], 30.0, 18.0), "quant", "Q", 8.5, if q { BLUE } else { BTN }, WHITE), app, "Quantize").clicked() {
+    if tip(flat(ui, at(col_x, ys[1], 30.0, 18.0), "quant", "Q", 8.5, if q { BLUE.c() } else { BTN.c() }, WHITE.c()), app, "Quantize").clicked() {
         app.toggle_quantize();
     }
     let mt = app.deck.x.master_tempo;
-    if tip(flat(ui, at(col_x, ys[2], 30.0, 18.0), "mt", "MT", 8.5, if mt { BLUE } else { BTN }, WHITE), app, "Master Tempo").clicked() {
+    if tip(flat(ui, at(col_x, ys[2], 30.0, 18.0), "mt", "MT", 8.5, if mt { BLUE.c() } else { BTN.c() }, WHITE.c()), app, "Master Tempo").clicked() {
         app.toggle_master_tempo();
     }
     let _ = n;
@@ -892,7 +893,7 @@ pub(crate) fn knob(ui: &mut Ui, c: Pos2, id: impl std::hash::Hash, value: f32, r
     let v = out.unwrap_or(value);
     // rekordbox's knob: a 3 pt ring of 20 pt across, open at the bottom, and its skin's
     // 2 x 5 pt pointer from the ring's outer edge inwards.
-    let ring = if resp.hovered() || resp.dragged() { hex(0x464646) } else { hex(0x323232) };
+    let ring = if resp.hovered() || resp.dragged() { gy(0x464646) } else { gy(0x323232) };
     lay::ring_knob(&p, c, 8.5, 3.0, v, ring, ring, colour);
     out
 }
@@ -917,12 +918,12 @@ pub(crate) fn mixer(app: &mut App, ui: &mut Ui, r: Rect) {
             p.text(pos2(x, y0 + y), Align2::CENTER_CENTER, s, lay::arial_b(10.0), col);
         };
         // TRIM
-        if let Some(v) = knob(ui, pos2(tx, y0 + mg.trim_y), ("trim", n), m.trim, 0.5, WHITE) {
+        if let Some(v) = knob(ui, pos2(tx, y0 + mg.trim_y), ("trim", n), m.trim, 0.5, WHITE.c()) {
             m.trim = v;
             changed = true;
         }
         let tl = ui.interact(Rect::from_center_size(pos2(tx, y0 + mg.trim_y + mg.label_dy), vec2(36.0, 10.0)), ui.id().with(("triml", n)), Sense::hover());
-        lab(&p, tx, mg.trim_y + mg.label_dy, "TRIM", WHITE);
+        lab(&p, tx, mg.trim_y + mg.label_dy, "TRIM", WHITE.c());
         let tdb = crate::mixer::trim_db(m.trim);
         let _ = tl.on_hover_text(if tdb.is_finite() { format!("{tdb:+.1}dB") } else { "-inf dB".to_string() });
         crate::deck::again_hook(app, ui, n as u8, pos2(cx, y0 + 18.5), pos2(cx, y0 + 32.5));
@@ -933,10 +934,10 @@ pub(crate) fn mixer(app: &mut App, ui: &mut Ui, r: Rect) {
         for (i, (name, idx)) in names.iter().enumerate() {
             let ky = mg.eq_y[i];
             let val = if iso { m.stem_iso[*idx] } else { m.eq[*idx] };
-            let col = if iso { PART[[3, 1, 0][*idx]].2 } else { WHITE };
+            let col = if iso { PART[[3, 1, 0][*idx]].2 } else { WHITE.c() };
             let new = knob(ui, pos2(cx, y0 + ky), ("eq", n, i), val, 0.5, col);
             let lr = ui.interact(Rect::from_center_size(pos2(cx, y0 + ky + mg.label_dy), vec2(40.0, 10.0)), ui.id().with(("eql", n, i)), Sense::click());
-            lab(&p, cx, ky + mg.label_dy, name, if val < 0.01 { hex(0xE61E1E) } else { WHITE });
+            lab(&p, cx, ky + mg.label_dy, name, if val < 0.01 { hex(0xE61E1E) } else { WHITE.c() });
             let killed = lr.on_hover_text("Click to change the value to [0]").clicked();
             let v = if killed { Some(if val < 0.01 { 0.5 } else { 0.0 }) } else { new };
             if let Some(v) = v {
@@ -952,8 +953,8 @@ pub(crate) fn mixer(app: &mut App, ui: &mut Ui, r: Rect) {
         let fx_ = x0 + st.fader_x;
         let cr = Rect::from_center_size(pos2(fx_, y0 + mg.cue_y), vec2(32.0, 18.0));
         let cresp = ui.interact(cr, ui.id().with(("cue", n)), Sense::click());
-        p.rect_filled(cr, 2.0, if m.cue { hex(0xFFA500) } else if cresp.hovered() { lighten(BTN) } else { BTN });
-        p.text(cr.center(), Align2::CENTER_CENTER, "CUE", lay::arial_b(10.0), if m.cue { BG } else { WHITE });
+        p.rect_filled(cr, 2.0, if m.cue { hex(0xFFA500) } else if cresp.hovered() { lighten(BTN.c()) } else { BTN.c() });
+        p.text(cr.center(), Align2::CENTER_CENTER, "CUE", lay::arial_b(10.0), if m.cue { BG.c() } else { WHITE.c() });
         let hp_on = crate::audio::HP_ACTIVE.load(std::sync::atomic::Ordering::Relaxed);
         if cresp.on_hover_text(if hp_on { "Headphones CUE" } else { "Headphones CUE.\nNo headphones output is set: choose one in Preferences > Audio > Input/Output (it needs a device with four or more outputs)." }).clicked() {
             m.cue = !m.cue;
@@ -978,8 +979,8 @@ pub(crate) fn mixer(app: &mut App, ui: &mut Ui, r: Rect) {
         if stems {
             let sr = Rect::from_center_size(pos2(fx_, y0 + mg.stem_y), vec2(32.0, 16.0));
             let sresp = ui.interact(sr, ui.id().with(("stemiso", n)), Sense::click());
-            p.rect_filled(sr, 2.0, if m.stem_iso_on { BLUE } else if sresp.hovered() { lighten(BTN) } else { BTN });
-            p.text(sr.center(), Align2::CENTER_CENTER, "STEM", caps(8.5), WHITE);
+            p.rect_filled(sr, 2.0, if m.stem_iso_on { BLUE.c() } else if sresp.hovered() { lighten(BTN.c()) } else { BTN.c() });
+            p.text(sr.center(), Align2::CENTER_CENTER, "STEM", caps(8.5), WHITE.c());
             if sresp.on_hover_text("STEM ISO Mode:\nSet to STEM ISO mode when set to on, enabling volume adjustment of each Stem. Set to EQ mode when set to off, enabling frequency band adjustment for HIGH/MID/LOW.").clicked() {
                 m.stem_iso_on = !m.stem_iso_on;
                 changed = true;
@@ -990,7 +991,7 @@ pub(crate) fn mixer(app: &mut App, ui: &mut Ui, r: Rect) {
         // Level meter: 2 pt wide, between the strips, from LOW up to TRIM.
         let mx = x0 + st.meter_x;
         let (mt, mb) = (y0 + mg.meter.0, y0 + mg.meter.1);
-        p.rect_filled(Rect::from_min_max(pos2(mx, mt), pos2(mx + 2.0, mb)), 0.0, hex(0x323232));
+        p.rect_filled(Rect::from_min_max(pos2(mx, mt), pos2(mx + 2.0, mb)), 0.0, gy(0x323232));
         let dbv = m.shown_db[0].max(m.shown_db[1]);
         meter_bar(&p, Rect::from_min_max(pos2(mx, mt), pos2(mx + 2.0, mb)), dbv, true);
         app.px.mix[n] = m;
@@ -1019,14 +1020,14 @@ pub(crate) fn mixer4(app: &mut App, ui: &mut Ui, r: Rect) {
         let cx = x0 + st.eq_x;
         let mut m = app.px.mix[n];
         if let Some(ny) = mg.num_y {
-            p.text(pos2(cx, y0 + ny), Align2::CENTER_CENTER, format!("{}", n + 1), lay::arial(14.0), WHITE);
+            p.text(pos2(cx, y0 + ny), Align2::CENTER_CENTER, format!("{}", n + 1), lay::arial(14.0), WHITE.c());
         }
-        if let Some(v) = knob(ui, pos2(cx, y0 + mg.trim_y), ("trim4", n), m.trim, 0.5, WHITE) {
+        if let Some(v) = knob(ui, pos2(cx, y0 + mg.trim_y), ("trim4", n), m.trim, 0.5, WHITE.c()) {
             m.trim = v;
             changed = true;
         }
         let tl = ui.interact(Rect::from_center_size(pos2(cx, y0 + mg.trim_y + mg.label_dy), vec2(36.0, 10.0)), ui.id().with(("triml4", n)), Sense::hover());
-        p.text(pos2(cx, y0 + mg.trim_y + mg.label_dy), Align2::CENTER_CENTER, "TRIM", lay::arial_b(10.0), WHITE);
+        p.text(pos2(cx, y0 + mg.trim_y + mg.label_dy), Align2::CENTER_CENTER, "TRIM", lay::arial_b(10.0), WHITE.c());
         let tdb = crate::mixer::trim_db(m.trim);
         let _ = tl.on_hover_text(if tdb.is_finite() { format!("{tdb:+.1}dB") } else { "-inf dB".to_string() });
         crate::deck::again_hook(app, ui, n as u8, pos2(cx, y0 + 40.0), pos2(cx, y0 + 55.0));
@@ -1035,10 +1036,10 @@ pub(crate) fn mixer4(app: &mut App, ui: &mut Ui, r: Rect) {
         for (i, (name, idx)) in names.iter().enumerate() {
             let ky = mg.eq_y[i];
             let val = if iso { m.stem_iso[*idx] } else { m.eq[*idx] };
-            let col_k = if iso { PART[[3, 1, 0][*idx]].2 } else { WHITE };
+            let col_k = if iso { PART[[3, 1, 0][*idx]].2 } else { WHITE.c() };
             let new = knob(ui, pos2(cx, y0 + ky), ("eq4", n, i), val, 0.5, col_k);
             let lr = ui.interact(Rect::from_center_size(pos2(cx, y0 + ky + mg.label_dy), vec2(40.0, 10.0)), ui.id().with(("eql4", n, i)), Sense::click());
-            p.text(pos2(cx, y0 + ky + mg.label_dy), Align2::CENTER_CENTER, *name, lay::arial_b(if iso { 8.5 } else { 10.0 }), if val < 0.01 { hex(0xE61E1E) } else { WHITE });
+            p.text(pos2(cx, y0 + ky + mg.label_dy), Align2::CENTER_CENTER, *name, lay::arial_b(if iso { 8.5 } else { 10.0 }), if val < 0.01 { hex(0xE61E1E) } else { WHITE.c() });
             let killed = lr.on_hover_text("Click to change the value to [0]").clicked();
             let v = if killed { Some(if val < 0.01 { 0.5 } else { 0.0 }) } else { new };
             if let Some(v) = v {
@@ -1052,8 +1053,8 @@ pub(crate) fn mixer4(app: &mut App, ui: &mut Ui, r: Rect) {
         }
         let cr = Rect::from_center_size(pos2(cx, y0 + mg.cue_y), vec2(32.0, 18.0));
         let cresp = ui.interact(cr, ui.id().with(("cue4", n)), Sense::click());
-        p.rect_filled(cr, 2.0, if m.cue { hex(0xFFA500) } else if cresp.hovered() { lighten(BTN) } else { BTN });
-        p.text(cr.center(), Align2::CENTER_CENTER, "CUE", lay::arial_b(10.0), if m.cue { BG } else { WHITE });
+        p.rect_filled(cr, 2.0, if m.cue { hex(0xFFA500) } else if cresp.hovered() { lighten(BTN.c()) } else { BTN.c() });
+        p.text(cr.center(), Align2::CENTER_CENTER, "CUE", lay::arial_b(10.0), if m.cue { BG.c() } else { WHITE.c() });
         if cresp.on_hover_text(if hp_on { "Headphones CUE" } else { "Headphones CUE.\nNo headphones output is set: choose one in Preferences > Audio > Input/Output (it needs a device with four or more outputs)." }).clicked() {
             m.cue = !m.cue;
             changed = true;
@@ -1073,13 +1074,13 @@ pub(crate) fn mixer4(app: &mut App, ui: &mut Ui, r: Rect) {
         fader_face(&p, cx, ft, fb, hy, fresp.hovered() || fresp.dragged());
         // Level meter: 2 pt wide, left of the knobs.
         let mrect = Rect::from_min_max(pos2(x0 + st.meter_x, y0 + mg.meter.0), pos2(x0 + st.meter_x + 2.0, y0 + mg.meter.1));
-        p.rect_filled(mrect, 0.0, hex(0x323232));
+        p.rect_filled(mrect, 0.0, gy(0x323232));
         meter_bar(&p, mrect, m.shown_db[0].max(m.shown_db[1]), true);
         if stems {
             let sr = Rect::from_center_size(pos2(cx, y0 + mg.stem_y), vec2(32.0, 16.0));
             let sresp = ui.interact(sr, ui.id().with(("stemiso4", n)), Sense::click());
-            p.rect_filled(sr, 2.0, if m.stem_iso_on { BLUE } else if sresp.hovered() { lighten(BTN) } else { BTN });
-            p.text(sr.center(), Align2::CENTER_CENTER, "STEM", caps(8.5), WHITE);
+            p.rect_filled(sr, 2.0, if m.stem_iso_on { BLUE.c() } else if sresp.hovered() { lighten(BTN.c()) } else { BTN.c() });
+            p.text(sr.center(), Align2::CENTER_CENTER, "STEM", caps(8.5), WHITE.c());
             if sresp.on_hover_text("STEM ISO Mode:\nSet to STEM ISO mode when set to on, enabling volume adjustment of each Stem. Set to EQ mode when set to off, enabling frequency band adjustment for HIGH/MID/LOW.").clicked() {
                 m.stem_iso_on = !m.stem_iso_on;
                 changed = true;
@@ -1098,11 +1099,11 @@ pub(crate) fn mixer4(app: &mut App, ui: &mut Ui, r: Rect) {
 /// the level in blue from the handle down, the handle a 24 x 1.5 pt bar.
 fn fader_face(p: &Painter, x: f32, ft: f32, fb: f32, hy: f32, hot: bool) {
     for y in [(ft + fb) / 2.0, fb] {
-        p.rect_filled(Rect::from_center_size(pos2(x, y), vec2(20.0, 1.0)), 0.0, hex(0x323232));
+        p.rect_filled(Rect::from_center_size(pos2(x, y), vec2(20.0, 1.0)), 0.0, gy(0x323232));
     }
-    p.rect_filled(Rect::from_min_max(pos2(x - 0.75, ft), pos2(x + 0.75, fb)), 0.0, hex(0x323232));
+    p.rect_filled(Rect::from_min_max(pos2(x - 0.75, ft), pos2(x + 0.75, fb)), 0.0, gy(0x323232));
     p.rect_filled(Rect::from_min_max(pos2(x - 0.75, hy), pos2(x + 0.75, fb)), 0.0, BLUE);
-    p.rect_filled(Rect::from_center_size(pos2(x, hy - 0.75), vec2(24.0, 1.5)), 0.0, if hot { WHITE } else { hex(0x646464) });
+    p.rect_filled(Rect::from_center_size(pos2(x, hy - 0.75), vec2(24.0, 1.5)), 0.0, if hot { WHITE.c() } else { gy(0x646464) });
 }
 
 /// A level meter bar filling `r` from the bottom (vertical) or the left: -40 dB empty, 0 dB
@@ -1162,20 +1163,20 @@ pub(crate) fn bottom_row(app: &mut App, ui: &mut Ui, r: Rect, cx: f32) {
     p.rect_filled(Rect::from_min_size(hc + vec2(-9.0, 1.5), vec2(3.5, 7.0)), 1.0, WHITE);
     p.rect_filled(Rect::from_min_size(hc + vec2(5.5, 1.5), vec2(3.5, 7.0)), 1.0, WHITE);
     let note = if crate::audio::HP_ACTIVE.load(std::sync::atomic::Ordering::Relaxed) { "Headphones: MIX balances the cued decks (left) and the master (right); LEVEL is the headphones volume." } else { "Headphones.\nNo headphones output is set: choose one in Preferences > Audio > Input/Output (it needs a device with four or more outputs)." };
-    if let Some(v) = knob(ui, pos2(x(491.0), cy), "hpmix", app.px.hp_mix, 0.5, WHITE) {
+    if let Some(v) = knob(ui, pos2(x(491.0), cy), "hpmix", app.px.hp_mix, 0.5, WHITE.c()) {
         app.px.hp_mix = v;
     }
-    p.text(pos2(x(513.5), cy - 0.25), Align2::CENTER_CENTER, "MIX", lay::arial_b(10.0), hex(0x8C8C8C));
+    p.text(pos2(x(513.5), cy - 0.25), Align2::CENTER_CENTER, "MIX", lay::arial_b(10.0), gy(0x8C8C8C));
     // (The dashes rekordbox has before both knobs.)
     for dx in [466.0, 530.0] {
-        p.rect_filled(Rect::from_min_size(pos2(x(dx), cy - 0.5), vec2(8.0, 1.0)), 0.0, hex(0x646464));
+        p.rect_filled(Rect::from_min_size(pos2(x(dx), cy - 0.5), vec2(8.0, 1.0)), 0.0, gy(0x646464));
     }
-    if let Some(v) = knob(ui, pos2(x(554.5), cy), "hplevel", app.px.hp_level, 0.5, WHITE) {
+    if let Some(v) = knob(ui, pos2(x(554.5), cy), "hplevel", app.px.hp_level, 0.5, WHITE.c()) {
         app.px.hp_level = v;
     }
     // (LEVEL's ring is blue up to its pointer.)
-    lay::ring_knob(&p, pos2(x(554.5), cy), 8.5, 3.0, app.px.hp_level, hex(0x323232), BLUE, WHITE);
-    p.text(pos2(x(584.25), cy - 0.25), Align2::CENTER_CENTER, "LEVEL", lay::arial_b(10.0), hex(0x8C8C8C));
+    lay::ring_knob(&p, pos2(x(554.5), cy), 8.5, 3.0, app.px.hp_level, gy(0x323232), BLUE.c(), WHITE.c());
+    p.text(pos2(x(584.25), cy - 0.25), Align2::CENTER_CENTER, "LEVEL", lay::arial_b(10.0), gy(0x8C8C8C));
     let _ = ui.interact(Rect::from_min_max(pos2(x(440.0), r.min.y), pos2(x(600.0), r.max.y)), ui.id().with("hpnote"), Sense::hover()).on_hover_text(note);
 
     // Crossfader assign: the left block puts a deck on side A, the right block on side B;
@@ -1189,8 +1190,8 @@ pub(crate) fn bottom_row(app: &mut App, ui: &mut Ui, r: Rect, cx: f32) {
             let exists = d < app.deck_count() as usize;
             let lit = if exists { app.px.mix[d].assign == side } else { (d % 2 + 1) as u8 == side };
             let resp = ui.interact(br, ui.id().with(("assign", side, d)), Sense::click());
-            p.rect_filled(br, 1.0, if lit { BLUE } else if resp.hovered() && exists { lighten(BTN) } else { BTN });
-            p.text(br.center(), Align2::CENTER_CENTER, format!("{}", d + 1), lay::arial_b(10.0), WHITE);
+            p.rect_filled(br, 1.0, if lit { BLUE.c() } else if resp.hovered() && exists { lighten(BTN.c()) } else { BTN.c() });
+            p.text(br.center(), Align2::CENTER_CENTER, format!("{}", d + 1), lay::arial_b(10.0), WHITE.c());
             if resp.clicked() && exists {
                 app.px.mix[d].assign = if lit { 0 } else { side };
                 changed = true;
@@ -1213,11 +1214,11 @@ pub(crate) fn bottom_row(app: &mut App, ui: &mut Ui, r: Rect, cx: f32) {
         xf = ((pp.x - fl) / (fr - fl)).clamp(0.0, 1.0);
         changed = true;
     }
-    p.rect_filled(Rect::from_min_max(pos2(fl, cy - 0.5), pos2(fr, cy + 0.5)), 0.0, hex(0x323232));
-    p.rect_filled(Rect::from_min_max(pos2(fl, cy - 10.0), pos2(fl + 1.0, cy + 10.0)), 0.0, hex(0x323232));
-    p.rect_filled(Rect::from_min_max(pos2(fr - 1.0, cy - 10.0), pos2(fr, cy + 10.0)), 0.0, hex(0x323232));
+    p.rect_filled(Rect::from_min_max(pos2(fl, cy - 0.5), pos2(fr, cy + 0.5)), 0.0, gy(0x323232));
+    p.rect_filled(Rect::from_min_max(pos2(fl, cy - 10.0), pos2(fl + 1.0, cy + 10.0)), 0.0, gy(0x323232));
+    p.rect_filled(Rect::from_min_max(pos2(fr - 1.0, cy - 10.0), pos2(fr, cy + 10.0)), 0.0, gy(0x323232));
     let hx = fl + xf * (fr - fl);
-    p.rect_filled(Rect::from_center_size(pos2(hx, cy), vec2(2.0, 24.0)), 0.0, if xf_locked { hex(0x646464).gamma_multiply(0.3) } else if resp.hovered() || resp.dragged() { WHITE } else { hex(0x646464) });
+    p.rect_filled(Rect::from_center_size(pos2(hx, cy), vec2(2.0, 24.0)), 0.0, if xf_locked { gy(0x646464).gamma_multiply(0.3) } else if resp.hovered() || resp.dragged() { WHITE.c() } else { gy(0x646464) });
     if changed {
         app.px.crossfader = xf;
         app.poll_decks();

@@ -26,14 +26,16 @@ use crate::ui_player::press_fired;
 use eframe::egui;
 use egui::{pos2, vec2, Align2, Color32, FontId, Painter, Pos2, Rect, Sense, Stroke, Ui};
 
-const PAD_BG: Color32 = hex(0x0F0F0F);
-const PAD_TEXT: Color32 = hex(0xFFFFFF);
-const PAD_OFF: Color32 = hex(0x323232);
+/// Pad face: 0x030000A6 (`HotCuePad::paint`, `BeatJumpPad`) D #0F0F0F L #FFFFFF.
+const PAD_BG: Tc = tc(0x0F0F0F, 0xFFFFFF);
+/// Pad text: 0x030000A4 (`HotCueComp::lookAndFeelChanged`) D #FFFFFF L #000000.
+const PAD_TEXT: Tc = tc(0xFFFFFF, 0x000000);
+const PAD_OFF: Tc = gr(0x323232);
 const PAD_LIT: Color32 = hex(0x1473EB);
-const BAR_TRACK: Color32 = hex(0x323232);
-const BAR_THUMB: Color32 = hex(0x555555);
-const PULL: Color32 = hex(0x282828);
-const GREY: Color32 = hex(0x969696);
+const BAR_TRACK: Tc = gr(0x323232);
+const BAR_THUMB: Tc = gr(0x555555);
+const PULL: Tc = gr(0x282828);
+const GREY: Tc = gr(0x969696);
 /// The scroll bar's strip (`getDefaultScrollbarWidth`).
 const BAR: f32 = 5.0;
 
@@ -115,7 +117,7 @@ struct Look {
 
 impl Look {
     fn pad(enabled: bool, lit: bool) -> Look {
-        Look { fill: PAD_BG, text: if enabled { PAD_TEXT } else { PAD_OFF }, outline: if lit { Some(PAD_LIT) } else { None }, radius: 0.0 }
+        Look { fill: PAD_BG.c(), text: if enabled { PAD_TEXT.c() } else { PAD_OFF.c() }, outline: if lit { Some(PAD_LIT) } else { None }, radius: 0.0 }
     }
 }
 
@@ -135,7 +137,7 @@ fn pad_body(ui: &mut Ui, p: &Painter, r: Rect, clip: Rect, id: egui::Id, look: L
         fill = blend(fill, Color32::WHITE, 0.1);
     }
     if down {
-        fill = blend(BG2, fill, 0.7);
+        fill = blend(BG2.c(), fill, 0.7);
     }
     p.rect_filled(r, look.radius, fill);
     if let Some(c) = look.outline {
@@ -304,15 +306,15 @@ fn pull_down_at(app: &mut App, ui: &mut Ui, g: Geom, n: u8) {
     let p = ui.painter().clone();
     let mode = app.pad_mode();
     let resp = ui.interact(g.pull, ui.id().with("padmode"), Sense::click());
-    p.rect_filled(g.pull, 2.0, if resp.hovered() { blend(PULL, Color32::WHITE, 0.1) } else { PULL });
+    p.rect_filled(g.pull, 2.0, if resp.hovered() { blend(PULL.c(), Color32::WHITE, 0.1) } else { PULL.c() });
     // (rekordbox fits the caption into the button: a long one is drawn narrower, down to 0.7.)
     let avail = g.pull.width() - 7.5 - 17.5;
     let label = mode.label();
-    let wide = p.layout_no_wrap(label.clone(), caps(8.7), WHITE).size().x;
+    let wide = p.layout_no_wrap(label.clone(), caps(8.7), WHITE.c()).size().x;
     let size = 8.7 * (avail / wide.max(1.0)).clamp(0.7, 1.0);
-    p.text(pos2(g.pull.min.x + 7.5, g.pull.center().y), Align2::LEFT_CENTER, label, caps(size), WHITE);
+    p.text(pos2(g.pull.min.x + 7.5, g.pull.center().y), Align2::LEFT_CENTER, label, caps(size), WHITE.c());
     // (`pullDown.svg`: an 8 x 4 chevron, 1 pt, in an 11 x 10 box at the right.)
-    crate::icons_player::chevron_down(&p, pos2(g.pull.max.x - 8.5, g.pull.center().y + 0.5), 1.35, WHITE);
+    crate::icons_player::chevron_down(&p, pos2(g.pull.max.x - 8.5, g.pull.center().y + 0.5), 1.35, WHITE.c());
     let resp = crate::ui_player::tip(resp, app, "Displays the PAD mode.");
     let ctx = app.pad_select_ctx();
     let stems_on = app.prefs.show_stems;
@@ -377,9 +379,9 @@ fn page_buttons(app: &App, ui: &mut Ui, r: Rect, id: &str, can_down: bool, can_u
     for (i, (en, up)) in [(can_down, false), (can_up, true)].into_iter().enumerate() {
         let br = Rect::from_min_size(pos2(r.min.x + i as f32 * 26.0, r.min.y), vec2(24.0, 18.0));
         let resp = ui.interact(br, ui.id().with((id, i)), Sense::click());
-        p.rect_filled(br, 0.0, if resp.hovered() && en { blend(PAD_BG, Color32::WHITE, 0.1) } else { PAD_BG });
+        p.rect_filled(br, 0.0, if resp.hovered() && en { blend(PAD_BG.c(), Color32::WHITE, 0.1) } else { PAD_BG.c() });
         // (`keyUpBtn.svg` / `keyDownBtn.svg`: a 6 x 10 chevron in #646464.)
-        let col = if en { hex(0x646464) } else { hex(0x323232) };
+        let col = if en { gy(0x646464) } else { gy(0x323232) };
         if up {
             crate::icons_player::chevron_right(&p, br.center(), 1.1, col);
         } else {
@@ -432,7 +434,7 @@ fn hot_cue_view(app: &mut App, ui: &mut Ui, g: Geom, n: u8, pad_layout: bool, pi
         let cue = app.deck.cues.iter().find(|c| c.kind == CueKind::Hot && c.slot == slot as i32).cloned();
         let letter = ((b'A' + slot as u8) as char).to_string();
         let lit = pick && key_cue == Some(slot as i32) && cue.is_some();
-        let look = Look { fill: PAD_BG, text: PAD_TEXT, outline: if lit { Some(PAD_LIT) } else { None }, radius: 2.0 };
+        let look = Look { fill: PAD_BG.c(), text: PAD_TEXT.c(), outline: if lit { Some(PAD_LIT) } else { None }, radius: 2.0 };
         let resp = pad_body(ui, &p, pr, sc.view, ui.id().with(("hotpad", slot)), look, loaded);
         let cy = pr.center().y;
         let mut over_delete = false;
@@ -450,10 +452,10 @@ fn hot_cue_view(app: &mut App, ui: &mut Ui, g: Geom, n: u8, pad_layout: bool, pi
                 p.rect_filled(chip, 0.0, hotcue_color(c.color));
                 p.text(chip.center(), Align2::CENTER_CENTER, &letter, arial(ui, 10.5), Color32::BLACK);
                 let tp = p.with_clip_rect(Rect::from_min_max(pr.min, pos2(pr.max.x - 26.0, pr.max.y)).intersect(sc.view));
-                let tr = tp.text(pos2(pr.min.x + 31.0, cy), Align2::LEFT_CENTER, fmt_time(c.start, false), FontId::proportional(10.7), hex(0xF4F4F4));
+                let tr = tp.text(pos2(pr.min.x + 31.0, cy), Align2::LEFT_CENTER, fmt_time(c.start, false), FontId::proportional(10.7), gy(0xF4F4F4));
                 let mut x = tr.max.x.max(pr.min.x + 60.0) + 7.0;
                 if !c.comment.is_empty() {
-                    let cr = tp.text(pos2(x, cy), Align2::LEFT_CENTER, &c.comment, FontId::proportional(10.7), hex(0xF4F4F4));
+                    let cr = tp.text(pos2(x, cy), Align2::LEFT_CENTER, &c.comment, FontId::proportional(10.7), gy(0xF4F4F4));
                     x = cr.max.x + 4.0;
                 }
                 if c.end.is_some() {
@@ -464,7 +466,7 @@ fn hot_cue_view(app: &mut App, ui: &mut Ui, g: Geom, n: u8, pad_layout: bool, pi
                     let dr = Rect::from_min_size(pos2(pr.max.x - 24.0, cy - 7.0), vec2(14.0, 14.0));
                     let dresp = ui.interact(dr.intersect(sc.view), ui.id().with(("hotdel", slot)), Sense::click());
                     over_delete = dresp.hovered() || dresp.is_pointer_button_down_on();
-                    crate::icons_player::cross(&p, dr.center(), 8.0, 1.0, if dresp.hovered() { WHITE } else { GREY });
+                    crate::icons_player::cross(&p, dr.center(), 8.0, 1.0, if dresp.hovered() { WHITE.c() } else { GREY.c() });
                     if dresp.on_hover_text("Clear a Hot Cue.").clicked() {
                         app.delete_cue(c.id);
                         continue;
@@ -474,7 +476,7 @@ fn hot_cue_view(app: &mut App, ui: &mut Ui, g: Geom, n: u8, pad_layout: bool, pi
             None => {
                 // An empty pad: its letter in #646464 where the chip would be.
                 let at = if pad_layout { pr.center() } else { pos2(pr.min.x + 15.5, cy) };
-                p.text(at, Align2::CENTER_CENTER, &letter, font.clone(), if loaded { hex(0x646464) } else { PAD_OFF });
+                p.text(at, Align2::CENTER_CENTER, &letter, font.clone(), if loaded { gy(0x646464) } else { PAD_OFF.c() });
             }
         }
         if press_fired(ui, &resp) && loaded && !over_delete {
@@ -514,7 +516,7 @@ fn jump_cell(app: &mut App, ui: &mut Ui, p: &Painter, r: Rect, clip: Rect, n: u8
         let held = resp.is_pointer_button_down_on() && loaded;
         // (`beatjump_*_a.svg` red, `_b` orange while a loop runs, `_on` blue while pressed.)
         let col = if !loaded {
-            PAD_OFF
+            PAD_OFF.c()
         } else if held || down_now == Some(id) {
             hex(0x0178D7)
         } else if looping {
@@ -533,11 +535,11 @@ fn jump_cell(app: &mut App, ui: &mut Ui, p: &Painter, r: Rect, clip: Rect, n: u8
     }
     let font = arial(ui, 12.0);
     let label = JUMP_LABELS[cell.min(11)];
-    let tw = p.layout_no_wrap(label.to_string(), font.clone(), PAD_TEXT).size().x + 2.0;
+    let tw = p.layout_no_wrap(label.to_string(), font.clone(), PAD_TEXT.c()).size().x + 2.0;
     let lh = if pad_layout { 16.0 } else { 10.0 };
     let lr = Rect::from_center_size(pos2((r.center().x).round(), r.center().y), vec2(tw + if pad_layout { 4.0 } else { 0.0 }, lh));
     p.rect_filled(lr, 0.0, PAD_BG);
-    p.text(lr.center(), Align2::CENTER_CENTER, label, font, if loaded { PAD_TEXT } else { PAD_OFF });
+    p.text(lr.center(), Align2::CENTER_CENTER, label, font, if loaded { PAD_TEXT.c() } else { PAD_OFF.c() });
 }
 
 fn beat_jump_view(app: &mut App, ui: &mut Ui, g: Geom, n: u8, pad_layout: bool) {
@@ -642,7 +644,7 @@ fn key_view(app: &mut App, ui: &mut Ui, g: Geom, n: u8, pad_layout: bool, keyboa
         let mut look = Look::pad(loaded, lit);
         // (The 0 pad keeps a #4B4B4B outline while it is not the key in use.)
         if key == 0 && !lit {
-            look.outline = Some(hex(0x4B4B4B));
+            look.outline = Some(gy(0x4B4B4B));
         }
         look
     };
@@ -725,7 +727,7 @@ fn keyboard_controls(app: &mut App, ui: &mut Ui, g: Geom, n: u8) {
     let edit = app.pads.deck[ni].key_edit;
     let resp = ui.interact(er, ui.id().with("kbedit"), Sense::click());
     // (`settingBtn.svg` / `settingOnBtn.svg`: a cog, white, or #007DE1 while editing.)
-    let col = if edit { hex(0x007DE1) } else { WHITE };
+    let col = if edit { hex(0x007DE1) } else { WHITE.c() };
     p.circle_stroke(er.center(), 4.2, Stroke::new(2.2_f32, col));
     for k in 0..8 {
         let a = k as f32 * std::f32::consts::TAU / 8.0;
@@ -738,10 +740,10 @@ fn keyboard_controls(app: &mut App, ui: &mut Ui, g: Geom, n: u8) {
     let kr = g.beside_pull(114.0, 35.0);
     let key_cue = app.pads.deck[ni].key_cue.filter(|s| app.deck.cues.iter().any(|c| c.kind == CueKind::Hot && c.slot == *s));
     let resp = ui.interact(kr, ui.id().with("kbcue"), Sense::click());
-    p.rect_filled(kr, 2.0, if resp.hovered() { blend(PULL, Color32::WHITE, 0.1) } else { PULL });
+    p.rect_filled(kr, 2.0, if resp.hovered() { blend(PULL.c(), Color32::WHITE, 0.1) } else { PULL.c() });
     let text = key_cue.map(|s| ((b'A' + s as u8) as char).to_string()).unwrap_or_else(|| "---".into());
-    p.text(pos2(kr.min.x + 5.0, kr.center().y), Align2::LEFT_CENTER, text, caps(10.0), WHITE);
-    crate::icons_player::chevron_down(&p, pos2(kr.max.x - 8.0, kr.center().y + 0.5), 0.8, WHITE);
+    p.text(pos2(kr.min.x + 5.0, kr.center().y), Align2::LEFT_CENTER, text, caps(10.0), WHITE.c());
+    crate::icons_player::chevron_down(&p, pos2(kr.max.x - 8.0, kr.center().y + 0.5), 0.8, WHITE.c());
     let resp = crate::ui_player::tip(resp, app, "Select a Hot Cue used in a KEYBOARD function.\nIf no Hot Cues are displayed, click a KEYBOARD Edit button to set a Hot Cue.");
     let slots: Vec<i32> = {
         let mut v: Vec<i32> = app.deck.cues.iter().filter(|c| c.kind == CueKind::Hot && (0..16).contains(&c.slot)).map(|c| c.slot).collect();
@@ -785,7 +787,7 @@ fn slicer_view(app: &mut App, ui: &mut Ui, g: Geom, n: u8, pad_layout: bool) {
         let held = app.pads.deck[ni].slicer.held.contains(&(i as u8));
         let mut look = Look::pad(active, now == Some(i));
         if held {
-            look.fill = blend(BG2, PAD_BG, 0.7);
+            look.fill = blend(BG2.c(), PAD_BG.c(), 0.7);
         }
         let resp = pad_body(ui, &p, r, g.area, ui.id().with(("slpad", i)), look, active);
         pad_text(&p, r, &format!("{}", i + 1), font.clone(), look.text);
@@ -813,7 +815,7 @@ fn slicer_view(app: &mut App, ui: &mut Ui, g: Geom, n: u8, pad_layout: bool) {
     let lr = at(0.0, 24.0);
     let resp = ui.interact(lr, ui.id().with("slloop"), Sense::click());
     // (`Loop_2DeckHorizontal.svg`: a loop arrow, #969696, #007DE1 when on.)
-    let lc = if loop_mode { hex(0x007DE1) } else { GREY };
+    let lc = if loop_mode { hex(0x007DE1) } else { GREY.c() };
     let body = Rect::from_center_size(lr.center() + vec2(1.0, 0.0), vec2(11.0, 7.0));
     cp.rect_stroke(body, 2.5, Stroke::new(1.8_f32, lc), egui::StrokeKind::Middle);
     cp.rect_filled(Rect::from_center_size(pos2(body.min.x, body.center().y + 0.5), vec2(4.0, 4.0)), 0.0, BG2);
@@ -825,7 +827,7 @@ fn slicer_view(app: &mut App, ui: &mut Ui, g: Geom, n: u8, pad_layout: bool) {
         let br = at(x, 16.0);
         let resp = ui.interact(br, ui.id().with(("slshift", fwd)), Sense::click());
         // (`ShiftL_2DeckHorizontal.svg`: a 6 x 8 triangle, #969696.)
-        triangle(&cp, br.center(), 6.0, 8.0, !fwd, if resp.hovered() { WHITE } else { GREY });
+        triangle(&cp, br.center(), 6.0, 8.0, !fwd, if resp.hovered() { WHITE.c() } else { GREY.c() });
         if crate::ui_player::tip(resp, app, tip).clicked() {
             app.slicer_shift(fwd);
         }
@@ -846,14 +848,14 @@ fn slicer_view(app: &mut App, ui: &mut Ui, g: Geom, n: u8, pad_layout: bool) {
 fn selector(app: &App, ui: &mut Ui, r: Rect, id: &str, value: &str, can_down: bool, can_up: bool, tips: [&str; 2]) -> Option<bool> {
     let p = ui.painter().clone();
     let r = Rect::from_min_size(pos2(r.min.x, r.min.y + 1.0), vec2(r.width(), 16.0));
-    p.rect_filled(r, 0.0, hex(0x282828));
-    p.text(r.center(), Align2::CENTER_CENTER, value, arial(ui, 12.0), GREY);
+    p.rect_filled(r, 0.0, gy(0x282828));
+    p.text(r.center(), Align2::CENTER_CENTER, value, arial(ui, 12.0), GREY.c());
     let mut out = None;
     for (i, (en, up)) in [(can_down, false), (can_up, true)].into_iter().enumerate() {
         let br = Rect::from_min_size(pos2(if up { r.max.x - 21.0 } else { r.min.x }, r.min.y), vec2(21.0, 16.0));
         let resp = ui.interact(br, ui.id().with((id, i)), Sense::click());
         // (`LengthRoll_ArrowL.svg`: a 5 x 8 chevron, #969696.)
-        let col = if !en { hex(0x424242) } else if resp.hovered() { WHITE } else { GREY };
+        let col = if !en { gy(0x424242) } else if resp.hovered() { WHITE.c() } else { GREY.c() };
         if up {
             crate::icons_player::chevron_right(&p, br.center(), 0.9, col);
         } else {
@@ -972,7 +974,7 @@ fn censor_view(app: &mut App, ui: &mut Ui, g: Geom, n: u8, pad_layout: bool) {
         let br = at(x, 30.0);
         let resp = ui.interact(br, ui.id().with(("accall", next)), Sense::click());
         // (`p10651_shiftl.svg`: a 6 x 8 triangle in a 30 x 16 box, #969696.)
-        triangle(&cp, br.center(), 6.0, 8.0, !next, if resp.hovered() { WHITE } else { GREY });
+        triangle(&cp, br.center(), 6.0, 8.0, !next, if resp.hovered() { WHITE.c() } else { GREY.c() });
         if resp.clicked() {
             app.censor_call(next);
         }
@@ -980,7 +982,7 @@ fn censor_view(app: &mut App, ui: &mut Ui, g: Geom, n: u8, pad_layout: bool) {
     for (x, right) in [(70.0, false), (95.0, true)] {
         let br = at(x, 24.0);
         let resp = ui.interact(br, ui.id().with(("acbeat", right)), Sense::click());
-        let col = if resp.hovered() { WHITE } else { GREY };
+        let col = if resp.hovered() { WHITE.c() } else { GREY.c() };
         if right {
             crate::icons_player::chevron_right(&cp, br.center(), 0.9, col);
         } else {
@@ -1075,15 +1077,15 @@ fn user_view(app: &mut App, ui: &mut Ui, g: Geom, n: u8, u: usize) {
                         if let Some(k) = item.key {
                             text.push_str(&format!("  KEY {k}"));
                         }
-                        p.text(pos2(r.min.x + 31.0, r.center().y), Align2::LEFT_CENTER, text, FontId::proportional(10.7), hex(0xF4F4F4));
+                        p.text(pos2(r.min.x + 31.0, r.center().y), Align2::LEFT_CENTER, text, FontId::proportional(10.7), gy(0xF4F4F4));
                     }
                     None => {
-                        p.text(pos2(r.min.x + 15.5, r.center().y), Align2::CENTER_CENTER, &letter, font.clone(), if loaded { hex(0x646464) } else { PAD_OFF });
+                        p.text(pos2(r.min.x + 15.5, r.center().y), Align2::CENTER_CENTER, &letter, font.clone(), if loaded { gy(0x646464) } else { PAD_OFF.c() });
                     }
                 }
             }
             UserAct::BeatJump(b, fwd) => {
-                let col = if loaded { hex(0xE62828) } else { PAD_OFF };
+                let col = if loaded { hex(0xE62828) } else { PAD_OFF.c() };
                 triangle(&p, pos2(r.center().x + if *fwd { 22.0 } else { -22.0 }, r.center().y), 6.4, 7.2, !*fwd, col);
                 pad_text(&p, r, &b.map(crate::player_ext::beats_text).unwrap_or_else(|| "FINE".into()), font.clone(), look.text);
             }
@@ -1132,7 +1134,10 @@ fn pad_editor(app: &mut App, ui: &mut Ui) {
     let text_of = |f: &str| modes.iter().find(|m| m.function == f).map(|m| m.text.clone()).unwrap_or_else(|| f.to_string());
     let mut open = true;
     let mut changed = false;
-    egui::Window::new("PAD EDITOR").id(egui::Id::new("pad_editor")).open(&mut open).resizable(false).collapsible(false).frame(egui::Frame::window(&ui.ctx().style()).inner_margin(0.0).fill(hex(eg::BG))).show(ui.ctx(), |ui| {
+    // (The PAD EDITOR window keeps its fixed dark colours, so it is drawn Dark in Light: its
+    // colours in rekordbox's Light appearance were not traced.)
+    let _pe_dark = crate::theme::dark_scope(true);
+    egui::Window::new(egui::RichText::new("PAD EDITOR").color(TEXT.0)).id(egui::Id::new("pad_editor")).open(&mut open).resizable(false).collapsible(false).frame(egui::Frame::window(&ui.ctx().style()).inner_margin(0.0).fill(hex(eg::BG))).show(ui.ctx(), |ui| {
         let (rect, _) = ui.allocate_exact_size(vec2(eg::W, eg::H), Sense::hover());
         let o = rect.min;
         let at = |g: (f32, f32, f32, f32)| Rect::from_min_size(o + vec2(g.0, g.1), vec2(g.2, g.3));
@@ -1146,7 +1151,7 @@ fn pad_editor(app: &mut App, ui: &mut Ui) {
             let resp = ui.interact(tr, ui.id().with(("petab", k)), Sense::click());
             let front = k == assign;
             p.rect_filled(tr, 0.0, if front { hex(eg::BG) } else { hex(eg::FILL) });
-            p.text(tr.center(), Align2::CENTER_CENTER, *name, arial(ui, eg::TAB_H * 0.45), if front { WHITE } else { hex(eg::TEXT) });
+            p.text(tr.center(), Align2::CENTER_CENTER, *name, arial(ui, eg::TAB_H * 0.45), if front { WHITE.c() } else { hex(eg::TEXT) });
             if resp.clicked() && !front {
                 app.prefs.pads.editor_assign = k as u8;
                 changed = true;
@@ -1201,7 +1206,7 @@ fn pad_editor(app: &mut App, ui: &mut Ui) {
         let user = user_of(&slot_fn);
         let tresp = ui.interact(tr, ui.id().with("petemplates"), Sense::click());
         p.rect_filled(tr, 2.0, hex(eg::FILL));
-        let tcol = if user.is_some() { hex(eg::TEXT) } else { hex(0x646464) };
+        let tcol = if user.is_some() { hex(eg::TEXT) } else { gy(0x646464) };
         p.text(tr.min + vec2(10.0, tr.height() / 2.0), Align2::LEFT_CENTER, "TEMPLATES", mode_font.clone(), tcol);
         triangle_down(&p, tr.min + vec2(127.0, 15.0), 10.0, 4.0, tcol);
         if tresp.clicked() && user.is_some() {
@@ -1238,7 +1243,7 @@ fn pad_editor(app: &mut App, ui: &mut Ui) {
             let name = functions.iter().find(|f| f.0 == it.function).map(|f| f.1.to_string()).unwrap_or_else(|| text_of(&it.function));
             let pc = p.with_clip_rect(pr);
             pc.text(pr.min + vec2(10.0, 14.5), Align2::LEFT_CENTER, &name, bold.clone(), hex(eg::TEXT));
-            pc.text(pr.min + vec2(10.0, 45.0), Align2::LEFT_CENTER, &it.value, arial(ui, 12.0), WHITE);
+            pc.text(pr.min + vec2(10.0, 45.0), Align2::LEFT_CENTER, &it.value, arial(ui, 12.0), WHITE.c());
             if let Some(u) = user {
                 let ar = Rect::from_min_size(pr.min + vec2(122.0, 6.0), vec2(10.0, 16.0));
                 triangle_down(&p, ar.center(), 7.0, 4.0, hex(eg::TEXT));
@@ -1324,18 +1329,18 @@ fn memory_view(app: &mut App, ui: &mut Ui, g: Geom, n: u8) {
             p.rect_filled(r, 2.0, PAD_BG);
             continue;
         };
-        let resp = pad_body(ui, &p, r, sc.view, ui.id().with(("mempad", c.id)), Look { fill: PAD_BG, text: PAD_TEXT, outline: None, radius: 2.0 }, true);
+        let resp = pad_body(ui, &p, r, sc.view, ui.id().with(("mempad", c.id)), Look { fill: PAD_BG.c(), text: PAD_TEXT.c(), outline: None, radius: 2.0 }, true);
         let cy = r.center().y;
         // A triangle in the cue's colour, the time, the comment.
         let col = if c.color == 0 { hex(0xE61E1E) } else { label_color(c.color) };
         triangle(&p, pos2(r.min.x + 14.0, cy), 7.0, 8.0, false, if c.end.is_some() { LOOP } else { col });
         let ms = (c.start * 1000.0).round() as u64;
         let tp = p.with_clip_rect(Rect::from_min_max(r.min, pos2(r.max.x - 26.0, r.max.y)).intersect(sc.view));
-        let tr = tp.text(pos2(r.min.x + 26.0, cy), Align2::LEFT_CENTER, format!("{:02}:{:02}:{:03}", ms / 60000, (ms / 1000) % 60, ms % 1000), FontId::proportional(10.7), hex(0xF4F4F4));
-        tp.text(pos2(tr.max.x + 8.0, cy), Align2::LEFT_CENTER, &c.comment, FontId::proportional(10.7), hex(0xF4F4F4));
+        let tr = tp.text(pos2(r.min.x + 26.0, cy), Align2::LEFT_CENTER, format!("{:02}:{:02}:{:03}", ms / 60000, (ms / 1000) % 60, ms % 1000), FontId::proportional(10.7), gy(0xF4F4F4));
+        tp.text(pos2(tr.max.x + 8.0, cy), Align2::LEFT_CENTER, &c.comment, FontId::proportional(10.7), gy(0xF4F4F4));
         let dr = Rect::from_min_size(pos2(r.max.x - 24.0, cy - 7.0), vec2(14.0, 14.0));
         let dresp = ui.interact(dr.intersect(sc.view), ui.id().with(("memdel", c.id)), Sense::click());
-        crate::icons_player::cross(&p, dr.center(), 8.0, 1.0, if dresp.hovered() { WHITE } else { GREY });
+        crate::icons_player::cross(&p, dr.center(), 8.0, 1.0, if dresp.hovered() { WHITE.c() } else { GREY.c() });
         if dresp.clicked() {
             app.delete_cue(c.id);
             continue;

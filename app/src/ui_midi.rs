@@ -33,12 +33,12 @@ const HEAD: f32 = 28.0;
 /// Encoder Mode cell's list (" ", "7F/01", "41/3F") is therefore never seen.
 const COLS: [(&str, f32); 6] = [("Function", 200.0), ("Deck", 100.0), ("MIDI IN", 100.0), ("Type", 150.0), ("MIDI OUT", 100.0), ("Comment", 200.0)];
 
-const TEXT: Color32 = hex(0xEDEDED);
-const BTN_BG: Color32 = hex(0x0A0A0A);
-const BTN_ON: Color32 = hex(0x808080);
-const BOX_BG: Color32 = hex(0x202020);
-const MENU_HI: Color32 = hex(0x555555);
-const TAB: Color32 = hex(0x555555);
+const TEXT: Tc = gr(0xEDEDED);
+const BTN_BG: Tc = gr(0x0A0A0A);
+const BTN_ON: Tc = gr(0x808080);
+const BOX_BG: Tc = gr(0x202020);
+const MENU_HI: Tc = gr(0x555555);
+const TAB: Tc = gr(0x555555);
 
 /// A font of JUCE height `h` px: Arial's point size is 0.895 of its height. (Helvetica
 /// stands in for Arial regular, which recordbox does not load.)
@@ -147,7 +147,7 @@ pub fn header_button(app: &mut App, ui: &mut Ui, r: Rect) {
     let resp = ui.interact(r.expand2(vec2(2.0, 4.0)), ui.id().with("midi_button"), if enabled { Sense::click() } else { Sense::hover() });
     // Arial Bold, JUCE height 12. Disabled: #363636 as measured on the reference
     // (performance/01); enabled: the bar's white (not captured).
-    let col = if !enabled { hex(0x363636) } else if app.midi.win.open { BLUE } else if resp.hovered() { WHITE } else { hex(0xE6E6E6) };
+    let col = if !enabled { gy(0x363636) } else if app.midi.win.open { BLUE.c() } else if resp.hovered() { WHITE.c() } else { gy(0xE6E6E6) };
     ui.painter().text(r.center() + vec2(0.0, 0.5), Align2::CENTER_CENTER, "MIDI", caps(10.7), col);
     app.midi.win.at.insert("MIDI".into(), r.center());
     let base = "MIDI LEARN :\nSelect a function, enable LEARN, then move a control on the selected device. LEARN pauses its current mappings until you turn it off.";
@@ -501,7 +501,7 @@ fn sort_rows(w: &mut Win, col: usize) {
 /// its neighbour), 1 pt outline, text at 0.6 of the height.
 fn text_button(ui: &mut Ui, r: Rect, id: &str, label: &str, on: bool, enabled: bool, join: (bool, bool)) -> egui::Response {
     let resp = ui.interact(r, ui.id().with(id), if enabled { Sense::click() } else { Sense::hover() });
-    let mut bg = if on { BTN_ON } else { BTN_BG };
+    let mut bg = if on { BTN_ON.c() } else { BTN_BG.c() };
     if enabled && resp.is_pointer_button_down_on() {
         bg = mix(bg, 0.2);
     } else if enabled && resp.hovered() {
@@ -533,7 +533,7 @@ fn combo_box(ui: &mut Ui, r: Rect, id: impl std::hash::Hash, text: &str, dim: bo
     p.rect_filled(r, 3.0, BOX_BG);
     p.rect_stroke(r.shrink(0.5), 3.0, Stroke::new(1.0_f32, Color32::BLACK), egui::StrokeKind::Middle);
     let (ax, cy) = (r.max.x - 30.0, r.center().y);
-    let col = Color32::WHITE.gamma_multiply(if enabled { 0.9 } else { 0.2 });
+    let col = WHITE.c().gamma_multiply(if enabled { 0.9 } else { 0.2 });
     p.add(egui::Shape::line(vec![pos2(ax + 3.0, cy - 2.0), pos2(ax + 10.0, cy + 3.0), pos2(ax + 17.0, cy - 2.0)], Stroke::new(2.0_f32, col)));
     let tc = TEXT.gamma_multiply(if dim || !enabled { 0.5 } else { 1.0 });
     p.with_clip_rect(Rect::from_min_max(r.min, pos2(r.max.x - 30.0, r.max.y))).text(pos2(r.min.x + 6.0, cy), Align2::LEFT_CENTER, text, jf((r.height() * 0.85).min(15.0)), tc);
@@ -564,9 +564,9 @@ fn menu_popup(ui: &mut Ui, resp: &egui::Response, id: egui::Id, width: f32, item
 
 fn menu_style(ui: &mut Ui) {
     let v = ui.visuals_mut();
-    v.window_fill = BOX_BG;
-    v.panel_fill = BOX_BG;
-    v.window_stroke = Stroke::new(1.0_f32, hex(0x101010));
+    v.window_fill = BOX_BG.c();
+    v.panel_fill = BOX_BG.c();
+    v.window_stroke = Stroke::new(1.0_f32, gy(0x101010));
     v.popup_shadow = egui::epaint::Shadow::NONE;
     v.menu_corner_radius = egui::CornerRadius::same(0);
 }
@@ -576,7 +576,7 @@ fn menu_item(ui: &mut Ui, label: &str, sub: bool) -> egui::Response {
     if resp.hovered() {
         ui.painter().rect_filled(r, 0.0, MENU_HI);
     }
-    ui.painter().text(pos2(r.min.x + 10.0, r.center().y), Align2::LEFT_CENTER, label, jf(15.0), TEXT);
+    ui.painter().text(pos2(r.min.x + 10.0, r.center().y), Align2::LEFT_CENTER, label, jf(15.0), TEXT.c());
     if sub {
         let c = pos2(r.max.x - 10.0, r.center().y);
         ui.painter().add(egui::Shape::convex_polygon(vec![c + vec2(-3.0, -4.0), c + vec2(3.0, 0.0), c + vec2(-3.0, 4.0)], TEXT, Stroke::NONE));
@@ -589,6 +589,9 @@ pub fn window(app: &mut App, ctx: &egui::Context) {
     if !app.midi.win.open {
         return;
     }
+    // rekordbox's MIDI LEARN window has a LookAndFeel of its own (`MidiLearnLookAndFeel`, JUCE
+    // V3 colours; of the theme table it sets only 0x01002800), so it is drawn as in Dark.
+    let _midi_dark = crate::theme::dark_scope(true);
     if app.midi.win.rows.len() != TABS.len() {
         rebuild_rows(&mut app.midi);
     }
@@ -603,9 +606,9 @@ pub fn window(app: &mut App, ctx: &egui::Context) {
         let p = ui.painter().clone();
         // The title bar (a native one in rekordbox): the close button and the title.
         let title = Rect::from_min_size(outer.min, vec2(W, TITLE_H));
-        p.rect_filled(outer.expand(1.0), 6.0, hex(0x3A3A3A));
-        p.rect_filled(title, egui::CornerRadius { nw: 6, ne: 6, sw: 0, se: 0 }, hex(0x2A2A2C));
-        p.text(title.center(), Align2::CENTER_CENTER, "MIDI setting", bold(13.0), hex(0xD0D0D0));
+        p.rect_filled(outer.expand(1.0), 6.0, gy(0x3A3A3A));
+        p.rect_filled(title, egui::CornerRadius { nw: 6, ne: 6, sw: 0, se: 0 }, gy(0x2A2A2C));
+        p.text(title.center(), Align2::CENTER_CENTER, "MIDI setting", bold(13.0), gy(0xD0D0D0));
         let drag = ui.interact(title, ui.id().with("title"), Sense::drag());
         if drag.dragged() {
             if let Some(pos) = app.midi.win.pos.as_mut() {
@@ -625,7 +628,7 @@ pub fn window(app: &mut App, ctx: &egui::Context) {
             close_now = true;
         }
         let body = Rect::from_min_size(origin, vec2(W, H));
-        p.rect_filled(body, 0.0, Color32::BLACK);
+        p.rect_filled(body, 0.0, gy(0x000000));
         let mut child = ui.new_child(egui::UiBuilder::new().max_rect(body).id_salt("midi_body"));
         child.set_clip_rect(body);
         if modal {
@@ -650,7 +653,7 @@ fn content(app: &mut App, ui: &mut Ui, o: Pos2, live: bool) {
     let tip = move |r: egui::Response, t: &str| if tips { r.on_hover_text(t) } else { r };
 
     // ---- the device
-    p.text(o + vec2(32.0 + 5.0, 24.0), Align2::LEFT_CENTER, "Connected device", jf(15.0), Color32::WHITE);
+    p.text(o + vec2(32.0 + 5.0, 24.0), Align2::LEFT_CENTER, "Connected device", jf(15.0), WHITE.c());
     let names = app.midi.devices.clone();
     let cur = app.midi.win.device.clone();
     let shown = if !cur.is_empty() { cur.clone() } else if names.is_empty() { "(no choices)".to_string() } else { "Please Select".to_string() };
@@ -704,7 +707,7 @@ fn content(app: &mut App, ui: &mut Ui, o: Pos2, live: bool) {
     let mut tx = o.x + 8.0;
     for ti in &tabs {
         let name = TABS[*ti].1;
-        let wd = (ui.painter().layout_no_wrap(name.to_string(), jf(18.0), Color32::WHITE).size().x - 2.0).clamp(60.0, 240.0).round();
+        let wd = (ui.painter().layout_no_wrap(name.to_string(), jf(18.0), WHITE.c()).size().x - 2.0).clamp(60.0, 240.0).round();
         let r = Rect::from_min_size(pos2(tx, o.y + 72.0), vec2(wd, 30.0));
         let resp = ui.interact(r, ui.id().with(("tab", *ti)), Sense::click());
         let front = app.midi.win.tab == *ti;
@@ -713,7 +716,7 @@ fn content(app: &mut App, ui: &mut Ui, o: Pos2, live: bool) {
         } else {
             // LookAndFeel_V3: lighter at the bottom, darker at the top.
             let mut m = egui::Mesh::default();
-            let (top, bot) = (hex(0x4D4D4D), hex(0x717171));
+            let (top, bot) = (gy(0x4D4D4D), gy(0x717171));
             m.colored_vertex(r.left_top(), top);
             m.colored_vertex(r.right_top(), top);
             m.colored_vertex(r.right_bottom(), bot);
@@ -722,7 +725,7 @@ fn content(app: &mut App, ui: &mut Ui, o: Pos2, live: bool) {
             m.add_triangle(0, 2, 3);
             p.add(egui::Shape::mesh(m));
         }
-        p.text(r.center(), Align2::CENTER_CENTER, name, jf(15.0), Color32::WHITE.gamma_multiply(if resp.hovered() { 1.0 } else { 0.8 }));
+        p.text(r.center(), Align2::CENTER_CENTER, name, jf(15.0), WHITE.c().gamma_multiply(if resp.hovered() { 1.0 } else { 0.8 }));
         app.midi.win.at.insert(format!("tab:{name}"), r.center());
         if resp.clicked() {
             app.midi.win.tab = *ti;
@@ -734,7 +737,7 @@ fn content(app: &mut App, ui: &mut Ui, o: Pos2, live: bool) {
     let frame = at(8.0, 102.0, W - 18.0, H - 117.0 - 30.0);
     p.rect_filled(frame, 0.0, hex(0x8E989B));
     let tr = frame.shrink(1.0);
-    p.rect_filled(tr, 0.0, hex(0x1B1B1E));
+    p.rect_filled(tr, 0.0, gy(0x1B1B1E));
     table(app, ui, tr, live && can_edit);
 
     // ---- the buttons along the bottom
@@ -843,7 +846,7 @@ fn table(app: &mut App, ui: &mut Ui, tr: Rect, live: bool) {
     let p = ui.painter().clone();
     // The header: #242428, 1 pt separators over its lower 18 pt, text #C0C0C0 at 13.
     let head = Rect::from_min_size(tr.min, vec2(tr.width(), HEAD));
-    p.rect_filled(head, 0.0, hex(0x242428));
+    p.rect_filled(head, 0.0, gy(0x242428));
     let mut x = tr.min.x;
     let mut xs = [0.0f32; 7];
     let mut ws = app.midi.win.widths.unwrap_or(COLS.map(|c| c.1));
@@ -852,13 +855,13 @@ fn table(app: &mut App, ui: &mut Ui, tr: Rect, live: bool) {
         xs[i] = x;
         let hr = Rect::from_min_size(pos2(x, head.min.y), vec2(*w, HEAD));
         let resp = ui.interact(hr, ui.id().with(("head", i)), if live { Sense::click() } else { Sense::hover() });
-        p.rect_filled(Rect::from_min_size(pos2(x + w - 1.0, head.max.y - 18.0), vec2(1.0, 18.0)), 0.0, hex(0x404042));
-        p.with_clip_rect(hr).text(pos2(x + 4.0, head.center().y), Align2::LEFT_CENTER, *name, jf(13.0), hex(0xC0C0C0));
+        p.rect_filled(Rect::from_min_size(pos2(x + w - 1.0, head.max.y - 18.0), vec2(1.0, 18.0)), 0.0, gy(0x404042));
+        p.with_clip_rect(hr).text(pos2(x + 4.0, head.center().y), Align2::LEFT_CENTER, *name, jf(13.0), gy(0xC0C0C0));
         if let Some((c, asc)) = app.midi.win.sort {
             if c == i {
                 let c0 = pos2(x + w - 12.0, head.center().y);
                 let d = if asc { -1.0 } else { 1.0 };
-                p.add(egui::Shape::convex_polygon(vec![c0 + vec2(-4.0, -2.5 * d), c0 + vec2(4.0, -2.5 * d), c0 + vec2(0.0, 2.5 * d)], hex(0xC0C0C0), Stroke::NONE));
+                p.add(egui::Shape::convex_polygon(vec![c0 + vec2(-4.0, -2.5 * d), c0 + vec2(4.0, -2.5 * d), c0 + vec2(0.0, 2.5 * d)], gy(0xC0C0C0), Stroke::NONE));
             }
         }
         if resp.clicked() {
@@ -890,10 +893,10 @@ fn table(app: &mut App, ui: &mut Ui, tr: Rect, live: bool) {
         let s = child.style_mut();
         s.spacing.scroll.bar_width = 8.0;
         s.spacing.scroll.floating = false;
-        s.visuals.extreme_bg_color = hex(0x1B1B1B);
-        s.visuals.widgets.inactive.bg_fill = hex(0x878787);
-        s.visuals.widgets.hovered.bg_fill = hex(0x878787);
-        s.visuals.widgets.active.bg_fill = hex(0x878787);
+        s.visuals.extreme_bg_color = gy(0x1B1B1B);
+        s.visuals.widgets.inactive.bg_fill = gy(0x878787);
+        s.visuals.widgets.hovered.bg_fill = gy(0x878787);
+        s.visuals.widgets.active.bg_fill = gy(0x878787);
     }
     let mut actions: Vec<(usize, RowAct)> = vec![];
     egui::ScrollArea::vertical().auto_shrink([false, false]).show_rows(&mut child, ROW, n, |ui, range| {
@@ -903,7 +906,7 @@ fn table(app: &mut App, ui: &mut Ui, tr: Rect, live: bool) {
             let row = app.midi.win.rows[tab][r].clone();
             let selected = app.midi.win.sel[tab] == Some(r);
             let p = ui.painter().clone();
-            p.rect_filled(rr, 0.0, if selected { hex(0x352A79) } else if r % 2 == 1 { hex(0x131314) } else { hex(0x0A0A0B) });
+            p.rect_filled(rr, 0.0, if selected { hex(0x352A79) } else if r % 2 == 1 { gy(0x131314) } else { gy(0x0A0A0B) });
             if resp.clicked() {
                 actions.push((r, RowAct::Select));
             }
@@ -913,7 +916,7 @@ fn table(app: &mut App, ui: &mut Ui, tr: Rect, live: bool) {
             for (c, w) in ws.iter().enumerate() {
                 let cell = Rect::from_min_size(pos2(xs[c], rr.min.y), vec2(*w, ROW));
                 // The column separator: white at 20 %.
-                p.rect_filled(Rect::from_min_size(pos2(cell.max.x - 1.0, cell.min.y), vec2(1.0, ROW)), 0.0, Color32::WHITE.gamma_multiply(0.2));
+                p.rect_filled(Rect::from_min_size(pos2(cell.max.x - 1.0, cell.min.y), vec2(1.0, ROW)), 0.0, WHITE.c().gamma_multiply(0.2));
                 let editing = app.midi.win.edit.as_ref().map(|e| e.0 == r && e.1 == c).unwrap_or(false);
                 let text = match c {
                     0 => row.display.clone(),
@@ -940,7 +943,7 @@ fn table(app: &mut App, ui: &mut Ui, tr: Rect, live: bool) {
                     }
                     2 | 4 | 5 if editing => {
                         let mut t = app.midi.win.edit.as_ref().map(|e| e.2.clone()).unwrap_or_default();
-                        let te = egui::TextEdit::singleline(&mut t).font(jf(18.0)).text_color(Color32::WHITE).frame(false).margin(egui::Margin::symmetric(2, 0)).char_limit(if c == 5 { 120 } else { 4 });
+                        let te = egui::TextEdit::singleline(&mut t).font(jf(18.0)).text_color(WHITE.c()).frame(false).margin(egui::Margin::symmetric(2, 0)).char_limit(if c == 5 { 120 } else { 4 });
                         let er = ui.put(cell.shrink2(vec2(1.0, 0.0)), te);
                         if !er.has_focus() && !er.lost_focus() {
                             er.request_focus();
@@ -956,7 +959,7 @@ fn table(app: &mut App, ui: &mut Ui, tr: Rect, live: bool) {
                         }
                     }
                     _ => {
-                        p.with_clip_rect(cell.shrink2(vec2(1.0, 0.0))).text(pos2(cell.min.x + 2.0, cell.center().y), Align2::LEFT_CENTER, &text, jf(18.0), Color32::WHITE);
+                        p.with_clip_rect(cell.shrink2(vec2(1.0, 0.0))).text(pos2(cell.min.x + 2.0, cell.center().y), Align2::LEFT_CENTER, &text, jf(18.0), WHITE.c());
                         if matches!(c, 2 | 4 | 5) && live {
                             let cr = ui.interact(cell, ui.id().with(("cellhit", r, c)), Sense::click());
                             if cr.clicked() {

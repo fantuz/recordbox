@@ -70,6 +70,7 @@ To open the Homebrew app in Finder, run `open "$(brew --prefix fantuz/recordbox/
   **F11** toggles fullscreen for both windows together. **Space** plays or pauses the active deck when you’re outside a text field.
 - **Separate a track into STEMS.** In **Preferences → Extensions → STEMS**, download HTDemucs for speed or HTDemucs fine-tuned for sound quality. Both save drums, bass, instruments and vocals as four stereo parts. Completed separations are available across decks and restarts.
   Saved parts from both models share a 20 GB budget by default. Choose **Keep all saved stems** to retain completed results without a size limit. [STEMS storage and backups](docs/LIBRARY-SYNC.md#how-much-separation-is-saved)
+- **Export vocals or an instrumental.** Use **Track → Export Stems** to make a new local audio file from a separation and add it to your collection with its cues and grid. Choose WAV, FLAC or AIFF for lossless output. The first export shows the destination and playlist option. [Export behavior and format support](docs/UPSTREAM-INTEGRATION.md#exporting-vocals-and-instrumentals)
 
 If an imported MP3 cue sounds early or late, you can audition the same timestamp using a separate collection. [Compare MP3 cue timing](docs/PLAYBACK-PERFORMANCE.md#auditioning-rekordbox-mp3-timing) · [Integration report and measurements](docs/UPSTREAM-INTEGRATION.md)
 

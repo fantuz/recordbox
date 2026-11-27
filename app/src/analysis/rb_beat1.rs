@@ -70,17 +70,38 @@ pub fn reader_sample(x: f32) -> f32 {
 /// (what rekordbox does), otherwise `samples * scale` as they are. `keep` = also return the
 /// intermediate stages.
 fn pipeline(samples: &[f32], scale: f32, reader: bool, sr: u32, varied: bool, keep: bool) -> Stages {
+    pipeline_with_front(samples, scale, reader, sr, varied, keep, None)
+}
+
+/// Record both analysis passes' common inputs only when requested by this job.
+/// No worker keeps a previously decoded track's state.
+pub(super) struct Front {
+    pub(super) list: Vec<BeatInfo>,
+    uem: env::Uem,
+    pub(super) total: i32,
+}
+
+impl Front {
+    pub(super) fn adjust_envelope(&mut self, bpm: f32, list: &mut Vec<BeatInfo>, varied: bool) {
+        self.uem.analyze(bpm, list, varied);
+    }
+
+    pub(super) fn from_audio(samples: &[f32], sr: u32) -> Option<Self> {
+        Some(feed(samples, 32768.0, true, sr, false, None)?.0)
+    }
+}
+
+fn feed(samples: &[f32], scale: f32, reader: bool, sr: u32, log: bool,
+    mut uba: Option<&mut adjust::Uba>) -> Option<(Front, Option<String>)> {
     let total = (samples.len() / 2) as i32;
-    let mut st = Stages::default();
     if !(sr == 44100 || sr == 48000) || total < 1 {
-        return st;
+        return None;
     }
     let block = (sr / 75) as usize;
     let mut sensor = sensor::Sensor::new(sr as i32, total);
     let mut uem = env::Uem::new(sr as i32, total);
-    let mut uba = (!varied).then(|| adjust::Uba::new(sr as i32, total));
     let mut pcm16 = vec![0i16; 2 * block];
-    if keep && std::env::var("PREPDECK_RBLOG").is_ok() {
+    if log {
         sensor.log = Some(String::new());
     }
     let conv = |x: f32| -> f32 {
@@ -104,16 +125,34 @@ fn pipeline(samples: &[f32], scale: f32, reader: bool, sr: u32, varied: bool, ke
         }
         sensor.put(&mono[..n]);
         uem.put(&pcm16[..2 * n]);
-        if let Some(u) = uba.as_mut() {
+        if let Some(u) = uba.as_deref_mut() {
             u.put(&pcm16[..2 * n]);
         }
         done += n;
     }
+    Some((Front { list: sensor.list, uem, total }, sensor.log))
+}
+
+pub(super) fn bia_analyze(sr: i32, list: &mut Vec<BeatInfo>, out: &mut Vec<BeatInfo>, total: i32,
+    varied: bool, seg_list: Option<&[BeatInfo]>) -> f32 {
+    info::Bia { sr }.analyze_with(list, out, total, 4, 16, 12, varied, seg_list)
+}
+
+fn pipeline_with_front(samples: &[f32], scale: f32, reader: bool, sr: u32, varied: bool, keep: bool,
+    saved: Option<&mut Option<Front>>) -> Stages {
+    let mut st = Stages::default();
+    let total = (samples.len() / 2) as i32;
+    if !matches!(sr, 44_100 | 48_000) || total < 1 { return st; }
+    let mut uba = (!varied).then(|| adjust::Uba::new(sr as i32, total));
+    let log = keep && std::env::var_os("PREPDECK_RBLOG").is_some();
+    let Some((Front { mut list, mut uem, .. }, log)) = feed(samples, scale, reader, sr, log, uba.as_mut()) else { return st };
     let bia = info::Bia { sr: sr as i32 };
-    let mut list = std::mem::take(&mut sensor.list);
+    if let Some(saved) = saved {
+        *saved = Some(Front { list: list.clone(), uem: uem.clone(), total });
+    }
     if keep {
         st.sensor = list.clone();
-        st.log = sensor.log.take();
+        st.log = log;
     }
     let mut grid = vec![];
     st.info_bpm = bia.analyze(&mut list, &mut grid, total, 4, 16, 12, varied);
@@ -224,6 +263,11 @@ fn resample(x: &[f32], from: u32, to: u32) -> Vec<f32> {
 /// as rekordbox does (see `analysis_rate`). Unsupported inputs and unusable results allow
 /// the caller to retry with its own detector. Silence has no beat grid.
 pub fn tempo_and_grid(samples: &[f32], sr: u32, dynamic: bool, bpm_min: f64, bpm_max: f64) -> Option<(f64, Option<BeatGrid>)> {
+    grid_with_front(samples, sr, dynamic, bpm_min, bpm_max, None)
+}
+
+pub(super) fn grid_with_front(samples: &[f32], sr: u32, dynamic: bool, bpm_min: f64,
+    bpm_max: f64, saved: Option<&mut Option<Front>>) -> Option<(f64, Option<BeatGrid>)> {
     // UnitBeatAdjust retains fifteen minutes of signal; longer sets use the existing
     // estimator. Bound both the input rate and the duration before allocating a resample.
     if !(8_000..=384_000).contains(&sr) || samples.len() % 2 != 0 ||
@@ -236,7 +280,8 @@ pub fn tempo_and_grid(samples: &[f32], sr: u32, dynamic: bool, bpm_min: f64, bpm
         let x = resample(samples, sr, to);
         return tempo_and_grid(&x, to, dynamic, bpm_min, bpm_max);
     }
-    let st = pipeline(samples, 32768.0, true, sr, dynamic, false);
+    let audio = &samples[..2 * (samples.len() / 2).saturating_sub(1)];
+    let st = pipeline_with_front(audio, 32768.0, true, sr, dynamic, false, saved);
     let duration = samples.len() as f64 / 2.0 / sr as f64;
     let (bpm, grid) = grid_from(&st, sr, dynamic, duration, bpm_min, bpm_max);
     if let Some(g) = &grid {
@@ -317,10 +362,10 @@ fn grid_from(st: &Stages, sr: u32, dynamic: bool, duration: f64, bpm_min: f64, b
 }
 
 #[cfg(test)]
-mod test_signals {
-    type Program = (f64, fn(f64) -> f64, u64, Option<(f64, f64)>);
+pub(super) mod test_signals {
+    pub(crate) type Program = (f64, fn(f64) -> f64, u64, Option<(f64, f64)>);
     /// Tempo programs: constant, steps, ramps, jitter, a silent break, slow and fast tempi.
-    pub(super) const SYNTH: [Program; 10] = [
+    pub(crate) const SYNTH: [Program; 10] = [
         (150.0, |_| 124.0, 1, None),
         (180.0, |t| if t < 60.0 { 120.0 } else { 126.0 }, 2, None),
         (200.0, |t| 118.0 + 14.0 * (t / 200.0), 3, None),
@@ -336,7 +381,7 @@ mod test_signals {
     /// Synthetic drum loops with a tempo program (beats per minute as a function of time), for
     /// checking the multi-segment (Dynamic) paths: kick on every beat, snare on 2 and 4, hats
     /// on the off-beats, a little noise. Returns interleaved stereo in [-1, 1] at 44.1 kHz.
-    pub(super) fn synth(secs: f64, tempo: &dyn Fn(f64) -> f64, seed: u64, gap: Option<(f64, f64)>) -> Vec<f32> {
+    pub(crate) fn synth(secs: f64, tempo: &dyn Fn(f64) -> f64, seed: u64, gap: Option<(f64, f64)>) -> Vec<f32> {
         let sr = 44100.0;
         let n = (secs * sr) as usize;
         let mut v = vec![0f32; n];
@@ -778,6 +823,22 @@ mod tests {
             k += 1;
         }
         v.iter().flat_map(|x| [*x, *x]).collect()
+    }
+
+    #[test]
+    fn shared_sensor_data_belongs_to_the_current_analysis() {
+        let mut pcm = clicks(120.0, 12.0, 0.1);
+        let mut shared = None;
+        grid_with_front(&pcm, 44_100, false, 70.0, 180.0, Some(&mut shared));
+        let shared = shared.unwrap();
+        let positions = |front: &Front| front.list.iter().map(|b| b.pos).collect::<Vec<_>>();
+        let separate = Front::from_audio(&pcm[..pcm.len()-2], 44_100).unwrap();
+        assert!(!shared.list.is_empty());
+        assert_eq!(positions(&shared), positions(&separate));
+        // Reuse the same allocation for another track of identical duration.
+        // The fresh sensor pass must see silence, even while the first Front exists.
+        pcm.fill(0.0);
+        assert!(Front::from_audio(&pcm[..pcm.len()-2], 44_100).unwrap().list.is_empty());
     }
 
     #[test]

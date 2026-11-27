@@ -172,7 +172,7 @@ fn curve_glyph(it: &mut Item, x: f32, y: f32, kind: u8) {
     pts.push(egui::pos2(x0 + w, y1));
     let mut m = egui::Mesh::default();
     for q in &pts {
-        m.colored_vertex(*q, crate::theme::WHITE);
+        m.colored_vertex(*q, crate::theme::WHITE.c());
     }
     for i in 1..pts.len() as u32 - 1 {
         // (a fan from the bottom-right corner keeps every triangle inside the shape)
@@ -224,7 +224,7 @@ pub fn page_mixer(app: &mut App, ui: &mut Ui) {
             }
             let o = it.painter().1;
             crate::ui_kit::paint_radio_at(it.ui.painter(), egui::pos2(o.x + 52.0, o.y + y), 19.0, p.ch_fader_curve == i as u8, true);
-            crate::prefs_font::draw(it.ui, egui::Rect::from_min_size(egui::pos2(o.x + 102.0, o.y + y + 2.0), egui::vec2(400.0, 19.0)), name, crate::ui_kit::CTL, false, crate::theme::WHITE, Just::TopLeft);
+            crate::prefs_font::draw(it.ui, egui::Rect::from_min_size(egui::pos2(o.x + 102.0, o.y + y + 2.0), egui::vec2(400.0, 19.0)), name, crate::ui_kit::CTL, false, crate::theme::WHITE.c(), Just::TopLeft);
             curve_glyph(it, 73.0, y, i as u8);
         }
         it.changed
@@ -446,11 +446,11 @@ pub fn page_dvs(app: &mut App, ui: &mut Ui) {
         for (i, (x, y)) in [(20.0, 56.0), (324.0, 56.0), (20.0, 288.0), (324.0, 288.0)].into_iter().enumerate() {
             let (pa, o) = it.painter();
             let r = egui::Rect::from_min_size(egui::pos2(o.x + x, o.y + y), egui::vec2(294.0, 222.0));
-            pa.rect_filled(r, 0.0, crate::theme::hex(0x191919));
+            pa.rect_filled(r, 0.0, crate::theme::gy(0x191919));
             let scope = egui::Rect::from_min_size(egui::pos2(r.min.x + 12.0, r.min.y + 36.0), egui::vec2(120.0, 120.0));
             pa.rect_filled(scope, 0.0, egui::Color32::BLACK);
-            pa.line_segment([scope.center_top(), scope.center_bottom()], egui::Stroke::new(1.0, crate::theme::hex(0x323232)));
-            pa.line_segment([scope.left_center(), scope.right_center()], egui::Stroke::new(1.0, crate::theme::hex(0x323232)));
+            pa.line_segment([scope.center_top(), scope.center_bottom()], egui::Stroke::new(1.0, crate::theme::gy(0x323232)));
+            pa.line_segment([scope.left_center(), scope.right_center()], egui::Stroke::new(1.0, crate::theme::gy(0x323232)));
             it.text(x + 8.0, y + 8.0, 120.0, 18.0, &format!("DECK{}", i + 1), 16.0, Just::Left);
         }
     });
@@ -485,13 +485,13 @@ pub fn page_dvs(app: &mut App, ui: &mut Ui) {
             for (i, x) in [64.0, 354.0].into_iter().enumerate() {
                 let (pa, o) = it.painter();
                 let r = egui::Rect::from_min_size(egui::pos2(o.x + x, o.y + 32.0 + 27.0), egui::vec2(150.0, 133.0));
-                pa.rect_stroke(r, 4.0, egui::Stroke::new(1.0, crate::theme::hex(0x646464)), egui::StrokeKind::Inside);
-                pa.circle_stroke(r.center(), 44.0, egui::Stroke::new(1.0, crate::theme::hex(0x646464)));
+                pa.rect_stroke(r, 4.0, egui::Stroke::new(1.0, crate::theme::gy(0x646464)), egui::StrokeKind::Inside);
+                pa.circle_stroke(r.center(), 44.0, egui::Stroke::new(1.0, crate::theme::gy(0x646464)));
                 it.text(x + 33.0, 32.0, 84.0, 27.0, &format!("Deck {}", i + 1), 20.0, Just::Centre);
             }
             for (i, x) in [74.0, 152.0, 230.0, 308.0, 386.0, 464.0].into_iter().enumerate() {
                 let (pa, o) = it.painter();
-                pa.circle_stroke(egui::pos2(o.x + x + 15.0, o.y + 256.0 + 15.0), 9.0, egui::Stroke::new(1.5, crate::theme::hex(0x646464)));
+                pa.circle_stroke(egui::pos2(o.x + x + 15.0, o.y + 256.0 + 15.0), 9.0, egui::Stroke::new(1.5, crate::theme::gy(0x646464)));
                 it.text(x - 5.0, 256.0 + 30.0, 40.0, 30.0, &format!("{}", i + 1), 20.0, Just::Centre);
             }
             it.text(64.0, 322.0, 440.0, 22.0, "AUDIO IF CHANNEL", 20.0, Just::Centre);
