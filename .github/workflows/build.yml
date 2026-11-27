@@ -293,6 +293,26 @@ jobs:
           cache-on-failure: true
       - name: Compile the release executable
         run: cargo build --manifest-path app/Cargo.toml --release --locked
+      - name: Fetch the public mixed USB export for OneLibrary verification
+        if: runner.os == 'Linux'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: dylanljones/rbox
+          ref: 9677e21448fe3a8462111b7df099b5608efcba90
+          path: fixtures/rbox
+          persist-credentials: false
+          sparse-checkout-cone-mode: false
+          sparse-checkout: /.testdata/RBv7/demo/export/PIONEER/
+      - name: Compare OneLibrary and classic playlists before and after an external reorder
+        if: runner.os == 'Linux'
+        env:
+          RECORDBOX_TEST_RBOX: ${{ github.workspace }}/fixtures/rbox
+          RECORDBOX_TEST_BINARY: ${{ github.workspace }}/app/target/release/recordbox
+          RECORDBOX_ONELIBRARY_PYTHON: ${{ runner.temp }}/onelibrary-test/bin/python
+        run: |
+          python -m venv "$RUNNER_TEMP/onelibrary-test"
+          "$RECORDBOX_ONELIBRARY_PYTHON" -m pip install --only-binary=:all: --require-hashes -r packaging/onelibrary-test-requirements.txt
+          "$RECORDBOX_ONELIBRARY_PYTHON" packaging/test_public_onelibrary_roundtrip.py -v
       - name: Collection, import, phrase analysis and controller regressions
         shell: bash
         run: |

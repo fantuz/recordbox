@@ -126,7 +126,7 @@ const CHAPTERS: [(&str, &str, &str); 14] = [
 <li>Pick the device and the playlists, then Export. Progress is shown in the footer; it can be cancelled.</li>
 </ol>
 <p>A classic export writes music into <code>/Contents</code>, the catalogs <code>export.pdb</code> and <code>exportExt.pdb</code>, analysis files, artwork and player settings. Select the drive root that contains <code>PIONEER</code>. An interrupted export is rolled back or completed the next time the drive is seen.</p>
-<p>If the drive has both classic Device Library and OneLibrary, recordbox updates the classic catalog and protects existing audio, artwork, analysis files and player settings. Players that read OneLibrary continue to show that catalog's contents. For a OneLibrary-only drive, use AlphaTheta Rekordbox.</p>
+<p>If the drive has both classic Device Library and OneLibrary, recordbox updates the classic catalog and protects existing audio, artwork, analysis files and player settings. Players that read OneLibrary continue to show that catalog's contents. For a closed OneLibrary export, right-click the drive and choose <b>Inspect OneLibrary playlists…</b> to read track order with the optional rbox reader. Use AlphaTheta Rekordbox to update the OneLibrary catalog.</p>
 <h3>On the device</h3>
 <ul>
 <li>Under Devices you can browse a drive's playlists and tracks, delete playlists from it, update its playlists from the library, and clean up files nothing refers to.</li>

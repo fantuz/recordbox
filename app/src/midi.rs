@@ -26,7 +26,7 @@ use crate::midi_map::*;
 use crate::model::*;
 use parking_lot::{Condvar, Mutex};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering::Relaxed};
 use std::sync::Arc;
@@ -34,6 +34,8 @@ use std::time::{Duration, Instant};
 
 mod ports;
 mod routing;
+#[cfg(test)]
+mod grv6_groove_tests;
 use routing::{Platter, Routing};
 pub(crate) use routing::change_mode;
 
@@ -126,7 +128,7 @@ pub fn kind_of_type(t: u8) -> Kind {
         T_KNOB7 => Kind::KnobSlider,
         T_KNOB14 => Kind::KnobSliderHiRes,
         T_INDICATOR => Kind::Indicator,
-        T_PAD => Kind::Pad,
+        T_PAD => Kind::Pad(crate::midi_csv::PadType::ByDevice),
         T_VALUE => Kind::Value,
         _ => Kind::Button,
     }
@@ -140,10 +142,123 @@ pub fn type_of_entry(e: &Entry) -> u8 {
         Kind::KnobSliderHiRes | Kind::Slider | Kind::Knob => T_KNOB14,
         Kind::Rotary => T_ROTARY,
         Kind::Value => T_VALUE,
-        Kind::Indicator => T_INDICATOR,
-        Kind::Pad => T_PAD,
+        Kind::Indicator | Kind::IndicatorHiRes | Kind::JogIndicator | Kind::JogIndicatorHiRes => T_INDICATOR,
+        Kind::Pad(_) => T_PAD,
         _ => T_BUTTON,
     }
+}
+
+/// What a row of a mapping-file type gives its function: a press / release, an absolute
+/// position, relative steps, jog counts, or a device parameter.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum InClass {
+    Press,
+    Abs,
+    Rel,
+    Jog,
+    Param,
+}
+
+/// The value class of an input row's type (None: output only).
+pub fn in_class(k: Kind) -> Option<InClass> {
+    Some(match k {
+        Kind::Button | Kind::Toggle | Kind::Pad(_) | Kind::JogTouch => InClass::Press,
+        Kind::KnobSlider | Kind::KnobSliderHiRes | Kind::Slider | Kind::Knob | Kind::Value | Kind::RawValue | Kind::RotaryAsKnob => InClass::Abs,
+        Kind::Rotary => InClass::Rel,
+        Kind::JogRotate | Kind::JogRotateAbsPos | Kind::Difference | Kind::JogTimestamp => InClass::Jog,
+        Kind::Parameter => InClass::Param,
+        Kind::Indicator | Kind::IndicatorHiRes | Kind::JogIndicator | Kind::JogIndicatorHiRes => return None,
+    })
+}
+
+/// The device parameters (`Parameter` rows) recordbox uses: the output pacing and the jog
+/// indicator's update interval. (`JogRatency`: rekordbox's files call it "unused", and it is
+/// read but not used here either.)
+pub const PARAMS: [&str; 2] = ["MidiOutInterval", "JogIndicatorInterval"];
+
+/// Outputs that follow the engine and are sent by row name (`Hub::engine_outputs`).
+pub const NAMED_OUTPUTS: [&str; 7] = ["JogPlayPauseIndicator", "JogPlayPauseIndicatorShort", "ChannelLevel", "LoadedIndicator", "GetLoopActive", "SlipStateForFlashing", "PlayingState"];
+
+/// Segmented controller meters use the louder channel's pre-fader linear peak
+/// as a percentage of full scale. Each light stays on above its own threshold.
+fn channel_segment_threshold(name: &str) -> Option<u8> {
+    match name {
+        "ChannelLevel.1" => Some(10),
+        "ChannelLevel.2" => Some(30),
+        "ChannelLevel.3" => Some(50),
+        "ChannelLevel.4" => Some(70),
+        "ChannelLevel.5" => Some(90),
+        _ => None,
+    }
+}
+
+fn channel_meter_value(entry: &Entry, level: f32) -> u16 {
+    let level = level.clamp(0.0, 1.0);
+    let percent = (level * 100.0) as u8;
+    match channel_segment_threshold(&entry.name) {
+        Some(threshold) if percent < threshold => 0,
+        Some(_) if entry.kind == Kind::IndicatorHiRes => 16383,
+        Some(_) => 127,
+        None if entry.kind == Kind::IndicatorHiRes => (level * 16383.0).round() as u16,
+        None => u16::from(percent),
+    }
+}
+
+/// recordbox acts on an input row of this function and type.
+pub fn input_acts(name: &str, kind: Kind) -> bool {
+    if kind == Kind::JogTimestamp { return true; }
+    if kind == Kind::Toggle { return false; }
+    let Some(c) = in_class(kind) else { return false };
+    if c == InClass::Param {
+        return PARAMS.contains(&name);
+    }
+    registry().by_name(name).map(|f| act_accepts(f.act, c)).unwrap_or(false)
+}
+
+/// recordbox drives an output row of this function (a light, a meter, the jog ring).
+pub fn output_source(name: &str) -> bool {
+    NAMED_OUTPUTS.contains(&name) || channel_segment_threshold(name).is_some() || registry().by_name(name).map(|f| act_has_led(f.act) || echo_led(f.act)).unwrap_or(false)
+}
+
+/// An explicitly mapped output row with a source in the running application.
+pub fn output_acts(name: &str, kind: Kind) -> bool {
+    if channel_segment_threshold(name).is_some() {
+        return matches!(kind, Kind::Indicator | Kind::IndicatorHiRes);
+    }
+    // Imported maps may attach an output code to a knob or a rotary. Learn only
+    // offers Lights for a subset of those types, but their mapped feedback works.
+    !matches!(kind, Kind::Parameter | Kind::JogTimestamp) && output_source(name)
+}
+
+/// Which value classes an action does something with (`apply`, `Hub::fast`).
+pub fn act_accepts(a: Act, c: InClass) -> bool {
+    use Act as A;
+    match a {
+        A::SamplerVolume | A::FxUnitBeatRot(_) => matches!(c, InClass::Abs | InClass::Rel),
+        A::Needle | A::Tempo | A::FxLevel(..) | A::CfxColor(_) | A::SamplerGain | A::Trim | A::Eq(_) | A::StemIsoKnob(_) | A::ChFader | A::HpMix | A::HpLevel | A::CrossFader | A::MasterLevel => c == InClass::Abs,
+        A::LoopSize | A::FxReleaseType(_) | A::Browse | A::Zoom | A::LoopMoveRot => c == InClass::Rel,
+        A::FxSelect(..) => matches!(c, InClass::Press | InClass::Rel),
+        A::VinylAdjust(_) | A::XfAssignKnob | A::DrumGain => c == InClass::Abs,
+        A::Jog(_) | A::JogSearch => c == InClass::Jog,
+        A::TempoLed(_) => false,
+        A::Stub(Stub::VinylBrake(_)) => c == InClass::Abs,
+        _ => c == InClass::Press,
+    }
+}
+
+/// Buttons whose light shows the button held (they have no state to show).
+pub fn echo_led(a: Act) -> bool {
+    act_accepts(a, InClass::Press) && !act_has_led(a) && !matches!(a, Act::Shift | Act::JogTouch | Act::DrumRelease | Act::Stub(Stub::Reverse))
+}
+
+/// The actions whose state `leds` sends to an output row.
+pub fn act_has_led(a: Act) -> bool {
+    use Act as A;
+    use crate::sampler_ext::SmpAct;
+    matches!(
+        a,
+        A::PlayPause | A::Cue | A::Search(_) | A::Slip | A::Quantize | A::QuantizeAll | A::MasterTempo | A::Sync | A::Master | A::KeySync | A::TempoLed(_) | A::AutoLoop | A::Loop4 | A::Reloop | A::LoopIn | A::LoopOut | A::PitchBend(_) | A::PadMode(_) | A::HotCue(_) | A::HotCueDelete(_) | A::BeatJumpPad(_) | A::BeatLoopPad(_) | A::StemPart(_) | A::StemFx(_) | A::StemSolo | A::DrumSwap(_) | A::DrumCapture | A::FxOn(..) | A::FxMode(_) | A::FxAuto(_) | A::FxTap(_) | A::FxReleaseOn(_) | A::FxAssign(..) | A::SamplerPad(..) | A::SamplerPadStop(_) | A::Smp(SmpAct::Sync | SmpAct::Master | SmpAct::Quantize | SmpAct::SeqPlay | SmpAct::SeqRec) | A::SamplerCue | A::SeqCall(..) | A::HeadCue | A::XfAssign(_) | A::StemIso | A::Panel(_) | A::Related | A::Stub(Stub::Vinyl) | A::Stub(Stub::Reverse)
+    )
 }
 
 /// Features other parts of recordbox are building: the registry has their commands, and
@@ -223,6 +338,10 @@ pub enum Act {
     BeatLoopPad(u8),
     StemPart(u8),
     StemFx(u8),
+    DrumSwap(u8),
+    DrumCapture,
+    DrumRelease,
+    DrumGain,
     FxLevel(u8, u8),
     FxOn(u8, u8),
     FxSelect(u8, u8, i32),
@@ -274,6 +393,21 @@ pub enum Act {
     JogSearch,
     JogTouch,
     Shift,
+    /// Loop Move as an encoder: one move right or left per message (`deviceLoop(int)`).
+    LoopMoveRot,
+    /// The top bar's panels in turn: FX, SAMPLER, MIXER, REC, none.
+    PanelStep(i32),
+    /// The Browse layout and back (`MainComponent::switchActiveWindow`).
+    BrowseView,
+    CallStep(i32),
+    /// Vinyl Speed Adjust: 0 brake, 1 start, 2 both.
+    VinylAdjust(u8),
+    FxTapLong(u8),
+    FxAssignHold(u8, u8),
+    XfAssignKnob,
+    CfxCenter(u8),
+    /// An FX slot's effect by its place in `fx::INFO`.
+    FxSelectKind(u8, u8, u8),
     Stub(Stub),
 }
 
@@ -375,6 +509,7 @@ fn build_registry() -> Vec<Func> {
     add(t, "Loop", "Loop Size", "LoopHalfDouble", rot, true, A::LoopSize);
     add(t, "Loop", "LoopMove Right", "LoopMoveRight", b, true, A::Stub(Stub::LoopMove(1)));
     add(t, "Loop", "LoopMove Left", "LoopMoveLeft", b, true, A::Stub(Stub::LoopMove(-1)));
+    add(t, "Loop", "Loop Move", "LoopMove", rot, true, A::LoopMoveRot);
     add(t, "Loop", "Loop In", "LoopIn", b, true, A::LoopIn);
     add(t, "Loop", "Loop ReTrigger", "ReTrigger", b, true, A::ReTrigger);
     add(t, "Loop", "Loop Out", "LoopOut", b, true, A::LoopOut);
@@ -391,6 +526,13 @@ fn build_registry() -> Vec<Func> {
     add(t, "KeyShift", "KeySync", "KeySync", b, true, A::KeySync);
     add(t, "KeyShift", "KeyReset", "KeyReset", b, true, A::KeyReset);
     add(t, "STEMS", "ActiveStem Mute/Solo", "ActivePartMuteSolo", b, false, A::StemSolo);
+
+    for slot in 0..crate::groove::ROWS as u8 {
+        let number = slot + 1;
+        add(t, "STEMS", &format!("Drum Swap {number} Play/Stop"), &format!("DrumSwap{number}"), b, true, A::DrumSwap(slot));
+    }
+    add(t, "STEMS", "Drum Capture On/Off", "DrumSwapCapture", b, true, A::DrumCapture);
+    add(t, "STEMS", "Drum Swap Gain", "DrumSwapGain", T_KNOB14, true, A::DrumGain);
 
     // ---- PAD
     let t = Tab::Pad;
@@ -457,6 +599,7 @@ fn build_registry() -> Vec<Func> {
 
     // ---- FX
     let t = Tab::Fx;
+    add(t, "STEMS", "Drum Release FX", "DrumReleaseFx", b, true, A::DrumRelease);
     for u in 0..2u8 {
         let cat: &'static str = if u == 0 { "FX1" } else { "FX2" };
         for s in 0..3u8 {
@@ -574,6 +717,9 @@ fn build_registry() -> Vec<Func> {
     add(t, "", "RecPanel", "RecPanel", b, false, A::Stub(Stub::RecPanel));
     add(t, "", "WaveZoom", "Zoom", rot, false, A::Zoom);
     add(t, "", "AutoMix StartStop", "AutoMixStartStop", b, false, A::Stub(Stub::AutoMixStartStop));
+    add(t, "", "PanelSelect Next", "PanelForward", b, false, A::PanelStep(1));
+    add(t, "", "PanelSelect Back", "PanelBack", b, false, A::PanelStep(-1));
+    add(t, "", "BrowseView", "SwitchActiveWindow", b, false, A::BrowseView);
 
     // ---- MIXPOINTLINK
     let t = Tab::MixPointLink;
@@ -590,6 +736,41 @@ fn build_registry() -> Vec<Func> {
     add(t, "", "", "WheelSearch", b, true, A::JogSearch);
     add(t, "", "", "JogTouch", b, true, A::JogTouch);
     add(t, "", "", "Shift", b, true, A::Shift);
+    // Hardware can report a long press of LOOP IN as its own 4-beat loop code.
+    add(t, "", "", "4BeatLoopLongPress", b, true, A::Loop4);
+    // Crossfader assign as a knob: A at 0x00, THRU at 0x40, B at 0x7F.
+    add(t, "", "", "CrossfaderAssign", k7, true, A::XfAssignKnob);
+    for ch in 0..4u8 {
+        // (The CFX knob's centre click: the knob back to the middle.)
+        add(t, "", "", &format!("CFXParameterCH{}Center", ch + 1), b, false, A::CfxCenter(ch));
+    }
+    // CDJ-style CALL buttons step through memory cues or resize the running loop.
+    add(t, "", "", "CallNext", b, true, A::CallStep(1));
+    add(t, "", "", "CallPrev", b, true, A::CallStep(-1));
+    // (Vinyl Speed Adjust knobs of a deck: brake, start, or both. `deviceVinylAdjust`.)
+    add(t, "", "", "VinylAdjustBrake", k7, true, A::VinylAdjust(0));
+    add(t, "", "", "VinylAdjustStart", k7, true, A::VinylAdjust(1));
+    add(t, "", "", "VinylAdjustTouchRelease", k7, true, A::VinylAdjust(2));
+    for u in 0..2u8 {
+        let cat = if u == 0 { "FX1" } else { "FX2" };
+        // TAP pressed: a tap; held for a second: back to AUTO (`RbxBpmPanelDeviceComponent`).
+        add(t, "", "", &format!("{cat}TapBeatWithLongPress"), b, false, A::FxTapLong(u));
+        // A channel switch's positions: the assign follows the switch (on while its code is
+        // held, off when released; `RbxFxDeviceComponent::eventOnChanged` $_1 with "set").
+        for (i, ch) in ["CH1", "CH2", "CH3", "CH4"].iter().enumerate() {
+            add(t, "", "", &format!("{cat}Assign.{ch}"), b, false, A::FxAssignHold(u, i as u8));
+        }
+        add(t, "", "", &format!("{cat}Assign.SAMPLER"), b, false, A::FxAssignHold(u, crate::fx::SAMPLER as u8));
+        // A slot's effect chosen by name (`FX1-1Select.ECHO`): rekordbox's effect names in
+        // capitals without spaces or brackets.
+        for sl in 0..3u8 {
+            for (i, info) in crate::fx::INFO.iter().enumerate() {
+                let key: String = info.name.chars().filter(|c| c.is_ascii_alphanumeric()).collect::<String>().to_ascii_uppercase();
+                add(t, "", "", &format!("{cat}-{}Select.{key}", sl + 1), b, false, A::FxSelectKind(u, sl, i as u8));
+            }
+        }
+        add(t, "", "", &format!("{cat}Assign.MASTER"), b, false, A::FxAssignHold(u, crate::fx::MASTER as u8));
+    }
     v
 }
 
@@ -674,6 +855,25 @@ pub enum UiEvent {
     Ports { removed: Vec<String>, paused: Vec<String> },
 }
 
+#[derive(Default)]
+struct NamedRows {
+    entries: HashMap<(&'static str, u8), Vec<Entry>>,
+    last: HashMap<u16, u16>,
+    jog_interval: Duration,
+    last_ring: [Option<Instant>; 5],
+}
+
+impl NamedRows {
+    fn due(&mut self, deck: u8, now: Instant) -> bool {
+        let last = &mut self.last_ring[deck as usize];
+        if last.is_some_and(|seen| now.saturating_duration_since(seen) < self.jog_interval) {
+            return false;
+        }
+        *last = Some(now);
+        true
+    }
+}
+
 struct OutState {
     queue: OutQueue,
     blink: Blinker,
@@ -682,13 +882,36 @@ struct OutState {
     conn: Option<midir::MidiOutputConnection>,
 }
 
+impl OutState {
+    fn feedback(&mut self, entry: &Entry, value: u16) {
+        if let Some((first, second)) = crate::midi_map::named_messages(entry, value) {
+            self.queue.push(first, entry.opts.priority);
+            if let Some(low) = second {
+                self.queue.push(low, entry.opts.priority);
+            }
+        }
+    }
+
+    fn led(&mut self, map: &MidiMap, entry: &Entry, value: u8) {
+        let value = if entry.kind == Kind::IndicatorHiRes {
+            u16::from(value) * 129
+        } else {
+            u16::from(map.led_message(entry, value)[2])
+        };
+        self.feedback(entry, value);
+    }
+}
+
 /// One connected controller.
 pub struct Device {
     pub name: String,
     input_id: String,
     pub map: Mutex<MidiMap>,
+    /// A trial temporarily replaces only this connected port's map.
+    rx3_original: Mutex<Option<MidiMap>>,
     /// The rekordbox installed here has a factory mapping for it.
     pub factory: bool,
+    native_mapping: AtomicBool,
     /// rekordbox runs a hardware handshake with this model before it treats it as started.
     /// recordbox does not have one: the device is listed and its messages are read, but it
     /// is not supported and may not send anything.
@@ -699,12 +922,13 @@ pub struct Device {
     pub alive: AtomicBool,
     out_index: Mutex<HashMap<(u32, u8), Vec<Entry>>>,
     leds: Mutex<HashMap<(u32, u8), Led>>,
-    /// Last values sent to outputs the registry does not name (jog ring, level meters).
-    named: Mutex<HashMap<u16, u8>>,
+    /// Named indicator rows are indexed once when a mapping changes.
+    named: Mutex<NamedRows>,
     out: Mutex<OutState>,
     out_cv: Condvar,
     interval_ms: AtomicU64,
     jog: Mutex<[Platter; 4]>,
+    scan: Mutex<[Scan; 4]>,
     /// Last Load press per deck (the DDJ-400 family's double press = Instant Doubles).
     load_at: Mutex<[Option<Instant>; 4]>,
     in_conn: Mutex<Option<midir::MidiInputConnection<()>>>,
@@ -719,7 +943,9 @@ impl Device {
             name: name.to_string(),
             input_id,
             map: Mutex::new(map),
+            rx3_original: Mutex::new(None),
             factory,
+            native_mapping: AtomicBool::new(false),
             needs_auth: needs_auth(name),
             has_output: conn.is_some(),
             learning: AtomicBool::new(false),
@@ -727,11 +953,12 @@ impl Device {
             alive: AtomicBool::new(true),
             out_index: Mutex::new(HashMap::new()),
             leds: Mutex::new(HashMap::new()),
-            named: Mutex::new(HashMap::new()),
+            named: Mutex::new(NamedRows::default()),
             out: Mutex::new(OutState { queue: OutQueue::default(), blink: Blinker::default(), blinking: HashMap::new(), conn }),
             out_cv: Condvar::new(),
             interval_ms: AtomicU64::new(1),
             jog: Mutex::new(std::array::from_fn(|_| Platter::new(cpr))),
+            scan: Mutex::new(Default::default()),
             load_at: Mutex::new([None; 4]),
             in_conn: Mutex::new(None),
             received: AtomicU64::new(0),
@@ -744,40 +971,85 @@ impl Device {
     /// After the map changed: mark the functions recordbox knows, index the outputs and
     /// forget what the LEDs were sent, so that they are all sent again.
     pub fn reindex(&self) {
+        self.reindex_map(&mut self.map.lock(), &[]);
+    }
+
+    fn reindex_map(&self, m: &mut MidiMap, offs: &[([u8; 3], i32)]) {
         let reg = registry();
-        let mut m = self.map.lock();
         m.tag_inputs(|n| reg.tag(n));
         let mut idx: HashMap<(u32, u8), Vec<Entry>> = HashMap::new();
+        let mut named = NamedRows::default();
+        if let Some(ms) = m.params.get("JogIndicatorInterval").copied().filter(|ms| (1..=1000).contains(ms)) {
+            named.jog_interval = Duration::from_millis(ms as u64);
+        }
         for o in &m.outputs {
             let tag = reg.tag(&o.name);
-            if tag != 0 {
+            if !output_acts(&o.name, o.kind) { continue; }
+            // A deck's segmented and continuous meters share one update and queue lock.
+            let group = if channel_segment_threshold(&o.name).is_some() {
+                Some("ChannelLevel")
+            } else {
+                NAMED_OUTPUTS.iter().copied().find(|&name| o.name == name)
+            };
+            if let Some(name) = group {
+                named.entries.entry((name, o.deck)).or_default().push(o.clone());
+            } else if tag != 0 {
                 idx.entry((tag, o.deck)).or_default().push(o.clone());
             }
         }
         self.interval_ms.store(m.out_interval_ms(), Relaxed);
-        drop(m);
         *self.out_index.lock() = idx;
+        *self.named.lock() = named;
         self.leds.lock().clear();
+        let mut out = self.out.lock();
+        out.blink = Blinker::default();
+        out.blinking.clear();
+        out.queue = OutQueue::default();
+        for &(packet, priority) in offs {
+            out.queue.push(packet, priority);
+        }
+        if !offs.is_empty() {
+            self.out_cv.notify_one();
+        }
+    }
+
+    pub fn rx3_trial_active(&self) -> bool {
+        self.rx3_original.lock().is_some()
+    }
+
+    /// Whether the selected user delta came from the installed AlphaTheta application.
+    pub fn from_rekordbox(&self) -> bool {
+        self.native_mapping.load(Relaxed)
     }
 
     pub fn out_keys(&self) -> Vec<(u32, u8)> {
         self.out_index.lock().keys().copied().collect()
     }
 
+    fn clear_button_feedback(&self) {
+        if !self.has_output { return; }
+        let held: Vec<_> = self.leds.lock().iter()
+            .filter(|((tag, _), value)| **value == Led::On && registry().get(*tag).is_some_and(|f| echo_led(f.act)))
+            .map(|(key, _)| *key)
+            .collect();
+        for (tag, deck) in held { self.set_led(tag, deck, Led::Off); }
+    }
+
     /// Set the light of a function (for a deck). Sends only when it changed.
     pub fn set_led(&self, tag: u32, deck: u8, led: Led) {
-        {
-            let mut l = self.leds.lock();
-            if l.get(&(tag, deck)) == Some(&led) {
-                return;
-            }
-            l.insert((tag, deck), led);
+        if self.leds.lock().get(&(tag, deck)) == Some(&led) {
+            return;
+        }
+        // The meter worker can publish transport feedback while the UI
+        // switches profiles. Resolve the output and queue it under one map.
+        let map = self.map.lock();
+        if self.leds.lock().insert((tag, deck), led) == Some(led) {
+            return;
         }
         let entries = self.out_index.lock().get(&(tag, deck)).cloned().unwrap_or_default();
         if entries.is_empty() {
             return;
         }
-        let map = self.map.lock();
         let mut out = self.out.lock();
         for e in entries {
             out.blink.stop(e.code);
@@ -787,9 +1059,9 @@ impl Device {
                     out.blink.start(e.code, e.opts.blink, 0);
                     out.blinking.insert(e.code, (e.clone(), e.opts.priority));
                 }
-                Led::On => out.queue.push(map.led_message(&e, 127), e.opts.priority),
-                Led::Off => out.queue.push(map.led_message(&e, 0), e.opts.priority),
-                Led::Value(v) => out.queue.push(map.led_message(&e, v), e.opts.priority),
+                Led::On => out.led(&map, &e, 127),
+                Led::Off => out.led(&map, &e, 0),
+                Led::Value(v) => out.led(&map, &e, v),
             }
         }
         drop(out);
@@ -798,45 +1070,43 @@ impl Device {
 
     /// Send a value to the outputs of a row by its name (rows the function registry does
     /// not have: the jog ring, the channel level meters, the loaded indicator). `value` gets
-    /// the row and returns the byte to send; a byte equal to the last one sent is not sent.
-    /// 14-bit (HiRes) rows are left out.
-    pub fn set_named(&self, name: &str, deck: u8, value: &dyn Fn(&Entry) -> u8) {
-        let entries: Vec<Entry> = self.map.lock().outputs.iter().filter(|e| e.name == name && e.deck == deck && !matches!(e.kind, Kind::IndicatorHiRes | Kind::JogIndicatorHiRes)).cloned().collect();
-        if entries.is_empty() {
-            return;
-        }
+    /// the row and returns the value to send; a value equal to the last one sent is not sent.
+    /// 14-bit rows (IndicatorHiRes, JogIndicatorHiRes) are sent as rekordbox's
+    /// `MidiData::getLongMessage` 0x10132107c builds them: the upper seven bits on the code,
+    /// the lower seven on the code + 0x10.
+    fn set_named(&self, name: &'static str, deck: u8, value: impl Fn(&Entry) -> u16) {
+        let mut named = self.named.lock();
+        let NamedRows { entries, last, .. } = &mut *named;
+        let Some(rows) = entries.get(&(name, deck)) else { return };
+        let mut out = self.out.lock();
         let mut sent = false;
-        {
-            let mut last = self.named.lock();
-            let mut out = self.out.lock();
-            for e in entries {
-                let v = value(&e) & 0x7F;
-                if last.get(&e.code) == Some(&v) {
-                    continue;
-                }
-                last.insert(e.code, v);
-                out.queue.push([(e.code >> 8) as u8, (e.code & 0xFF) as u8, v], e.opts.priority);
+        for entry in rows {
+            let value = value(entry);
+            if last.get(&entry.code) != Some(&value) {
+                out.feedback(entry, value);
+                last.insert(entry.code, value);
                 sent = true;
             }
         }
-        if sent {
-            self.out_cv.notify_one();
-        }
+        if sent { self.out_cv.notify_one(); }
     }
 
     /// The output thread: one message per `MidiOutInterval`, and the 50 ms blink tick.
     fn run_output(self: Arc<Self>) {
-        let mut next_tick = Instant::now() + Duration::from_millis(50);
-        while self.alive.load(Relaxed) {
+        let Some(mut connection) = self.out.lock().conn.take() else { return };
+        let tick = Duration::from_millis(50);
+        let mut next_tick = Instant::now() + tick;
+        loop {
             let mut out = self.out.lock();
+            if !self.alive.load(Relaxed) { return; }
             if Instant::now() >= next_tick {
-                next_tick += Duration::from_millis(50);
+                next_tick = Instant::now() + tick;
                 let changes = out.blink.tick();
                 if !changes.is_empty() {
                     if let Some(map) = self.map.try_lock() {
                         for (code, on) in changes {
-                            if let Some((e, prio)) = out.blinking.get(&code).cloned() {
-                                out.queue.push(map.led_message(&e, if on { 127 } else { 0 }), prio);
+                            if let Some((e, _)) = out.blinking.get(&code).cloned() {
+                                out.led(&map, &e, if on { 127 } else { 0 });
                             }
                         }
                     }
@@ -844,16 +1114,17 @@ impl Device {
             }
             match out.queue.pop() {
                 Some(msg) => {
-                    if let Some(c) = out.conn.as_mut() {
-                        let _ = c.send(&msg);
-                    }
-                    self.sent.fetch_add(1, Relaxed);
                     drop(out);
+                    if connection.send(&msg).is_ok() {
+                        self.sent.fetch_add(1, Relaxed);
+                    }
                     std::thread::sleep(Duration::from_millis(self.interval_ms.load(Relaxed).clamp(1, 16)));
                 }
+                None if out.blinking.is_empty() => {
+                    self.out_cv.wait(&mut out);
+                }
                 None => {
-                    let wait = next_tick.saturating_duration_since(Instant::now()).min(Duration::from_millis(50));
-                    self.out_cv.wait_for(&mut out, wait);
+                    self.out_cv.wait_for(&mut out, next_tick.saturating_duration_since(Instant::now()));
                 }
             }
         }
@@ -953,7 +1224,8 @@ pub struct Hub {
     pub devices: Mutex<Vec<Arc<Device>>>,
     pub decks: [Arc<Mutex<PlayState>>; 4],
     pub snap: Mutex<Snapshot>,
-    overlay: Mutex<Vec<(u8, Param, f32, u64)>>,
+    // deliver holds the routing lock from sequence assignment through the fast write and UI send.
+    overlay: Mutex<VecDeque<(u8, Param, f32, u64)>>,
     seq: AtomicU64,
     tx: crossbeam_channel::Sender<UiEvent>,
     pub ctx: Mutex<Option<eframe::egui::Context>>,
@@ -1006,7 +1278,7 @@ impl Hub {
             devices: Mutex::new(vec![]),
             decks,
             snap: Mutex::new(Snapshot::default()),
-            overlay: Mutex::new(vec![]),
+            overlay: Mutex::new(VecDeque::new()),
             seq: AtomicU64::new(1),
             tx,
             ctx: Mutex::new(None),
@@ -1055,6 +1327,11 @@ impl Hub {
     /// Factory rows plus one user delta. A first connection never creates a local file.
     /// Earlier versions wrote a header before loading and thereby hid the native delta.
     pub fn load_map(&self, device: &str) -> (MidiMap, bool) {
+        let (map, factory, _) = self.load_map_source(device);
+        (map, factory)
+    }
+
+    fn load_map_source(&self, device: &str) -> (MidiMap, bool, bool) {
         let factory = self.factory_mapping(device);
         let local = self.user_file(device);
         let legacy = || crate::midi_csv::legacy_file(&self.user_dir, device).filter(|path| *path != local);
@@ -1066,10 +1343,10 @@ impl Hub {
             if let Ok(data) = crate::midi_csv::read_file(&path) {
                 let Ok(csv) = crate::midi_csv::validate_import(device, &data) else { continue };
                 if own && crate::midi_csv::bare_header(&csv) { continue; }
-                if let Ok(map) = MidiMap::load(device, factory.as_deref(), Some(&data)) { return (map, factory.is_some()); }
+                if let Ok(map) = MidiMap::load(device, factory.as_deref(), Some(&data)) { return (map, factory.is_some(), !own); }
             }
         }
-        (MidiMap::load(device, factory.as_deref(), None).unwrap_or_else(|_| MidiMap::new(device)), factory.is_some())
+        (MidiMap::load(device, factory.as_deref(), None).unwrap_or_else(|_| MidiMap::new(device)), factory.is_some(), false)
     }
 
     pub fn export_file(&self, path: &Path, bytes: &[u8]) -> std::io::Result<()> {
@@ -1077,6 +1354,11 @@ impl Hub {
     }
 
     pub fn write_override(&self, device: &str, bytes: &[u8]) -> std::io::Result<()> {
+        let controller = self.device(device);
+        let original = controller.as_ref().map(|d| d.rx3_original.lock());
+        if original.as_ref().is_some_and(|saved| saved.is_some()) {
+            return Err(std::io::Error::other("Stop the XDJ-RX3 profile trial before changing a mapping."));
+        }
         let csv = crate::midi_csv::validate_import(device, bytes)?;
         let path = self.user_file(device);
         // Distinguish an explicit empty reset/import from an old automatic placeholder.
@@ -1085,11 +1367,21 @@ impl Hub {
             if !saved.ends_with(b"\n") { saved.extend_from_slice(b"\r\n"); }
             saved.extend_from_slice(b"# recordbox local override\r\n");
         }
-        crate::midi_csv::atomic_write(&path, &saved, true, self.factory_dirs.iter().chain(&self.native_user_dirs))
+        crate::midi_csv::atomic_write(&path, &saved, true, self.factory_dirs.iter().chain(&self.native_user_dirs))?;
+        if let Some(controller) = controller.as_ref() {
+            controller.native_mapping.store(false, Relaxed);
+        }
+        Ok(())
     }
 
     pub fn save_map(&self, dev: &Device) -> std::io::Result<()> {
-        let text = dev.map.lock().save_text();
+        let text = {
+            let original = dev.rx3_original.lock();
+            if original.is_some() {
+                return Err(std::io::Error::other("Stop the XDJ-RX3 profile trial before saving a mapping."));
+            }
+            dev.map.lock().save_text()
+        };
         self.write_override(&dev.name, text.as_bytes())
     }
 
@@ -1115,9 +1407,12 @@ impl Hub {
         // Retire old workers before a replacement can send its first note.
         let gone: Vec<_> = self.devices.lock().extract_if(.., |d| !visible.contains(&d.name, &d.input_id)).collect();
         for device in gone {
-            device.alive.store(false, Relaxed);
+            {
+                let _out = device.out.lock();
+                device.alive.store(false, Relaxed);
+                device.out_cv.notify_all();
+            }
             device.in_conn.lock().take();
-            device.out_cv.notify_all();
             self.release_device(&device);
             removed.push(device.name.clone());
             changed = true;
@@ -1135,14 +1430,16 @@ impl Hub {
     }
 
     fn connect(self: &Arc<Self>, name: &str, input_id: String, port: &midir::MidiInputPort) -> Option<Arc<Device>> {
-        let (map, factory) = self.load_map(name);
-        let conn = midir::MidiOutput::new("recordbox").ok().and_then(|out| {
+        let (map, factory, native_mapping) = self.load_map_source(name);
+        let output_enabled = std::env::var("PREPDECK_MIDI_NO_OUT").as_deref() != Ok("1");
+        let conn = output_enabled.then(|| midir::MidiOutput::new("recordbox").ok()).flatten().and_then(|out| {
             let ports: Vec<_> = out.ports().into_iter().filter_map(|p| out.port_name(&p).ok().map(|n| (n, p))).collect();
             let names = ports.iter().map(|(n, _)| n.clone()).collect::<Vec<_>>();
             let index = crate::midi_csv::paired_output(name, &names)?;
             out.connect(&ports[index].1, "recordbox-out").ok()
         });
         let dev = Device::mapped(name, input_id, map, factory, conn);
+        dev.native_mapping.store(native_mapping, Relaxed);
         // The callback only queues; the worker does the rest.
         let (tx, rx) = crossbeam_channel::unbounded();
         let device_epoch = dev.input_epoch.clone();
@@ -1158,8 +1455,10 @@ impl Hub {
         *dev.in_conn.lock() = Some(conn);
         let (h, d) = (self.clone(), dev.clone());
         let _ = std::thread::Builder::new().name(format!("midi-in {name}")).spawn(move || h.run_input(d, rx));
-        let d = dev.clone();
-        let _ = std::thread::Builder::new().name(format!("midi-out {name}")).spawn(move || d.run_output());
+        if dev.has_output {
+            let d = dev.clone();
+            let _ = std::thread::Builder::new().name(format!("midi-out {name}")).spawn(move || d.run_output());
+        }
         eprintln!("### MIDI:open success [{name}]{}", if factory { "" } else { " (no factory mapping: MIDI Learn only)" });
         self.devices.lock().push(dev.clone());
         Some(dev)
@@ -1202,17 +1501,30 @@ impl Hub {
             self.wake();
             return;
         }
-        let ev = dev.map.lock().handle(&msg, t_ms);
-        if let Some(ev) = ev {
-            self.dispatch(&mut route, dev, ev);
+        let (event, peer) = {
+            let mut map = dev.map.lock();
+            let Some(event) = map.handle(&msg, t_ms) else { return };
+            let peer = map.dual_event(&event);
+            (event, peer)
+        };
+        self.dispatch(&mut route, dev, event);
+        if let Some(peer) = peer {
+            self.dispatch(&mut route, dev, peer);
         }
     }
 
     fn dispatch(&self, route: &mut Routing, dev: &Arc<Device>, mut ev: Event) {
         let Some(f) = registry().get(ev.tag) else { return };
         if !route.performance && !routing::browsing(f.act) { return; }
+        // A stateless button echoes its press on the originating controller. Other
+        // controllers may hold the same button and release it independently.
+        if dev.has_output && echo_led(f.act) {
+            if let Val::On(pressed, _) = ev.val {
+                dev.set_led(ev.tag, ev.deck, if pressed { Led::On } else { Led::Off });
+            }
+        }
         if routing::momentary(f.act) {
-            if !matches!(ev.val, Val::On(false, _)) {
+            if !matches!(ev.val, Val::On(false, _)) && !matches!(f.act, Act::FxTapLong(_) | Act::FxAssignHold(..)) {
                 let Some(n) = self.deck_ix(ev.deck) else { return };
                 ev.deck = n as u8 + 1;
             }
@@ -1226,6 +1538,13 @@ impl Hub {
         let done = ev.fast && registry().get(ev.tag).is_some_and(|f| self.fast(route, dev, f, ev.deck, ev.val, seq));
         let _ = self.tx.send(UiEvent::Control { device: dev.name.clone(), tag: ev.tag, deck: ev.deck, val: ev.val, fast_done: done, seq });
         self.wake();
+    }
+
+    fn acknowledge_overlay(&self, seq: u64) {
+        let mut pending = self.overlay.lock();
+        while pending.front().is_some_and(|entry| entry.3 <= seq) {
+            pending.pop_front();
+        }
     }
 
     /// The deck a mapping's deck number means: 1..4, or the active deck for a row without one.
@@ -1430,7 +1749,7 @@ impl Hub {
         };
         let press = matches!(val, Val::On(true, _));
         let release = matches!(val, Val::On(false, _));
-        let over = |p: Param, v: f32| self.overlay.lock().push((n as u8, p, v, seq));
+        let over = |p: Param, v: f32| self.overlay.lock().push_back((n as u8, p, v, seq));
         match f.act {
             Act::PlayPause => {
                 if press {
@@ -1534,13 +1853,10 @@ impl Hub {
                 true
             }
             Act::JogSearch => {
-                let Val::Jog { delta, .. } = val else { return true };
-                // Search: the track moves ten times as far as the platter turns.
-                let (cpr, rpm) = {
-                    let j = dev.jog.lock();
-                    (j[n].jog.cpr, j[n].jog.rpm)
-                };
-                let secs = delta as f64 / cpr * (60.0 / rpm) * 10.0;
+                let Val::Jog { delta, t_ms } = val else { return true };
+                if !self.playback_enabled { return true; }
+                let k = dev.jog.lock()[n].jog.k();
+                let Some(secs) = dev.scan.lock()[n].value(delta, t_ms, k) else { return true };
                 let mut s = self.decks[n].lock();
                 if let Some(a) = s.audio.clone() {
                     s.pos = (s.pos + secs * a.sr as f64).clamp(0.0, a.frames() as f64);
@@ -1563,31 +1879,44 @@ impl Hub {
         if devs.is_empty() {
             return;
         }
-        let count = self.snap.lock().count.min(4) as usize;
-        for n in 0..count {
+        let snap = *self.snap.lock();
+        let now = Instant::now();
+        for n in 0..snap.count.min(4) as usize {
             self.transport_leds(n);
-            let (loaded, angle, level) = {
+            let (loaded, angle, level, looping, slipping, playing) = {
                 let s = self.decks[n].lock();
+                let (looping, slipping, playing) = (s.loop_range.is_some(), s.slip && s.slip_pos.is_some(), s.playing);
                 match s.audio.as_ref() {
                     Some(a) => {
                         let secs = s.pos / a.sr.max(1) as f64;
-                        let turn = (secs * (100.0 / 3.0) / 60.0 * 360.0).rem_euclid(360.0);
-                        (true, turn as i32, s.peak[0].max(s.peak[1]))
+                        let rpm = if snap.rpm45 { 45.0 } else { 100.0 / 3.0 };
+                        let turn = (secs * rpm * 6.0).rem_euclid(360.0);
+                        (true, turn as i32, s.peak[0].max(s.peak[1]), looping, slipping, playing)
                     }
-                    None => (false, 360, 0.0),
+                    None => (false, 360, 0.0, false, false, false),
                 }
             };
-            let lvl = ((level.clamp(0.0, 1.0) * 100.0) as i32).clamp(0, 127) as u8;
             for d in &devs {
-                for deck in [n as u8 + 1, if n as u8 == self.snap.lock().active { 0 } else { 255 }] {
+                for deck in [n as u8 + 1, if n as u8 == snap.active { 0 } else { 255 }] {
                     if deck == 255 {
                         continue;
                     }
-                    for name in ["JogPlayPauseIndicator", "JogPlayPauseIndicatorShort"] {
-                        d.set_named(name, deck, &|e: &Entry| crate::midi_map::jog_ring(angle, &e.opts));
+                    if d.named.lock().due(deck, now) {
+                        for name in ["JogPlayPauseIndicator", "JogPlayPauseIndicatorShort"] {
+                            d.set_named(name, deck, |e| match e.kind {
+                                Kind::JogIndicatorHiRes | Kind::IndicatorHiRes => crate::midi_map::jog_ring14(angle, &e.opts),
+                                _ => u16::from(crate::midi_map::jog_ring(angle, &e.opts)),
+                            });
+                        }
                     }
-                    d.set_named("ChannelLevel", deck, &|_| lvl);
-                    d.set_named("LoadedIndicator", deck, &|_| if loaded { 127 } else { 0 });
+                    d.set_named("ChannelLevel", deck, |e| channel_meter_value(e, level));
+                    for (name, on) in [("LoadedIndicator", loaded), ("GetLoopActive", looping), ("SlipStateForFlashing", slipping), ("PlayingState", playing)] {
+                        d.set_named(name, deck, |e| match (on, e.kind) {
+                            (false, _) => 0,
+                            (true, Kind::IndicatorHiRes | Kind::JogIndicatorHiRes) => 16383,
+                            _ => 127,
+                        });
+                    }
                 }
             }
         }
@@ -1662,11 +1991,15 @@ pub struct MidiState {
     started: bool,
     /// Messages that were mapped, for the scripted check.
     pub handled: u64,
+    /// Physical Drum Release levers, independent of each deck's on-screen button.
+    pub(crate) drum_release: [bool; crate::groove::DECKS],
+    /// FX1 / FX2 TapBeatWithLongPress held since (a second makes it AUTO).
+    tap_held: [Option<Instant>; 2],
 }
 
 impl Default for MidiState {
     fn default() -> MidiState {
-        MidiState { hub: None, rx: None, _keeper: None, win: Default::default(), devices: vec![], paused_inputs: vec![], jump_page: [5; 4], pending_double: None, stub_log: vec![], last_tempo: [0.0; 4], last_iso: [false; 4], last_follow: [false; 4], started: false, handled: 0 }
+        MidiState { hub: None, rx: None, _keeper: None, win: Default::default(), devices: vec![], paused_inputs: vec![], jump_page: [5; 4], pending_double: None, stub_log: vec![], last_tempo: [0.0; 4], last_iso: [false; 4], last_follow: [false; 4], started: false, handled: 0, drum_release: [false; crate::groove::DECKS], tap_held: [None; 2] }
     }
 }
 
@@ -1748,8 +2081,6 @@ fn snapshot(app: &App) -> Snapshot {
     Snapshot { perf: app.performance(), count, active: app.px.active, decks, curve: app.prefs.ch_fader_curve, bank, smp_pads: pads as u8, smp_loaded: loaded, smp_plain: app.px.sampler.seq_mode == 0, velocity_curve: app.prefs.sampler.velocity_curve, takeover_eq_iso: app.prefs.midi.takeover_eq_iso, rpm45: app.prefs.midi.jog_45rpm }
 }
 
-/// Once per frame, before the decks are handed to the audio thread: what the controllers
-/// sent, and the lights.
 /// The first connection to the system's MIDI server takes about half a second. It is made
 /// on a helper thread first, so the main thread's own client (needed there for port-change
 /// notices) is created quickly once the server is up, without holding up the first frames.
@@ -1773,6 +2104,14 @@ fn midi_server_ready() -> bool {
     }
 }
 
+impl MidiState {
+    /// A physical search button may remain held when the app loses keyboard focus.
+    pub(crate) fn search_held(&self, deck: u8) -> bool {
+        self.hub.as_ref().is_some_and(|hub| hub.routing.lock().search_held(deck))
+    }
+}
+
+/// Deliver controller events and refresh their feedback once per frame.
 pub fn poll(app: &mut App) {
     if !app.midi.started {
         if std::env::var("PREPDECK_MIDI").as_deref() == Ok("off") {
@@ -1794,7 +2133,11 @@ pub fn poll(app: &mut App) {
         }
         return;
     }
-    *hub.snap.lock() = snapshot(app);
+    let next = snapshot(app);
+    let previous = std::mem::replace(&mut *hub.snap.lock(), next);
+    if next.count < previous.count {
+        hub.release_hidden_drum_decks(next.count);
+    }
     // The takeover is armed again when the tempo was changed on screen or sync changed, and
     // the EQ knobs wait for a pick-up when they switch between EQ and STEM ISO.
     for n in 0..app.deck_count().min(4) as usize {
@@ -1814,6 +2157,12 @@ pub fn poll(app: &mut App) {
         app.midi.last_tempo[n] = app.deck_of(n as u8).x.tempo_adj;
     }
     finish_double(app);
+    for (u, held) in app.midi.tap_held.iter_mut().enumerate() {
+        if held.is_some_and(|t| t.elapsed() >= Duration::from_secs(1)) {
+            *held = None;
+            app.px.fx[u].auto = true;
+        }
+    }
     if have {
         *hub.snap.lock() = snapshot(app);
         leds(app, &hub);
@@ -1855,7 +2204,7 @@ fn apply_pending(app: &mut App, hub: &Arc<Hub>) {
 /// last looked are put back over what the interface just wrote, and the jog's bend is added.
 pub fn after_push(app: &mut App) {
     let Some(hub) = app.midi.hub.as_ref() else { return };
-    let pending: Vec<(u8, Param, f32, u64)> = hub.overlay.lock().clone();
+    let pending = hub.overlay.lock().clone();
     for (n, p, v, _) in pending {
         hub.set_param(n as usize, p, v);
     }
@@ -1901,6 +2250,7 @@ fn browse_step(app: &mut App, n: i32) {
 
 /// Instant Doubles: the track of another deck comes onto this one at the same place.
 fn inst_doubles(app: &mut App, n: u8) {
+    if app.deck_options.disable_load { return; }
     let count = app.deck_count();
     let playing = |app: &App, k: u8| app.player.decks[k as usize].lock().playing;
     let src = (0..count).filter(|k| *k != n && app.deck_of(*k).track.is_some()).max_by_key(|k| playing(app, *k));
@@ -1943,17 +2293,20 @@ pub fn apply(app: &mut App, hub: &Arc<Hub>, device: &str, f: &Func, deck: u8, va
     let release = matches!(val, Val::On(false, _));
     let rel = if let Val::Rel(n) = val { n } else { 0 };
     let unit = val.unit();
+    // A lever's release belongs to its original deck, even after a layout change
+    // hides that deck or the user closes the Groove Circuit panel.
+    if f.act == Act::DrumRelease && release {
+        if let Some(held) = deck.checked_sub(1).and_then(|n| app.midi.drum_release.get_mut(usize::from(n))) {
+            *held = false;
+        }
+        return;
+    }
     // Controllers act in PERFORMANCE mode; browsing works in both.
     if !app.performance() && !routing::browsing(f.act) {
         return;
     }
     let Some(n) = deck_of(app, deck) else { return };
     let ni = n as usize;
-    // An absolute value a worker already put into the engine: the app's own value follows.
-    let settle = |app: &mut App| {
-        hub.overlay.lock().retain(|o| o.3 > seq);
-        let _ = app;
-    };
     match f.act {
         Act::PlayPause => {
             if press {
@@ -2076,7 +2429,7 @@ pub fn apply(app: &mut App, hub: &Arc<Hub>, device: &str, f: &Func, deck: u8, va
                     app.midi.last_tempo[ni] = adj;
                 }
             }
-            settle(app);
+            hub.acknowledge_overlay(seq);
         }
         Act::TempoRange => {
             if press {
@@ -2231,6 +2584,38 @@ pub fn apply(app: &mut App, hub: &Arc<Hub>, device: &str, f: &Func, deck: u8, va
                 app.midi.jump_page[ni] = (app.midi.jump_page[ni] as i32 + dir).clamp(1, 9) as u8;
             }
         }
+        Act::DrumSwap(row) => {
+            if press && app.groove_visible() && !app.deck_options.disable_play {
+                let bank = usize::from(app.gc.set.decks[ni].bank.min(1));
+                let slot = bank * crate::groove::ROWS + usize::from(row);
+                if app.gc.capture_on == Some(n) {
+                    // This writes a capture. A refused capture must not toggle playback.
+                    if !app.deck_options.disable_load {
+                        app.groove_capture(ni, slot);
+                    }
+                } else {
+                    // Another deck can be armed; its source never writes into this slot.
+                    app.groove_slot_play(ni, slot);
+                }
+            }
+        }
+        Act::DrumCapture => {
+            if press && app.groove_visible() && !app.deck_options.disable_load && !app.deck_options.disable_play {
+                app.groove_capture_toggle(n);
+            }
+        }
+        Act::DrumRelease => {
+            if press && app.groove_visible() && !app.deck_options.disable_play {
+                app.midi.drum_release[ni] = true;
+            }
+        }
+        Act::DrumGain => {
+            if app.groove_visible() {
+                if let Some(p) = unit {
+                    app.groove_set_deck_gain(ni, p * 100.0);
+                }
+            }
+        }
         Act::StemPart(src) => {
             if press {
                 // (With three parts shown, INST stands for INST and BASS, as on screen.)
@@ -2274,7 +2659,9 @@ pub fn apply(app: &mut App, hub: &Arc<Hub>, device: &str, f: &Func, deck: u8, va
             }
         }
         Act::FxSelect(u, s, dir) => {
-            if press {
+            // (A Rotary row steps the list by its direction, one effect per message.)
+            let dir = if rel != 0 { rel.signum() } else { dir };
+            if press || rel != 0 {
                 let fx = &mut app.px.fx[u as usize % 2];
                 let single = fx.params.single;
                 if single && s != 0 {
@@ -2302,6 +2689,19 @@ pub fn apply(app: &mut App, hub: &Arc<Hub>, device: &str, f: &Func, deck: u8, va
         Act::FxUnitBeatRot(u) => {
             if rel != 0 {
                 fx_beat(&mut app.px.fx[u as usize % 2], None, rel.signum());
+            } else if let Some(p) = unit {
+                // A knob (`RbxFxDeviceComponent::eventAbsoluteValueChanged` 0x1005fe09c): its
+                // position across the beat values (`setEffectBeatArea(v x 0.000061039)`), the
+                // unit's effect in single mode, all three slots in multi mode.
+                let fx = &mut app.px.fx[u as usize % 2];
+                let slots = if fx.params.single { 3..4 } else { 0..3 };
+                for sl in slots {
+                    let kind = if sl < 3 { fx.params.slots[sl].kind } else { fx.params.one.kind };
+                    let len = crate::fx::beat_table(kind).0.len();
+                    if len != 0 {
+                        fx.set_index(sl, ((p as f64 * len as f64) as usize).min(len - 1));
+                    }
+                }
             }
         }
         Act::FxMode(u) => {
@@ -2403,6 +2803,9 @@ pub fn apply(app: &mut App, hub: &Arc<Hub>, device: &str, f: &Func, deck: u8, va
         Act::SamplerVolume => {
             if let Some(p) = unit {
                 app.prefs.sampler.volume = p * 100.0;
+            } else if rel != 0 {
+                // (An encoder, as the DDJ-ERGO has: one percent a step; not traced.)
+                app.prefs.sampler.volume = (app.prefs.sampler.volume + rel as f32).clamp(0.0, 100.0);
             }
         }
         Act::SamplerCue => {
@@ -2428,7 +2831,7 @@ pub fn apply(app: &mut App, hub: &Arc<Hub>, device: &str, f: &Func, deck: u8, va
             if let Some(p) = unit {
                 app.px.mix[ni].trim = p;
             }
-            settle(app);
+            hub.acknowledge_overlay(seq);
         }
         Act::Eq(b) => {
             if let Some(p) = unit {
@@ -2440,7 +2843,7 @@ pub fn apply(app: &mut App, hub: &Arc<Hub>, device: &str, f: &Func, deck: u8, va
                     if m.stem_iso_on { m.stem_iso[b] = p } else { m.eq[b] = p }
                 }
             }
-            settle(app);
+            hub.acknowledge_overlay(seq);
         }
         Act::StemIsoKnob(i) => {
             if let Some(p) = unit {
@@ -2456,7 +2859,7 @@ pub fn apply(app: &mut App, hub: &Arc<Hub>, device: &str, f: &Func, deck: u8, va
             if let Some(p) = unit {
                 app.px.mix[ni].fader = p;
             }
-            settle(app);
+            hub.acknowledge_overlay(seq);
         }
         Act::HpMix => {
             if let Some(p) = unit {
@@ -2472,7 +2875,7 @@ pub fn apply(app: &mut App, hub: &Arc<Hub>, device: &str, f: &Func, deck: u8, va
             if let Some(p) = unit {
                 app.px.crossfader = p;
             }
-            settle(app);
+            hub.acknowledge_overlay(seq);
         }
         Act::XfAssign(side) => {
             if press {
@@ -2543,7 +2946,7 @@ pub fn apply(app: &mut App, hub: &Arc<Hub>, device: &str, f: &Func, deck: u8, va
             }
         }
         Act::Load => {
-            if press {
+            if press && !app.deck_options.disable_load {
                 // The DDJ-400 and DDJ-FLX4: a second press within 300 ms is Instant Doubles.
                 let double = (device.contains("DDJ-400") || device.contains("DDJ-FLX4"))
                     && hub.device(device).map(|d| {
@@ -2592,7 +2995,172 @@ pub fn apply(app: &mut App, hub: &Arc<Hub>, device: &str, f: &Func, deck: u8, va
         }
         // The jog is the worker's alone.
         Act::Jog(_) | Act::JogSearch | Act::JogTouch => {}
+        Act::LoopMoveRot => {
+            if rel != 0 {
+                app.with_deck(n, |a| a.loop_move(rel.signum()));
+            }
+        }
+        Act::PanelStep(dir) => {
+            if press {
+                panel_step(app, dir);
+            }
+        }
+        Act::BrowseView => {
+            if press && app.performance() {
+                if app.prefs.perf_lay.browse {
+                    app.prefs.perf_lay.browse = false;
+                    app.poll_decks();
+                    app.save_prefs();
+                } else {
+                    crate::ui_perf_layouts::set_row(app, 4);
+                }
+            }
+        }
+        Act::CallStep(dir) => {
+            if press {
+                app.with_deck(n, |a| {
+                    if a.loop_active().is_some() {
+                        a.resize_loop(if dir > 0 { 2.0 } else { 0.5 });
+                    } else {
+                        a.memory_jump(dir);
+                    }
+                });
+            }
+        }
+        Act::VinylAdjust(which) => {
+            if let Some(p) = unit {
+                vinyl_adjust(app, ni % 2, which, (p * 16383.0).round() as i32);
+            }
+        }
+        Act::FxTapLong(u) => {
+            let u = u as usize % 2;
+            if press {
+                let now = app.ctx.input(|i| i.time);
+                let fx = &mut app.px.fx[u];
+                fx.auto = false;
+                if let Some(bpm) = fx.tap.tap(now) {
+                    fx.tap_bpm = bpm;
+                }
+                app.midi.tap_held[u] = Some(Instant::now());
+                app.ctx.request_repaint_after(Duration::from_secs(1));
+            } else if release {
+                app.midi.tap_held[u] = None;
+            }
+        }
+        Act::FxSelectKind(u, sl, i) => {
+            if press {
+                let fx = &mut app.px.fx[u as usize % 2];
+                let single = fx.params.single;
+                let k = crate::fx::INFO[(i as usize).min(crate::fx::INFO.len() - 1)].kind;
+                // (Only an effect the mode's list has; in single mode the unit's one effect.)
+                if crate::fx::list(single).any(|x| x.kind == k) && (!single || sl == 0) {
+                    fx.set_kind(if single { 3 } else { sl as usize % 3 }, k);
+                }
+            }
+        }
+        Act::XfAssignKnob => {
+            if let Some(p) = unit {
+                app.px.mix[ni].assign = if p < 0.25 { 1 } else if p > 0.75 { 2 } else { 0 };
+            }
+        }
+        Act::CfxCenter(ch) => {
+            if press {
+                app.px.cfx_color[(ch as usize).min(4)] = 0.5;
+            }
+        }
+        Act::FxAssignHold(u, ch) => {
+            if press || release {
+                fx_assign_set(&mut app.px.fx[u as usize % 2].params.assign, ch as usize, press);
+            }
+        }
         Act::Stub(s) => stub(app, hub, s, n, val),
+    }
+}
+
+/// PanelSelect Next / Back (`MainComponent::eventOnChanged`, PanelForward / PanelBack): the
+/// panels in rekordbox's order FX, SAMPLER, MIXER, REC (VIDEO is not in recordbox), then
+/// none; the one after (or before) the last one showing is shown alone. Panels the layout
+/// does not have are left as they are and passed over.
+fn panel_step(app: &mut App, dir: i32) {
+    use crate::ui_perf_layouts::{mixer_shown, panel_enabled};
+    // (Tile numbers of `panel_enabled`: 0 FX, 2 Sampler, 3 Mixer, 4 Rec.)
+    let tiles = [0usize, 2, 3, 4];
+    let on = [app.prefs.perf_fx, app.prefs.perf_sampler, mixer_shown(app), app.prefs.rec.panel];
+    let enabled: [bool; 4] = std::array::from_fn(|i| panel_enabled(app, tiles[i]));
+    let pick = panel_next(on, enabled, dir);
+    let want = |i: usize| pick == Some(i);
+    if enabled[0] {
+        app.prefs.perf_fx = want(0);
+    }
+    if enabled[1] {
+        app.prefs.perf_sampler = want(1);
+    }
+    if enabled[2] && mixer_shown(app) != want(2) {
+        crate::ui_perf_layouts::toggle_mixer(app);
+    }
+    if enabled[3] {
+        app.prefs.rec.panel = want(3);
+    }
+    app.save_prefs();
+}
+
+/// The panel PanelForward (`dir` 1) or PanelBack (-1) shows next, of FX, SAMPLER, MIXER,
+/// REC (None: none). The current one is the last one lit.
+pub fn panel_next(on: [bool; 4], enabled: [bool; 4], dir: i32) -> Option<usize> {
+    let cur = (0..4).rev().find(|i| on[*i] && enabled[*i]);
+    if dir == 0 { return cur; }
+    let mut next: i32 = match (dir > 0, cur) {
+        (true, Some(c)) => c as i32 + 1,
+        (true, None) => 0,
+        (false, Some(c)) => c as i32 - 1,
+        (false, None) => 3,
+    };
+    while (0..4).contains(&next) && !enabled[next as usize] {
+        next += dir.signum();
+    }
+    (0..4).contains(&next).then_some(next as usize)
+}
+
+/// The speed table index a Vinyl Speed Adjust knob position (0..16383) gives.
+pub fn vinyl_index(v: i32) -> u8 {
+    (((v.max(0) as f64) * 0.0155649149) as i32).clamp(0, 255) as u8
+}
+
+/// A Vinyl Speed Adjust knob (`UiPlayer::deviceVinylAdjust` 0x102029430): the knob's 14-bit
+/// position times 0.0155649149 (0..255) is the speed table index; 0 sets Touch/Brake, 1
+/// Release/Start, 2 both. Kept per side, as Preferences keeps them.
+fn vinyl_adjust(app: &mut App, side: usize, which: u8, v: i32) {
+    let idx = vinyl_index(v);
+    let side = side.min(1);
+    if which != 1 {
+        app.prefs.rb.brake[side] = idx;
+        app.prefs.deck.vinyl_brake[side] = idx;
+    }
+    if which != 0 {
+        app.prefs.rb.start[side] = idx;
+        app.prefs.deck.vinyl_start[side] = idx;
+    }
+    app.push_deck_controls();
+}
+
+/// An FX assign set to on or off as the on-screen button does it when it is clicked: the
+/// master alone, or channels without the master.
+pub fn fx_assign_set(a: &mut [bool; crate::fx::CHANNELS], c: usize, on: bool) {
+    let c = c.min(crate::fx::CHANNELS - 1);
+    if a[c] == on {
+        return;
+    }
+    a[c] = on;
+    if on {
+        if c == crate::fx::MASTER {
+            for (i, d) in a.iter_mut().enumerate() {
+                if i != crate::fx::MASTER {
+                    *d = false;
+                }
+            }
+        } else {
+            a[crate::fx::MASTER] = false;
+        }
     }
 }
 
@@ -2773,9 +3341,7 @@ pub fn stub(app: &mut App, hub: &Arc<Hub>, s: Stub, deck: u8, val: Val) {
         // Vinyl Speed Adjust (Touch/Brake) of the left / right decks: 0..1.
         Stub::VinylBrake(side) => {
             if let Some(p) = val.unit() {
-                let brake = (p * 255.0).round() as u8;
-                app.prefs.rb.brake[side as usize] = brake;
-                app.prefs.deck.vinyl_brake[side as usize] = brake;
+                vinyl_adjust(app, side as usize, 0, (p * 16383.0).round() as i32);
                 note(app, format!("VinylBrake side {side} {p:.3}"));
             }
         }
@@ -2796,6 +3362,7 @@ pub fn stub(app: &mut App, hub: &Arc<Hub>, s: Stub, deck: u8, val: Val) {
                 note(app, format!("LoopMove {dir:+} deck {} ({})", deck + 1, if moved { "moved" } else { "no loop" }));
             }
         }
+        // The memory loop at the cue point is made an active loop or not (`eventActiveLoop`).
         Stub::ActiveLoop => {
             if press {
                 app.with_deck(deck, |a| a.toggle_cue_point_active_loop());
@@ -2809,6 +3376,16 @@ pub fn stub(app: &mut App, hub: &Arc<Hub>, s: Stub, deck: u8, val: Val) {
             }
         }
     }
+}
+
+fn drum_slot_lights(engine: Option<&crate::groove::Engine>, bank: u8) -> [Led; crate::groove::ROWS] {
+    std::array::from_fn(|row| {
+        if engine.is_some_and(|e| e.is_played(row, usize::from(bank.min(1)))) { Led::On } else { Led::Off }
+    })
+}
+
+fn drum_capture_light(armed: Option<u8>, deck: u8) -> Led {
+    if armed == Some(deck) { Led::On } else { Led::Off }
 }
 
 /// The lights of every connected controller, from the app's state.
@@ -2827,19 +3404,23 @@ fn leds(app: &mut App, hub: &Arc<Hub>) {
         looping: bool,
         slip: bool,
         searching: i32,
+        reverse: bool,
     }
     let ds: Vec<D> = (0..4u8)
         .map(|n| {
             if n >= count {
-                return D { loaded: false, playing: false, at_cue: false, looping: false, slip: false, searching: 0 };
+                return D { loaded: false, playing: false, at_cue: false, looping: false, slip: false, searching: 0, reverse: false };
             }
             let cue = app.deck_of(n).cue_point;
             let s = app.player.decks[n as usize].lock();
             let pos = s.audio.as_ref().map(|a| s.pos / a.sr as f64);
-            D { loaded: pos.is_some(), playing: s.playing, at_cue: pos.map(|p| (p - cue).abs() < 0.01).unwrap_or(false), looping: s.loop_range.is_some(), slip: s.slip, searching: if s.search > 0.0 { 1 } else if s.search < 0.0 { -1 } else { 0 } }
+            D { loaded: pos.is_some(), playing: s.playing, at_cue: pos.map(|p| (p - cue).abs() < 0.01).unwrap_or(false), looping: s.loop_range.is_some(), slip: s.slip, searching: if s.search > 0.0 { 1 } else if s.search < 0.0 { -1 } else { 0 }, reverse: s.dk.reverse }
         })
         .collect();
     let on = |b: bool| if b { Led::On } else { Led::Off };
+    let groove_enabled = app.groove_visible() && !app.deck_options.disable_play;
+    // Read each mapped Groove deck once, without waiting on its audio callback.
+    let drum_slots: [_; crate::groove::DECKS] = std::array::from_fn(|_| std::cell::OnceCell::new());
     let (seq_playing, seq_rec, seq_cur) = crate::sampler::SAMPLER.try_lock().and_then(|g| g.as_ref().map(|e| (e.seq.playing, e.seq.rec, e.seq.current()))).unwrap_or((false, false, 0));
     for dev in devs {
         for (tag, deck) in dev.out_keys() {
@@ -2876,6 +3457,16 @@ fn leds(app: &mut App, hub: &Arc<Hub>) {
                     None => Led::Off,
                 },
                 Act::BeatJumpPad(_) | Act::BeatLoopPad(_) => on(d.loaded),
+                Act::DrumCapture if groove_enabled && !app.deck_options.disable_load => drum_capture_light(app.gc.capture_on, n),
+                Act::DrumSwap(row) if groove_enabled => {
+                    let state = drum_slots[ni].get_or_init(|| {
+                        crate::groove::ENGINES[ni].try_lock()
+                            .map(|e| drum_slot_lights(e.as_deref(), app.gc.set.decks[ni].bank))
+                    });
+                    let Some(lights) = state else { continue };
+                    lights[usize::from(row)]
+                }
+                Act::DrumSwap(_) | Act::DrumCapture => Led::Off,
                 Act::StemPart(src) => on(app.player.decks[ni].try_lock().map(|s| s.stem_on[(src as usize).min(3)]).unwrap_or(true)),
                 Act::StemFx(row) => on(app.px.stem_fx[(row as usize).min(3)]),
                 Act::StemSolo => on(app.prefs.stem_solo),
@@ -2905,6 +3496,8 @@ fn leds(app: &mut App, hub: &Arc<Hub>) {
                 Act::Panel(p) => on(if p == 0 { app.prefs.perf_fx } else { app.prefs.perf_sampler }),
                 Act::Related => on(app.view == View::Related),
                 Act::Stub(Stub::Vinyl) => on(hub.vinyl[ni].load(Relaxed)),
+                // (Blinking while the deck plays backwards: `deviceUpdateLed` 0x10202a7f4.)
+                Act::Stub(Stub::Reverse) => if d.reverse { Led::Blink } else { Led::Off },
                 _ => continue,
             };
             dev.set_led(tag, deck, led);
@@ -3022,6 +3615,68 @@ mod tests {
     }
 
     #[test]
+    fn rx3_trial_preserves_native_and_intentional_local_overrides_on_reconnect() {
+        let temp = tempfile::tempdir().unwrap();
+        let factory_dir = temp.path().join("factory");
+        let native_dir = temp.path().join("native");
+        let local_dir = temp.path().join("local");
+        std::fs::create_dir(&factory_dir).unwrap();
+        std::fs::create_dir(&native_dir).unwrap();
+        let name = "MIDIIN (XDJ-RX3)";
+        let csv = |code| format!("@file,1,XDJ-RX3\nPlayPause,,Button,,{code:04X},,,,,,,,,Fast;,\n");
+        let factory_path = factory_dir.join("XDJ-RX3.midi.csv");
+        let native_path = native_dir.join("XDJ-RX3.midi.csv");
+        std::fs::write(&factory_path, csv(0x9010)).unwrap();
+        std::fs::write(&native_path, csv(0x9011)).unwrap();
+        let decks = std::array::from_fn(|_| Arc::new(Mutex::new(PlayState::default())));
+        let (mut hub, _) = Hub::new(decks, local_dir.clone(), true);
+        let h = Arc::get_mut(&mut hub).unwrap();
+        h.factory_dirs = vec![factory_dir];
+        h.native_user_dirs = vec![native_dir];
+        let connect = || {
+            let (map, factory, native) = hub.load_map_source(name);
+            let dev = Device::mapped(name, name.into(), map, factory, None);
+            dev.native_mapping.store(native, Relaxed);
+            hub.devices.lock().push(dev.clone());
+            dev
+        };
+        let native = connect();
+        assert!(native.from_rekordbox() && native.factory);
+        assert_eq!(native.map.lock().live_inputs().count(), 2);
+        hub.set_rx3_trial(&native, true);
+        hub.set_learning(&native, true);
+        assert!(!native.learning.load(Relaxed));
+        assert!(hub.try_edit_mapping(&native, |_| panic!("trial must be read-only")).is_err());
+        assert!(hub.save_map(&native).is_err());
+        assert!(hub.write_override(name, csv(0x9022).as_bytes()).is_err());
+        let mut midi = MidiState { hub: Some(hub.clone()), ..Default::default() };
+        crate::ui_midi::select_device(&mut midi, name);
+        crate::ui_midi::close(&mut midi);
+        assert!(native.rx3_trial_active(), "closing settings keeps the session trial");
+        hub.set_rx3_trial(&native, false);
+        assert!(native.from_rekordbox());
+        let codes = |d: &Device| d.map.lock().live_inputs().map(|i| i.e.code).collect::<Vec<_>>();
+        assert_eq!(codes(&native), [0x9010, 0x9011]);
+        assert!(!local_dir.exists());
+        hub.write_override(name, crate::midi_csv::empty_user_file(name).as_bytes()).unwrap();
+        let local_path = hub.user_file(name);
+        let saved_empty = std::fs::read(&local_path).unwrap();
+        hub.devices.lock().clear();
+        let reset = connect();
+        assert!(!reset.from_rekordbox());
+        assert_eq!(codes(&reset), [0x9010]);
+        hub.set_rx3_trial(&reset, true);
+        assert!(reset.rx3_trial_active());
+        hub.devices.lock().clear();
+        let reconnected = connect();
+        assert!(!reconnected.rx3_trial_active());
+        assert_eq!(codes(&reconnected), [0x9010]);
+        assert_eq!(std::fs::read(local_path).unwrap(), saved_empty);
+        assert_eq!(std::fs::read_to_string(factory_path).unwrap(), csv(0x9010));
+        assert_eq!(std::fs::read_to_string(native_path).unwrap(), csv(0x9011));
+    }
+
+    #[test]
     fn first_connection_reads_native_mappings_without_writing_and_local_edits_take_precedence() {
         let temp = tempfile::tempdir().unwrap();
         let native = temp.path().join("native");
@@ -3084,6 +3739,120 @@ mod tests {
         h.write_override(reconnected, csv(reconnected, 0x9013).as_bytes()).unwrap();
         assert_eq!(codes("Deck:Deck MIDI 1 51:0"), [0x9013]);
         assert_eq!(std::fs::read(old_path).unwrap(), old_mapping.as_bytes());
+    }
+
+    #[test]
+    fn hires_feedback_keeps_controller_and_low_byte_order_and_resends_after_remap() {
+        let csv = b"@file,1,Test\nJogPlayPauseIndicator,Jog,JogIndicatorHiRes,,,,,,,BB00,BB01,,,RO;Max=16383;,\nPlayPause,Play,IndicatorHiRes,,,,,,,B209,B309,,,,\n";
+        let map = MidiMap::load("Test", None, Some(csv)).unwrap();
+        let dev = Device::mapped("Test", "port".into(), map, false, None);
+        let angle = |e: &Entry| crate::midi_map::jog_ring14(180, &e.opts);
+        dev.set_named("JogPlayPauseIndicator", 1, angle);
+        dev.set_named("JogPlayPauseIndicator", 1, angle);
+        let mut out = dev.out.lock();
+        assert_eq!(out.queue.pop(), Some([0xBB, 0, 63]));
+        assert_eq!(out.queue.pop(), Some([0xBB, 0x10, 127]));
+        assert_eq!(out.queue.pop(), None);
+        drop(out);
+        dev.reindex();
+        dev.set_named("JogPlayPauseIndicator", 1, angle);
+        assert_eq!(dev.out.lock().queue.len(), 2);
+        let tag = registry().tag("PlayPause");
+        dev.set_led(tag, 1, Led::On);
+        let mut out = dev.out.lock();
+        let packets: Vec<_> = std::iter::from_fn(|| out.queue.pop()).collect();
+        assert_eq!(&packets[2..], &[[0xB2, 9, 127], [0xB2, 0x19, 127]]);
+    }
+
+    #[test]
+    fn channel_meter_segments_emit_only_threshold_changes_on_the_mapped_deck() {
+        let mut csv = String::from("@file,1,Test\n");
+        for segment in 1..=5 {
+            csv.push_str(&format!("ChannelLevel.{segment},ChannelLevel,Indicator,,,,,,90{:02X},0,1,,,RO;,\n", 0x27 + segment));
+        }
+        csv.push_str("ChannelLevel.5,ChannelLevel,IndicatorHiRes,,,,,,B004,0,1,,,RO;,\n");
+        csv.push_str("ChannelLevel,ChannelLevel,Indicator,,,,,,B003,0,1,,,RO;,\n");
+        let map = MidiMap::load("Test", None, Some(csv.as_bytes())).unwrap();
+        let mut dev = Device::mapped("Test", "port".into(), map, false, None);
+        Arc::get_mut(&mut dev).unwrap().has_output = true;
+        let decks = std::array::from_fn(|_| Arc::new(Mutex::new(PlayState::default())));
+        let (hub, _) = Hub::new(decks, PathBuf::new(), false);
+        hub.devices.lock().push(dev.clone());
+        let read = || {
+            hub.engine_outputs();
+            let mut out = dev.out.lock();
+            let mut messages = std::iter::from_fn(|| out.queue.pop()).collect::<Vec<_>>();
+            messages.sort_unstable();
+            messages
+        };
+        let idle = read();
+        assert_eq!(idle.len(), 16); // Two decks, five lights, a 14-bit light and the whole meter.
+        assert!(idle.iter().all(|message| message[2] == 0));
+        assert!(read().is_empty());
+        for deck in 0..2u8 {
+            let note = 0x90 + deck;
+            let cc = 0xB0 + deck;
+            let state = &hub.decks[usize::from(deck)];
+            state.lock().audio = Some(tone(0.01));
+            let set = |level: f32| {
+                // Use opposite stereo channels so both sides of the peak meter are exercised.
+                state.lock().peak = if deck == 0 { [0.0, level] } else { [level, 0.0] };
+            };
+            for (segment, threshold) in [10u8, 30, 50, 70, 90].into_iter().enumerate() {
+                set((f32::from(threshold) - 0.25) / 100.0);
+                assert_eq!(read(), [[cc, 3, threshold - 1]]);
+                set(f32::from(threshold) / 100.0);
+                let mut expected = vec![[note, 0x28 + segment as u8, 127], [cc, 3, threshold]];
+                if threshold == 90 {
+                    expected.extend([[cc, 4, 127], [cc, 0x14, 127]]);
+                }
+                assert_eq!(read(), expected);
+                assert!(read().is_empty());
+            }
+            state.lock().audio = None;
+            let cleared = read();
+            assert_eq!(cleared.len(), 8);
+            assert!(cleared.iter().all(|&[status, _, value]| (status == note || status == cc) && value == 0));
+        }
+        assert!(!output_acts("ChannelLevel.5", Kind::Rotary));
+        assert!(!output_acts("ChannelLevel.6", Kind::Indicator));
+    }
+
+    #[test]
+    fn indicator_cadence_is_per_destination_deck_and_preserves_other_outputs() {
+        let mut rows = NamedRows { jog_interval: Duration::from_millis(80), ..Default::default() };
+        let now = Instant::now();
+        assert!(rows.due(1, now));
+        assert!(!rows.due(1, now + Duration::from_millis(79)));
+        assert!(rows.due(2, now));
+        assert!(rows.due(1, now + Duration::from_millis(80)));
+    }
+
+    #[test]
+    fn the_new_functions_follow_rekordboxs_rules() {
+        // Vinyl Speed Adjust: knob position x 0.0155649149.
+        assert_eq!((vinyl_index(0), vinyl_index(8192), vinyl_index(16383)), (0, 127, 255));
+        // FX assign following a switch: master alone.
+        let mut a = [true, false, false, false, false, false];
+        fx_assign_set(&mut a, crate::fx::MASTER, true);
+        assert_eq!(a, [false, false, false, false, true, false]);
+        fx_assign_set(&mut a, 1, true);
+        assert_eq!(a, [false, true, false, false, false, false]);
+        fx_assign_set(&mut a, 1, false);
+        assert_eq!(a, [false; 6]);
+        // PanelSelect: FX, SAMPLER, MIXER, REC, none, in turn; back the other way.
+        let all = [true; 4];
+        assert_eq!(panel_next([false; 4], all, 1), Some(0));
+        assert_eq!(panel_next([true, false, false, false], all, 1), Some(1));
+        assert_eq!(panel_next([true, true, true, false], all, 1), Some(3));
+        assert_eq!(panel_next([false, false, false, true], all, 1), None);
+        assert_eq!(panel_next([false; 4], all, -1), Some(3));
+        assert_eq!(panel_next([true, false, false, false], all, -1), None);
+        // A panel the layout does not have is passed over.
+        assert_eq!(panel_next([true, false, false, false], [true, false, true, true], 1), Some(2));
+        // Lights: a button with no state of its own is lit while held; REVERSE blinks.
+        assert!(echo_led(Act::Load) && echo_led(Act::CallStep(1)) && echo_led(Act::Stub(Stub::SlipReverse)));
+        assert!(!echo_led(Act::Sync) && act_has_led(Act::Stub(Stub::Reverse)));
     }
 
     fn tone(secs: f64) -> Arc<crate::audio::Decoded> {
