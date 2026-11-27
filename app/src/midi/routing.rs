@@ -89,19 +89,10 @@ pub(super) fn momentary(act: Act) -> bool {
 struct Held {
     dev: Arc<Device>,
     event: Event,
-    /// Physical binding at press time for a held Drum Release FX lever. Importing
-    /// a replacement map can reuse the entry index for a different input.
-    drum_binding: Option<(u16, u8, Kind)>,
 }
 
 fn is_drum_release(event: &Event) -> bool {
     registry().get(event.tag).is_some_and(|f| f.act == Act::DrumRelease)
-}
-
-fn drum_binding(dev: &Device, event: &Event) -> Option<(u16, u8, Kind)> {
-    let map = dev.map.lock();
-    let input = map.inputs.get(event.entry)?.as_ref()?;
-    (input.tag == event.tag).then_some((input.e.code, input.e.deck, input.e.kind))
 }
 
 #[derive(Default)]
@@ -148,7 +139,6 @@ impl Routing {
             self.held.push(Held {
                 dev: dev.clone(),
                 event: *event,
-                drum_binding: if is_drum_release(event) { drum_binding(dev, event) } else { None },
             });
             return !duplicate;
         }
@@ -237,9 +227,8 @@ impl Hub {
         }
     }
 
-    /// A removed, reassigned or synthetic peer binding may no longer be able
-    /// to deliver the lever's release. An unrelated output edit keeps a
-    /// physical lever on the same input, deck and message type.
+    /// An input edit or import can remove a held button or reuse its entry for
+    /// another wire address. Release its original action before input resumes.
     pub(crate) fn try_edit_mapping(
         &self,
         dev: &Arc<Device>,
@@ -251,12 +240,17 @@ impl Hub {
         if dev.profile_trial_active() {
             return Err(crate::midi_map::Reject::Revert);
         }
-        edit(&mut dev.map.lock())?;
-        dev.reindex();
-        self.release_matching(&mut route, |h| {
-            Arc::ptr_eq(&h.dev, dev) && is_drum_release(&h.event)
-                && (h.drum_binding.is_none() || h.drum_binding != drum_binding(dev, &h.event))
-        });
+        let mut map = dev.map.lock();
+        // Compare the bindings only while editing a map. Ordinary controller
+        // presses and releases have no additional lookup or lock on the fast path.
+        let mut held: Vec<_> = route.held.iter().filter(|h| Arc::ptr_eq(&h.dev, dev))
+            .map(|h| (h.event, map.release_binding(&h.event))).collect();
+        edit(&mut map)?;
+        dev.reindex_map(&mut map, &[]);
+        held.retain(|(event, previous)| previous.is_none() || *previous != map.release_binding(event));
+        drop(map);
+        self.release_matching(&mut route, |h| Arc::ptr_eq(&h.dev, dev)
+            && held.iter().any(|(event, _)| event.entry == h.event.entry));
         Ok(())
     }
 
@@ -470,6 +464,31 @@ mod tests {
         hub.set_learning(&b, true);
         assert!(!hub.decks[0].lock().playing);
         assert!(hub.routing.lock().held.is_empty());
+    }
+
+    #[test]
+    fn remapping_a_held_fast_cue_stops_its_preview_on_the_original_deck() {
+        let (hub, _) = hub();
+        hub.routing.lock().performance = true;
+        let dev = controller("Deck");
+        let map = |note| {
+            let csv = format!("@file,1,Deck\nCue,,Button,{note:04X},,,,,,,,,,Fast;,\n");
+            MidiMap::load("Deck", None, Some(csv.as_bytes())).unwrap()
+        };
+        hub.edit_mapping(&dev, |m| *m = map(0x9011));
+        hub.input_message(&dev, [0x90, 0x11, 127], 1.0, 0, 0);
+        assert!(hub.decks[0].lock().playing);
+        hub.snap.lock().active = 1;
+        // Importing the same binding retains its hold. A new wire address in
+        // the same row cannot release the old press.
+        hub.edit_mapping(&dev, |m| *m = map(0x9011));
+        assert!(hub.decks[0].lock().playing);
+        hub.edit_mapping(&dev, |m| *m = map(0x9012));
+        assert!(!hub.decks[0].lock().playing);
+        assert!(hub.routing.lock().held.is_empty());
+        hub.decks[1].lock().playing = true;
+        hub.input_message(&dev, [0x80, 0x11, 0], 2.0, 0, 0);
+        assert!(hub.decks[1].lock().playing);
     }
 
     #[test]

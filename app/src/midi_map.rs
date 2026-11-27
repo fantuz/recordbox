@@ -390,11 +390,29 @@ impl MidiMap {
             Slot::Empty => return None,
         };
         let e = self.inputs[i as usize].take()?.e;
+        self.mirrored_presses.remove(&(i as usize));
         self.table[e.code as usize] = Slot::Empty;
         if e.kind.is_14bit() {
             self.table[e.code.wrapping_add(0x20) as usize] = Slot::Empty;
         }
         Some(e)
+    }
+
+    /// Physical source that can still deliver this held event's release. A mirrored
+    /// DDJ-RX press depends on both its source row and the live mirror record.
+    pub(crate) fn release_binding(&self, event: &Event) -> Option<(u16, u8, Kind)> {
+        let entry = if event.entry < self.inputs.len() {
+            event.entry
+        } else {
+            let source = !event.entry;
+            let press = self.mirrored_presses.get(&source)?;
+            if press.tag != event.tag || press.deck != event.deck {
+                return None;
+            }
+            source
+        };
+        let input = self.inputs.get(entry)?.as_ref()?;
+        (input.tag == event.tag).then_some((input.e.code, input.e.deck, input.e.kind))
     }
 
     /// The entry a code belongs to (for a 14-bit pair: either of its two codes).
@@ -1285,6 +1303,30 @@ mod tests {
         e.handle(&[0x96, 0x7C, 0x7F], 0.0);
         let ev = e.handle(&[0x90, 0x10, 0x7F], 0.0).unwrap();
         assert!(e.dual_event(&ev).is_none());
+    }
+
+    #[test]
+    fn release_binding_tracks_the_original_wire_across_dual_deck_mapping_edits() {
+        let row = Row::parse("Cue,Cue,Button,9010,0,1,2,3,,,,,,Dual;Fast;,").unwrap();
+        let mut m = MidiMap::new("DDJ-RX");
+        m.add_row(&row, false, false);
+        m.tag_inputs(|_| 123);
+        m.handle(&[0x96, 0x7c, 127], 0.0);
+        let down = m.handle(&[0x90, 0x10, 127], 1.0).unwrap();
+        let peer = m.dual_event(&down).unwrap();
+        let source = Some((0x9010, 1, Kind::Button));
+        assert_eq!(m.release_binding(&down), source);
+        assert_eq!(m.release_binding(&peer), source);
+        m.handle(&[0x92, 0x3C, 127], 2.0);
+        assert_eq!(m.release_binding(&peer), source, "changing deck layer leaves the original release routable");
+        let mut replaced = MidiMap::new("DDJ-RX");
+        replaced.add_row(&row, false, false);
+        replaced.tag_inputs(|_| 123);
+        assert_eq!(replaced.release_binding(&down), source);
+        assert_eq!(replaced.release_binding(&peer), None, "a new map cannot reproduce a pending mirrored release");
+        m.remove_input_code(0x9010);
+        assert_eq!(m.release_binding(&down), None);
+        assert_eq!(m.release_binding(&peer), None);
     }
 
     #[test]
