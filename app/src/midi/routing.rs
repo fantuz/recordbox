@@ -248,6 +248,9 @@ impl Hub {
         // Keep MIDI input outside the interval between changing the table and
         // tagging its entries, including when an import keeps the same binding.
         let mut route = self.routing.lock();
+        if dev.rx3_trial_active() {
+            return Err(crate::midi_map::Reject::Revert);
+        }
         edit(&mut dev.map.lock())?;
         dev.reindex();
         self.release_matching(&mut route, |h| {
@@ -262,6 +265,38 @@ impl Hub {
             edit(map);
             Ok(())
         });
+    }
+
+    /// A manual, reversible switch for this connection. The usual factory and
+    /// user loaders also remain authoritative when the device next connects.
+    pub(crate) fn set_rx3_trial(&self, dev: &Arc<Device>, on: bool) {
+        if !crate::midi_csv::rx3_primary_input(&dev.name) || dev.needs_auth {
+            return;
+        }
+        let mut route = self.routing.lock();
+        let mut original = dev.rx3_original.lock();
+        if !dev.alive.load(Relaxed) || original.is_some() == on {
+            return;
+        }
+        dev.input_epoch.fetch_add(1, Relaxed);
+        dev.learning.store(false, Relaxed);
+        self.release_holds(&mut route, Some(dev));
+        *dev.load_at.lock() = Default::default();
+        let mut map = dev.map.lock();
+        let mut offs = Vec::new();
+        if let Some(previous) = original.take() {
+            if dev.has_output {
+                // A pending OFF for one of the trial's four transport lamps
+                // may still be queued when the old map is restored.
+                offs.extend(map.outputs.iter().map(|e| (map.led_message(e, 0), e.opts.priority)));
+            }
+            *map = previous;
+        } else {
+            let pilot = MidiMap::load(&dev.name, Some(include_bytes!("profiles/XDJ-RX3.csv")), None)
+                .expect("built-in XDJ-RX3 profile");
+            *original = Some(std::mem::replace(&mut *map, pilot));
+        }
+        dev.reindex_map(&mut map, &offs);
     }
 
     pub(super) fn release_hidden_drum_decks(&self, count: u8) {
@@ -292,6 +327,7 @@ impl Hub {
 
     pub(crate) fn set_learning(&self, device: &Arc<Device>, on: bool) {
         let mut route = self.routing.lock();
+        if on && device.rx3_trial_active() { return; }
         if device.learning.swap(on, Relaxed) != on {
             device.input_epoch.fetch_add(1, Relaxed);
             if on {
@@ -430,6 +466,41 @@ mod tests {
         hub.set_learning(&b, true);
         assert!(!hub.decks[0].lock().playing);
         assert!(hub.routing.lock().held.is_empty());
+    }
+
+    #[test]
+    fn rx3_trial_releases_a_held_cue_drops_old_input_and_resets_only_its_lamps() {
+        let (hub, _) = hub();
+        hub.routing.lock().performance = true;
+        let mut rx3 = controller("XDJ-RX3");
+        Arc::get_mut(&mut rx3).unwrap().has_output = true;
+        let peer = controller("Other controller");
+        hub.set_rx3_trial(&peer, true);
+        assert!(!peer.rx3_trial_active());
+        let tag = registry().tag("PlayPause");
+        hub.set_rx3_trial(&rx3, true);
+        assert!(rx3.rx3_trial_active());
+        assert_eq!(rx3.map.lock().live_inputs().count(), 39);
+        assert_eq!(rx3.out_keys().len(), 4);
+        hub.input_message(&rx3, [0x90, 0x01, 127], 0.0, 0, 0);
+        assert!(!hub.decks[0].lock().playing, "queued before the trial");
+        hub.input_message(&rx3, [0x90, 0x01, 127], 1.0, 0, 1);
+        assert!(hub.decks[0].lock().playing);
+        rx3.set_led(tag, 2, Led::On);
+        hub.set_rx3_trial(&rx3, false);
+        assert!(!rx3.rx3_trial_active());
+        assert!(hub.routing.lock().held.is_empty());
+        assert!(!hub.decks[0].lock().playing);
+        assert_eq!(rx3.map.lock().live_inputs().count(), 1);
+        let mut out = rx3.out.lock();
+        let mut messages: Vec<_> = std::iter::from_fn(|| out.queue.pop()).collect();
+        messages.sort();
+        assert_eq!(messages, [[0x90, 0, 0], [0x90, 1, 0], [0x91, 0, 0], [0x91, 1, 0]]);
+        drop(out);
+        hub.input_message(&rx3, [0x90, 0x0B, 127], 2.0, 0, 1);
+        assert!(!hub.decks[0].lock().playing, "queued during the trial");
+        hub.input_message(&peer, [0x90, 0x0B, 127], 3.0, 0, 0);
+        assert!(hub.decks[0].lock().playing, "other port keeps its epoch and map");
     }
 
     fn drum_map(name: &str, code: u16) -> MidiMap {
