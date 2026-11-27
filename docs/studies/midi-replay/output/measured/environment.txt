@@ -1,0 +1,12 @@
+Linux-6.18.57-x86_64-with-glibc2.41
+cpu=1, rounds=8, target_sample_ms=40
+rustc 1.100.0 (0ef1bc386 2026-11-09)
+binary: rustc
+commit-hash: 0ef1bc386059596dada8fb65b50425aab2ea637a
+commit-date: 2026-11-09
+host: x86_64-unknown-linux-gnu
+release: 1.100.0
+LLVM version: 23.1.5
+
+model name	: INTEL(R) XEON(R) PLATINUM 8573C
+cpu.max: 400000 100000

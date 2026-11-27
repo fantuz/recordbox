@@ -45,6 +45,8 @@ published release assets are retained separately. Only the fork's gated release
 publication job receives contents-write access. Automation does not change
 repository protection settings.
 
+For the downloadable Mac ZIP, see the [checksum and first-launch instructions](MACOS-FIRST-LAUNCH.md).
+
 ## Homebrew on macOS
 
 The fork’s tap builds the tagged Rust source on the Mac where you install it. Install the Xcode Command Line Tools and Homebrew before building the app.
@@ -165,8 +167,8 @@ adopts the workflow, its maintainer enables Actions and pushes a matching versio
 tag there to start that repository's own release.
 
 Download the archive for your operating system and architecture and the release's
-`SHA256SUMS` file. Verify the checksum before extraction. These
-remain unsigned packages with the platform limitations documented below.
+`SHA256SUMS` file. Verify the checksum before extraction. The Mac ZIPs ship without Developer ID signing
+or Apple notarization.
 
 `python packaging/run_tests.py --output reports` runs the complete serial
 application suite and requires a complete successful result with no failed

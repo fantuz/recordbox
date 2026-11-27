@@ -26,7 +26,7 @@ This is the **fantuz/recordbox** fork of Adam Sardo’s original macOS app. It b
 <p align="center">
   <a href="https://github.com/fantuz/recordbox/releases/latest"><img src="https://img.shields.io/badge/Download-latest%20release-2e7d32?style=for-the-badge&logo=github" alt="Download the latest recordbox release" height="32"></a>
   <br>
-  <a href="#running-it">Installation details</a> · <a href="https://github.com/fantuz/recordbox/releases">All releases</a>
+  <a href="#running-it">Installation details</a> · <a href="docs/MACOS-FIRST-LAUNCH.md">First launch on macOS</a> · <a href="https://github.com/fantuz/recordbox/releases">All releases</a>
 </p>
 
 ## Project scope

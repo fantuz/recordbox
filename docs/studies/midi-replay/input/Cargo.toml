@@ -1,0 +1,17 @@
+[package]
+name = "grv6-route-probe"
+version = "0.0.0"
+edition = "2021"
+
+[dependencies]
+dirs = "5"
+tempfile = "3"
+sha2 = "0.10"
+
+[[bin]]
+name = "fork"
+path = "fork/main.rs"
+
+[[bin]]
+name = "upstream"
+path = "upstream/main.rs"

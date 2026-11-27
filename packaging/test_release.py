@@ -133,6 +133,20 @@ class DownloadNotesTests(unittest.TestCase):
         for text in ("## Downloads", "| Platform | Archive |", "<!-- recordbox-downloads:start -->", "<!-- recordbox-downloads:end -->"):
             self.assertEqual(body.count(text), 1)
 
+    def test_first_launch_links_follow_the_target_tag_and_refresh_once(self):
+        tag = "v0.8.2-rc.1+build.2"
+        repo = "another/recordbox"
+        notes = release.render_release_downloads(self.notes, "previous/recordbox", "v0.8.2-rc.1", has_macos_guide=True)
+        body = release.render_release_downloads(notes, repo, tag, has_macos_guide=True)
+        self.assertEqual(body, release.render_release_downloads(body, repo, tag, has_macos_guide=True))
+        self.assertNotIn("previous/recordbox", body)
+        self.assertEqual(body.count("https://github.com/another/recordbox/blob/v0.8.2-rc.1%2Bbuild.2/docs/MACOS-FIRST-LAUNCH.md"), 1)
+        self.assertEqual(body.count("https://support.apple.com/en-us/102445"), 1)
+        self.assertIn("System Settings → Privacy & Security → Open Anyway", body)
+        self.assertLess(body.index("Open Anyway"), body.index("| macOS Apple Silicon |"))
+        historical = release.render_release_downloads(body, "fantuz/recordbox", "v0.5.0")
+        self.assertEqual(historical, release.render_release_downloads(self.notes, "fantuz/recordbox", "v0.5.0"))
+
     def test_missing_downloads_section_is_appended_and_other_notes_are_unchanged(self):
         notes = "# Next release\n\n## Changes\n\nKeep these changes.\n<!-- recordbox-release-source: source -->\n"
         body = release.render_release_downloads(notes, "fantuz/recordbox", "v0.6.0")
@@ -257,11 +271,20 @@ class ReleaseTests(unittest.TestCase):
         for line in sums:
             digest, name = line.split("  "); self.assertEqual(digest, package.sha256(assets / name))
         body = (self.output / "body.md").read_text()
+        self.assertNotIn("MACOS-FIRST-LAUNCH.md", body)
         self.assertIn(f"<!-- recordbox-release-source: {self.commit} -->", body)
         self.assertIn("Author: Example", body); self.assertIn("0.5.0", body)
         self.assertIn(self.log.rstrip(), body)
         for name in set(self.names.values()) | {"COMMIT-LOG.txt", "SHA256SUMS"}:
             self.assertIn(f"[`{name}`](https://github.com/fixture-owner/recordbox/releases/download/v0.5.0/{name})", body)
+
+    def test_stage_links_to_mac_first_launch_guide_only_if_in_release_checkout(self):
+        (self.source / "docs/MACOS-FIRST-LAUNCH.md").write_text("# Open recordbox on macOS\n")
+        self.stage()
+        body = (self.output / "body.md").read_text()
+        self.assertIn("https://github.com/fixture-owner/recordbox/blob/v0.5.0/docs/MACOS-FIRST-LAUNCH.md", body)
+        self.assertNotIn("Archives are unsigned", body)
+        self.assertIn(f"<!-- recordbox-release-source: {self.commit} -->", body)
 
     def test_verify_linux_vulkan_archive_against_tagged_shader_and_guide(self):
         shader = self.source / "app/src/stems/vulkan/linear.wgsl"

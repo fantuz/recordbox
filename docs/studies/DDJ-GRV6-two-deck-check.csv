@@ -1,0 +1,7 @@
+@file,1,DDJ-GRV6
+PlayPause,Transport,Button,,900B,910B,,,,900B,910B,,,Fast;,
+Cue,Cue,Button,,900C,910C,,,,900C,910C,,,Fast;,
+ChannelFader,Level,KnobSliderHiRes,,B013,B113,,,,,,,,Fast;,
+PAD1_HotCue,Pad,Pad,,9700,9900,,,,9700,9900,,,Fast;,
+JogPitchBend,Rim,JogRotate,,B021,B121,,,,,,,,RO;,
+JogPitchBend,Top,JogRotate,,B023,B123,,,,,,,,RO;,
