@@ -77,6 +77,7 @@ pub(super) fn momentary(act: Act) -> bool {
             | Act::PitchBend(_)
             | Act::SamplerPad(..)
             | Act::FxReleaseOn(_)
+            | Act::DrumRelease
             | Act::FxTapLong(_)
             | Act::FxAssignHold(..)
             | Act::Shift
@@ -88,6 +89,19 @@ pub(super) fn momentary(act: Act) -> bool {
 struct Held {
     dev: Arc<Device>,
     event: Event,
+    /// Physical binding at press time for a held Drum Release FX lever. Importing
+    /// a replacement map can reuse the entry index for a different input.
+    drum_binding: Option<(u16, u8, Kind)>,
+}
+
+fn is_drum_release(event: &Event) -> bool {
+    registry().get(event.tag).is_some_and(|f| f.act == Act::DrumRelease)
+}
+
+fn drum_binding(dev: &Device, event: &Event) -> Option<(u16, u8, Kind)> {
+    let map = dev.map.lock();
+    let input = map.inputs.get(event.entry)?.as_ref()?;
+    (input.tag == event.tag).then_some((input.e.code, input.e.deck, input.e.kind))
 }
 
 #[derive(Default)]
@@ -134,6 +148,7 @@ impl Routing {
             self.held.push(Held {
                 dev: dev.clone(),
                 event: *event,
+                drum_binding: if is_drum_release(event) { drum_binding(dev, event) } else { None },
             });
             return !duplicate;
         }
@@ -209,9 +224,8 @@ impl Hub {
     }
 
     // A final release uses the same fast/UI delivery as a physical release.
-    fn release_holds(&self, route: &mut Routing, device: Option<&Arc<Device>>) {
-        let matches = |d: &Arc<Device>| device.is_none_or(|who| Arc::ptr_eq(who, d));
-        while let Some(h) = route.held.iter().find(|h| matches(&h.dev)) {
+    fn release_matching(&self, route: &mut Routing, matches: impl Fn(&Held) -> bool) {
+        while let Some(h) = route.held.iter().find(|h| matches(h)) {
             let dev = h.dev.clone();
             let mut release = Event {
                 val: Val::On(false, 0),
@@ -221,6 +235,42 @@ impl Hub {
                 self.deliver(route, &dev, release);
             }
         }
+    }
+
+    /// A removed, reassigned or synthetic peer binding may no longer be able
+    /// to deliver the lever's release. An unrelated output edit keeps a
+    /// physical lever on the same input, deck and message type.
+    pub(crate) fn try_edit_mapping(
+        &self,
+        dev: &Arc<Device>,
+        edit: impl FnOnce(&mut MidiMap) -> Result<(), crate::midi_map::Reject>,
+    ) -> Result<(), crate::midi_map::Reject> {
+        // Keep MIDI input outside the interval between changing the table and
+        // tagging its entries, including when an import keeps the same binding.
+        let mut route = self.routing.lock();
+        edit(&mut dev.map.lock())?;
+        dev.reindex();
+        self.release_matching(&mut route, |h| {
+            Arc::ptr_eq(&h.dev, dev) && is_drum_release(&h.event)
+                && (h.drum_binding.is_none() || h.drum_binding != drum_binding(dev, &h.event))
+        });
+        Ok(())
+    }
+
+    pub(crate) fn edit_mapping(&self, dev: &Arc<Device>, edit: impl FnOnce(&mut MidiMap)) {
+        let _ = self.try_edit_mapping(dev, |map| {
+            edit(map);
+            Ok(())
+        });
+    }
+
+    pub(super) fn release_hidden_drum_decks(&self, count: u8) {
+        self.release_matching(&mut self.routing.lock(), |h| h.event.deck > count && is_drum_release(&h.event));
+    }
+
+    fn release_holds(&self, route: &mut Routing, device: Option<&Arc<Device>>) {
+        let matches = |d: &Arc<Device>| device.is_none_or(|who| Arc::ptr_eq(who, d));
+        self.release_matching(route, |h| matches(&h.dev));
         for (n, owner) in route.jog_owner.iter_mut().enumerate() {
             if owner.as_ref().is_some_and(&matches) {
                 *owner = None;
@@ -380,6 +430,83 @@ mod tests {
         hub.set_learning(&b, true);
         assert!(!hub.decks[0].lock().playing);
         assert!(hub.routing.lock().held.is_empty());
+    }
+
+    fn drum_map(name: &str, code: u16) -> MidiMap {
+        // Assigned to the active deck; its physical note stays the same when focus moves.
+        let csv = format!("@file,1,{name}\nDrumReleaseFx,,Button,{code:04X},,,,,,,,,,,\n");
+        MidiMap::load(name, None, Some(csv.as_bytes())).unwrap()
+    }
+
+    fn drum_controller(name: &str) -> Arc<Device> {
+        Device::mapped(name, name.to_owned(), drum_map(name, 0x9024), false, None)
+    }
+
+    fn drum_edges(rx: &crossbeam_channel::Receiver<UiEvent>) -> Vec<(u8, bool)> {
+        rx.try_iter().map(|event| match event {
+            UiEvent::Control { tag, deck, val: Val::On(on, _), .. } => {
+                assert_eq!(registry().get(tag).unwrap().act, Act::DrumRelease);
+                (deck, on)
+            }
+            _ => panic!("expected a drum release FX transition"),
+        }).collect()
+    }
+
+    #[test]
+    fn drum_levers_share_the_original_deck_and_learn_releases_the_final_owner() {
+        let (hub, rx) = hub();
+        hub.routing.lock().performance = true;
+        let (a, b) = (drum_controller("A"), drum_controller("B"));
+        hub.input_message(&a, [0x90, 0x24, 127], 1.0, 0, 0);
+        hub.input_message(&b, [0x90, 0x24, 127], 2.0, 0, 0);
+        assert_eq!(drum_edges(&rx), [(1, true)]);
+        hub.snap.lock().active = 1;
+        hub.release_device(&a);
+        assert!(drum_edges(&rx).is_empty());
+        hub.set_learning(&b, true);
+        assert_eq!(drum_edges(&rx), [(1, false)]);
+        // Note Off now belongs to Learn and must never stop the new deck or retrigger FX.
+        hub.input_message(&b, [0x80, 0x24, 42], 3.0, 0, 1);
+        assert!(matches!(rx.try_recv(), Ok(UiEvent::Learn { .. })));
+        assert!(rx.try_recv().is_err() && hub.routing.lock().held.is_empty());
+    }
+
+    #[test]
+    fn replacing_an_active_drum_binding_releases_even_if_its_index_is_reused() {
+        let (hub, rx) = hub();
+        hub.routing.lock().performance = true;
+        let dev = drum_controller("Test");
+        hub.input_message(&dev, [0x90, 0x24, 127], 0.0, 0, 0);
+        assert_eq!(drum_edges(&rx), [(1, true)]);
+        hub.edit_mapping(&dev, |map| *map = drum_map("Test", 0x9024));
+        assert!(drum_edges(&rx).is_empty());
+        hub.edit_mapping(&dev, |map| *map = drum_map("Test", 0x9025));
+        assert_eq!(drum_edges(&rx), [(1, false)]);
+        hub.input_message(&dev, [0x90, 0x24, 0], 1.0, 0, 0);
+        hub.snap.lock().active = 1;
+        hub.input_message(&dev, [0x90, 0x25, 127], 2.0, 0, 0);
+        hub.input_message(&dev, [0x80, 0x25, 64], 3.0, 0, 0);
+        assert_eq!(drum_edges(&rx), [(2, true), (2, false)]);
+    }
+
+    #[test]
+    fn hiding_decks_releases_only_their_levers_and_mode_exit_releases_the_rest() {
+        let (hub, rx) = hub();
+        hub.routing.lock().performance = true;
+        hub.snap.lock().count = 4;
+        let (a, b) = (drum_controller("Front"), drum_controller("Rear"));
+        hub.input_message(&a, [0x90, 0x24, 127], 0.0, 0, 0);
+        hub.snap.lock().active = 3;
+        hub.input_message(&b, [0x90, 0x24, 127], 1.0, 0, 0);
+        assert_eq!(drum_edges(&rx), [(1, true), (4, true)]);
+        hub.snap.lock().count = 2;
+        hub.release_hidden_drum_decks(2);
+        assert_eq!(drum_edges(&rx), [(4, false)]);
+        let mut route = hub.routing.lock();
+        route.performance = false;
+        hub.release_holds(&mut route, None);
+        assert_eq!(drum_edges(&rx), [(1, false)]);
+        assert!(route.held.is_empty());
     }
 
     #[test]

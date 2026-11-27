@@ -179,6 +179,10 @@ fn device(midi: &MidiState) -> Option<std::sync::Arc<Device>> {
     midi.hub.as_ref()?.device(&midi.win.device)
 }
 
+fn editable_device(midi: &MidiState) -> Option<(&Hub, std::sync::Arc<Device>)> {
+    Some((midi.hub.as_deref()?, device(midi)?))
+}
+
 fn save(app: &mut App) {
     if let (Some(hub), Some(dev)) = (app.midi.hub.clone(), device(&app.midi)) {
         if let Err(e) = hub.save_map(&dev) {
@@ -304,16 +308,15 @@ fn show_clash(app: &mut App) {
 fn commit_in(app: &mut App, r: usize, new: Option<u16>) -> bool {
     let tab = app.midi.win.tab;
     let Some(row) = app.midi.win.rows.get(tab).and_then(|v| v.get(r)).cloned() else { return false };
-    let Some(dev) = device(&app.midi) else { return false };
+    let Some((hub, dev)) = editable_device(&app.midi) else { return false };
     if row.input == new {
         return false;
     }
     let reg = registry();
-    let res = dev.map.lock().change_input(&row.entry(row.input_kind), row.input, new, &|n| reg.learnable(n));
+    let res = hub.try_edit_mapping(&dev, |map| map.change_input(&row.entry(row.input_kind), row.input, new, &|n| reg.learnable(n)));
     match res {
         Ok(()) => {
             app.midi.win.rows[tab][r].input = new;
-            dev.reindex();
             true
         }
         Err(Reject::Taken(e)) => {
@@ -327,16 +330,15 @@ fn commit_in(app: &mut App, r: usize, new: Option<u16>) -> bool {
 fn commit_out(app: &mut App, r: usize, new: Option<u16>) -> bool {
     let tab = app.midi.win.tab;
     let Some(row) = app.midi.win.rows.get(tab).and_then(|v| v.get(r)).cloned() else { return false };
-    let Some(dev) = device(&app.midi) else { return false };
+    let Some((hub, dev)) = editable_device(&app.midi) else { return false };
     if row.output == new {
         return false;
     }
     let reg = registry();
-    let res = dev.map.lock().change_output(&row.entry(row.output_kind), row.output, new, &|n| reg.learnable(n));
+    let res = hub.try_edit_mapping(&dev, |map| map.change_output(&row.entry(row.output_kind), row.output, new, &|n| reg.learnable(n)));
     match res {
         Ok(()) => {
             app.midi.win.rows[tab][r].output = new;
-            dev.reindex();
             true
         }
         Err(Reject::Taken(e)) => {
@@ -351,14 +353,12 @@ fn commit_out(app: &mut App, r: usize, new: Option<u16>) -> bool {
 fn commit_row(app: &mut App, r: usize) {
     let tab = app.midi.win.tab;
     let Some(row) = app.midi.win.rows.get(tab).and_then(|v| v.get(r)).cloned() else { return };
-    let Some(dev) = device(&app.midi) else { return };
+    let Some((hub, dev)) = editable_device(&app.midi) else { return };
     if row.input.is_none() && row.output.is_none() { return; }
-    {
-        let mut map = dev.map.lock();
+    hub.edit_mapping(&dev, |map| {
         map.rewrite(&row.entry(row.input_kind), row.input, None);
         map.rewrite(&row.entry(row.output_kind), None, row.output);
-    }
-    dev.reindex();
+    });
     save(app);
 }
 
@@ -416,9 +416,8 @@ pub fn delete_row(app: &mut App) {
     let row = app.midi.win.rows[tab].remove(r);
     app.midi.win.sel[tab] = None;
     if row.input.is_none() && row.output.is_none() { return; }
-    if let Some(dev) = device(&app.midi) {
-        dev.map.lock().delete(row.input, row.output);
-        dev.reindex();
+    if let Some((hub, dev)) = editable_device(&app.midi) {
+        hub.edit_mapping(&dev, |map| map.delete(row.input, row.output));
     }
     save(app);
 }
@@ -459,8 +458,8 @@ pub fn import(app: &mut App) {
         app.midi.win.alert = Some(("Cannot import the MIDI setting file".into(), e.to_string()));
         return;
     }
-    *dev.map.lock() = hub.load_map(&dev.name).0;
-    dev.reindex();
+    let replacement = hub.load_map(&dev.name).0;
+    hub.edit_mapping(&dev, |map| *map = replacement);
     rebuild_rows(&mut app.midi);
 }
 
@@ -471,8 +470,8 @@ pub fn reset_default(app: &mut App) {
         app.midi.win.alert = Some(("MIDI settings could not be reset".into(), e.to_string()));
         return;
     }
-    *dev.map.lock() = hub.load_map(&dev.name).0;
-    dev.reindex();
+    let replacement = hub.load_map(&dev.name).0;
+    hub.edit_mapping(&dev, |map| *map = replacement);
     rebuild_rows(&mut app.midi);
 }
 

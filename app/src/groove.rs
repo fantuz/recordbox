@@ -280,7 +280,7 @@ pub struct Engine {
     rows: [Row; ROWS],
     deck: usize,
     /// DRUM SWAP GAIN of the deck, as a gain.
-    pub gain: f32,
+    gain: f32,
     /// SINGLE: a clip that starts stops the other rows.
     pub single: bool,
     /// The DRUMS part is to stay muted while a swap plays in SINGLE mode (dropped when the
@@ -310,6 +310,10 @@ pub struct Engine {
 impl Engine {
     pub fn new(deck: usize) -> Engine {
         Engine { rows: std::array::from_fn(|_| Row::new()), deck: deck.min(DECKS - 1), gain: 1.0, single: true, hold_drums: true, release: None, bpm: 120.0, silent: false, mix: vec![0.0; 16384], bus: vec![0.0; 16384], dry: vec![0.0; 16384], rfx: None, wet: 0.0, cut: false, sounding: false, was_playing: false }
+    }
+
+    fn set_deck_gain(&mut self, percent: f32) {
+        self.gain = knob_gain(percent);
     }
 
     /// Make the release FX unit (not on the audio thread: it allocates).
@@ -1074,7 +1078,7 @@ pub struct GrooveUi {
     pub capture_len: u32,
     /// The page of the column at the left of the waveforms: 0 zoom, 2 DRUM CAPTURE.
     pub page: u8,
-    /// The deck whose DRUM RELEASE FX button is held.
+    /// Mouse hold on the DRUM RELEASE FX button of each deck.
     pub rfx_held: [bool; DECKS],
     /// Slot level meters (dB).
     pub meter: [[f32; ROWS]; DECKS],
@@ -1090,7 +1094,7 @@ pub struct GrooveUi {
     pub slot_rects: [[egui::Rect; ROWS]; DECKS],
     pub panel_rects: [egui::Rect; DECKS],
     frames: u32,
-    pub was_visible: bool,
+    visible_decks: usize,
     /// The panel is hidden and something is still fading out or being read.
     winding: bool,
     pub textures: std::collections::HashMap<&'static str, Option<egui::TextureHandle>>,
@@ -1123,7 +1127,7 @@ impl Default for GrooveUi {
             drag_capture: None,
             panel_rects: [egui::Rect::NOTHING; DECKS],
             frames: 0,
-            was_visible: false,
+            visible_decks: 0,
             winding: false,
             textures: Default::default(),
         }
@@ -1305,6 +1309,19 @@ impl App {
         }
     }
 
+    /// Overall volume of this deck's four Drum Swap rows in either bank.
+    pub fn groove_set_deck_gain(&mut self, deck: usize, percent: f32) {
+        let Some(value) = self.gc.gain.get_mut(deck) else { return };
+        if !percent.is_finite() {
+            return;
+        }
+        let percent = percent.clamp(0.0, 100.0).round();
+        if *value != percent {
+            *value = percent;
+            with_engine(deck, |e| e.set_deck_gain(percent));
+        }
+    }
+
     /// A slot's GAIN knob (0..100).
     pub fn groove_set_slot_gain(&mut self, deck: usize, idx: usize, v: f32) {
         let v = v.clamp(0.0, 100.0).round();
@@ -1338,6 +1355,10 @@ impl App {
     pub fn groove_release_fx(&mut self, deck: usize, on: bool) {
         let deck = deck.min(DECKS - 1);
         self.gc.rfx_held[deck] = on && self.groove_visible();
+    }
+
+    pub fn groove_release_held(&self, deck: usize) -> bool {
+        !self.deck_options.disable_play && (self.gc.rfx_held[deck] || self.midi.drum_release[deck])
     }
 
     // -------------------------------------------------------------------------- capture
@@ -1576,14 +1597,15 @@ impl App {
     /// the DRUMS mute rule, and stop everything when the panel goes away.
     pub fn groove_poll(&mut self) {
         let visible = self.groove_visible();
-        let count = self.deck_count() as usize;
+        let count = usize::from(self.deck_count()).min(DECKS);
         if !visible {
-            if !self.gc.was_visible && !self.gc.winding {
+            self.midi.drum_release.fill(false);
+            if self.gc.visible_decks == 0 && !self.gc.winding {
                 return;
             }
-            if self.gc.was_visible {
+            if self.gc.visible_decks > 0 {
                 // (`onGrooveCircuitDisabled` 0x100f1af0c: capture off, all clips stopped.)
-                self.gc.was_visible = false;
+                self.gc.visible_decks = 0;
                 self.gc.capture_on = None;
                 self.gc.page = 0;
                 self.gc.rfx_held = [false; DECKS];
@@ -1610,7 +1632,14 @@ impl App {
             self.groove_take_loaded();
             return;
         }
-        self.gc.was_visible = true;
+        // A layout change can hide a deck while its lever is down. Its engine
+        // still exists, but the visible-deck loop below will no longer update it.
+        for d in count..self.gc.visible_decks {
+            self.gc.rfx_held[d] = false;
+            self.midi.drum_release[d] = false;
+            with_engine(d, |e| e.release = None);
+        }
+        self.gc.visible_decks = count;
         self.gc.frames = self.gc.frames.wrapping_add(1);
         if !self.gc.restored {
             self.gc.restored = true;
@@ -1637,10 +1666,11 @@ impl App {
         }
         // The engines of the decks in the layout (the first one of a deck also makes its
         // release FX unit).
-        for d in 0..count.min(DECKS) {
+        for d in 0..count {
             let mut g = ENGINES[d].lock();
             if g.is_none() {
                 let mut e = Box::new(Engine::new(d));
+                e.set_deck_gain(self.gc.gain[d]);
                 e.prepare_fx();
                 *g = Some(e);
             }
@@ -1687,15 +1717,13 @@ impl App {
             }
         }
         // Settings to the engines, the mute rule, the meters.
-        for d in 0..count.min(DECKS) {
+        for d in 0..count {
             let set = &self.gc.set.decks[d];
             let (single, kind, beat) = (!set.multi, set.fx_type.min(2), set.fx_beats[set.fx_type.min(2) as usize]);
             let bpm = self.groove_deck_bpm(d);
-            let held = self.gc.rfx_held[d];
-            let gain = knob_gain(self.gc.gain[d]);
+            let held = self.groove_release_held(d);
             let mut peaks = [0.0f32; ROWS];
             let launched = with_engine(d, |e| {
-                e.gain = gain;
                 e.single = single;
                 e.release = if held { Some((kind, beat.0 as f32 / beat.1.max(1) as f32)) } else { None };
                 if bpm > 0.0 {
@@ -2149,6 +2177,33 @@ mod tests {
         let d = Settings::from_xml(rb);
         assert_eq!(d.decks[1].slots[4].as_ref().map(|s| (s.id, s.gain, s.bpm)), Some((9, 50.0, 0.0)));
         assert!(d.decks[1].multi);
+    }
+
+    #[test]
+    fn deck_gain_scales_playing_and_new_drum_loops_without_changing_slot_gains() {
+        let mut engine = Engine::new(0);
+        engine.single = false;
+        let mut first = drum_loop(120.0, 1, 44100);
+        first.gain = 0.25;
+        engine.set_clip(0, 0, Some(first));
+        assert!(engine.launch(0, 0));
+
+        // Away from the click each channel of each loop contains 0.25.
+        let mut pos = 0.0;
+        let mut volume = |e: &mut Engine| *run(e, &[], &mut pos, 1.0, 1024, false).last().unwrap();
+        assert!((volume(&mut engine) - 0.25 * 0.25).abs() < 1e-5);
+        engine.set_deck_gain(75.0);
+        assert!((volume(&mut engine) - 0.25 * 0.25 * knob_gain(75.0)).abs() < 1e-5);
+
+        let mut later = drum_loop(120.0, 1, 44100);
+        later.gain = 0.75;
+        engine.set_clip(1, 1, Some(later));
+        assert!(engine.launch(1, 1));
+        assert!((volume(&mut engine) - 0.25 * knob_gain(75.0)).abs() < 1e-5);
+        engine.set_deck_gain(50.0);
+        assert!((volume(&mut engine) - 0.25 * knob_gain(50.0)).abs() < 1e-5);
+        assert_eq!(engine.clip_mut(0, 0).unwrap().gain, 0.25);
+        assert_eq!(engine.clip_mut(1, 1).unwrap().gain, 0.75);
     }
 
     #[test]

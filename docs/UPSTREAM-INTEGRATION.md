@@ -79,6 +79,19 @@ For the DDJ-GRV6, the two-deck study CSV exercises transport, both jog surfaces,
 
 This follow-up incorporates Adam Sardo’s controller updates for pressure-pad types, jog handling, higher-resolution indicators and additional mapped deck, mixer and effects controls. MIDI Learn preserves device-specific pad types when editing. The output scheduler honors mapped timing for jog indicators. [Upstream MIDI changes](https://github.com/adamsardo/recordbox/commit/4b71b0158d89ab35dafa7d54636c684ba0053318)
 
+### DDJ-GRV6 Groove Circuit
+
+In **PERFORMANCE**, enable **STEMS** and **GROOVE CIRCUIT** under **Preferences → Extensions → STEMS**, then open the Groove Circuit panel in the top bar. With the corresponding rows in your controller mapping, the unshifted controls operate the selected deck.
+
+| Control | Action | Feedback to the controller |
+| --- | --- | --- |
+| DRUM SWAP 1–4 | Play or stop the slot in the current bank. With Capture armed on that deck, a slot press saves the captured audio as a WAV in the configured capture folder and assigns it to the slot. | Four slot lights follow the deck’s slot state. |
+| CAPTURE | Arm or disarm capture. The button alone does not create a file. | The light follows the armed deck. |
+| GAIN | Adjust the Drum Swap level for the whole deck. The 14-bit knob covers the full range, with unity near the midpoint. Individual sample trims keep their values. | Input only. |
+| DRUM RELEASE lever | Apply the selected release effect while the lever is held. | Input only. |
+
+From the source checkout, run `recordbox --midi-coverage docs/studies/DDJ-GRV6-groove-check.csv` to check these seven inputs and five feedback rows. The file is a diagnostic excerpt. Use your full controller mapping for a set. To check the return path on hardware, arm Capture **with the mouse** and watch the controller light, then disarm it before trying the slot buttons. [Diagnostic CSV](studies/DDJ-GRV6-groove-check.csv) · [AlphaTheta MIDI message list, page 3](https://downloads.support.alphatheta.com/software_info/dj-controllers/DDJ-GRV6/DDJ-GRV6_MIDI_Message_List_E1.pdf#page=3) · [AlphaTheta user manual](https://downloads.support.alphatheta.com/manuals/dj-controllers/DDJ-GRV6/DDJ-GRV6_DRI1927A_manual.pdf) · [Upstream Groove Circuit mapping](https://github.com/adamsardo/recordbox/commit/4c3351486585c4db20528a59747bca87348bc153)
+
 ### Effects
 
 This integration brings upstream’s SPACE and two-band GATE COMP processing, Beat FX including SPIRAL and HELIX, Pad FX combination pads and beat steps, and MERGE FX parameter and sample handling. Controller and effect behavior depends on the mapping, audio device and sample rate. An automated virtual-controller exchange exercises the mapping and LED paths on macOS. Physical-controller latency and listening comparisons with the original effects still require hardware testing. [Upstream changes](https://github.com/adamsardo/recordbox/compare/74ba5e9...3cc12d9)

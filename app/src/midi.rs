@@ -34,6 +34,8 @@ use std::time::{Duration, Instant};
 
 mod ports;
 mod routing;
+#[cfg(test)]
+mod grv6_groove_tests;
 use routing::{Platter, Routing};
 pub(crate) use routing::change_mode;
 
@@ -208,7 +210,7 @@ pub fn act_accepts(a: Act, c: InClass) -> bool {
         A::Needle | A::Tempo | A::FxLevel(..) | A::CfxColor(_) | A::SamplerGain | A::Trim | A::Eq(_) | A::StemIsoKnob(_) | A::ChFader | A::HpMix | A::HpLevel | A::CrossFader | A::MasterLevel => c == InClass::Abs,
         A::LoopSize | A::FxReleaseType(_) | A::Browse | A::Zoom | A::LoopMoveRot => c == InClass::Rel,
         A::FxSelect(..) => matches!(c, InClass::Press | InClass::Rel),
-        A::VinylAdjust(_) | A::XfAssignKnob => c == InClass::Abs,
+        A::VinylAdjust(_) | A::XfAssignKnob | A::DrumGain => c == InClass::Abs,
         A::Jog(_) | A::JogSearch => c == InClass::Jog,
         A::TempoLed(_) => false,
         A::Stub(Stub::VinylBrake(_)) => c == InClass::Abs,
@@ -218,7 +220,7 @@ pub fn act_accepts(a: Act, c: InClass) -> bool {
 
 /// Buttons whose light shows the button held (they have no state to show).
 pub fn echo_led(a: Act) -> bool {
-    act_accepts(a, InClass::Press) && !act_has_led(a) && !matches!(a, Act::Shift | Act::JogTouch | Act::Stub(Stub::Reverse))
+    act_accepts(a, InClass::Press) && !act_has_led(a) && !matches!(a, Act::Shift | Act::JogTouch | Act::DrumRelease | Act::Stub(Stub::Reverse))
 }
 
 /// The actions whose state `leds` sends to an output row.
@@ -227,7 +229,7 @@ pub fn act_has_led(a: Act) -> bool {
     use crate::sampler_ext::SmpAct;
     matches!(
         a,
-        A::PlayPause | A::Cue | A::Search(_) | A::Slip | A::Quantize | A::QuantizeAll | A::MasterTempo | A::Sync | A::Master | A::KeySync | A::TempoLed(_) | A::AutoLoop | A::Loop4 | A::Reloop | A::LoopIn | A::LoopOut | A::PitchBend(_) | A::PadMode(_) | A::HotCue(_) | A::HotCueDelete(_) | A::BeatJumpPad(_) | A::BeatLoopPad(_) | A::StemPart(_) | A::StemFx(_) | A::StemSolo | A::FxOn(..) | A::FxMode(_) | A::FxAuto(_) | A::FxTap(_) | A::FxReleaseOn(_) | A::FxAssign(..) | A::SamplerPad(..) | A::SamplerPadStop(_) | A::Smp(SmpAct::Sync | SmpAct::Master | SmpAct::Quantize | SmpAct::SeqPlay | SmpAct::SeqRec) | A::SamplerCue | A::SeqCall(..) | A::HeadCue | A::XfAssign(_) | A::StemIso | A::Panel(_) | A::Related | A::Stub(Stub::Vinyl) | A::Stub(Stub::Reverse)
+        A::PlayPause | A::Cue | A::Search(_) | A::Slip | A::Quantize | A::QuantizeAll | A::MasterTempo | A::Sync | A::Master | A::KeySync | A::TempoLed(_) | A::AutoLoop | A::Loop4 | A::Reloop | A::LoopIn | A::LoopOut | A::PitchBend(_) | A::PadMode(_) | A::HotCue(_) | A::HotCueDelete(_) | A::BeatJumpPad(_) | A::BeatLoopPad(_) | A::StemPart(_) | A::StemFx(_) | A::StemSolo | A::DrumSwap(_) | A::DrumCapture | A::FxOn(..) | A::FxMode(_) | A::FxAuto(_) | A::FxTap(_) | A::FxReleaseOn(_) | A::FxAssign(..) | A::SamplerPad(..) | A::SamplerPadStop(_) | A::Smp(SmpAct::Sync | SmpAct::Master | SmpAct::Quantize | SmpAct::SeqPlay | SmpAct::SeqRec) | A::SamplerCue | A::SeqCall(..) | A::HeadCue | A::XfAssign(_) | A::StemIso | A::Panel(_) | A::Related | A::Stub(Stub::Vinyl) | A::Stub(Stub::Reverse)
     )
 }
 
@@ -308,6 +310,10 @@ pub enum Act {
     BeatLoopPad(u8),
     StemPart(u8),
     StemFx(u8),
+    DrumSwap(u8),
+    DrumCapture,
+    DrumRelease,
+    DrumGain,
     FxLevel(u8, u8),
     FxOn(u8, u8),
     FxSelect(u8, u8, i32),
@@ -493,6 +499,13 @@ fn build_registry() -> Vec<Func> {
     add(t, "KeyShift", "KeyReset", "KeyReset", b, true, A::KeyReset);
     add(t, "STEMS", "ActiveStem Mute/Solo", "ActivePartMuteSolo", b, false, A::StemSolo);
 
+    for slot in 0..crate::groove::ROWS as u8 {
+        let number = slot + 1;
+        add(t, "STEMS", &format!("Drum Swap {number} Play/Stop"), &format!("DrumSwap{number}"), b, true, A::DrumSwap(slot));
+    }
+    add(t, "STEMS", "Drum Capture On/Off", "DrumSwapCapture", b, true, A::DrumCapture);
+    add(t, "STEMS", "Drum Swap Gain", "DrumSwapGain", T_KNOB14, true, A::DrumGain);
+
     // ---- PAD
     let t = Tab::Pad;
     add(t, "HotCue", "HotCueMode", "HotCue", b, true, A::PadMode(0));
@@ -558,6 +571,7 @@ fn build_registry() -> Vec<Func> {
 
     // ---- FX
     let t = Tab::Fx;
+    add(t, "STEMS", "Drum Release FX", "DrumReleaseFx", b, true, A::DrumRelease);
     for u in 0..2u8 {
         let cat: &'static str = if u == 0 { "FX1" } else { "FX2" };
         for s in 0..3u8 {
@@ -1909,13 +1923,15 @@ pub struct MidiState {
     started: bool,
     /// Messages that were mapped, for the scripted check.
     pub handled: u64,
+    /// Physical Drum Release levers, independent of each deck's on-screen button.
+    pub(crate) drum_release: [bool; crate::groove::DECKS],
     /// FX1 / FX2 TapBeatWithLongPress held since (a second makes it AUTO).
     tap_held: [Option<Instant>; 2],
 }
 
 impl Default for MidiState {
     fn default() -> MidiState {
-        MidiState { hub: None, rx: None, _keeper: None, win: Default::default(), devices: vec![], paused_inputs: vec![], jump_page: [5; 4], pending_double: None, stub_log: vec![], last_tempo: [0.0; 4], last_iso: [false; 4], last_follow: [false; 4], started: false, handled: 0, tap_held: [None; 2] }
+        MidiState { hub: None, rx: None, _keeper: None, win: Default::default(), devices: vec![], paused_inputs: vec![], jump_page: [5; 4], pending_double: None, stub_log: vec![], last_tempo: [0.0; 4], last_iso: [false; 4], last_follow: [false; 4], started: false, handled: 0, drum_release: [false; crate::groove::DECKS], tap_held: [None; 2] }
     }
 }
 
@@ -2049,7 +2065,11 @@ pub fn poll(app: &mut App) {
         }
         return;
     }
-    *hub.snap.lock() = snapshot(app);
+    let next = snapshot(app);
+    let previous = std::mem::replace(&mut *hub.snap.lock(), next);
+    if next.count < previous.count {
+        hub.release_hidden_drum_decks(next.count);
+    }
     // The takeover is armed again when the tempo was changed on screen or sync changed, and
     // the EQ knobs wait for a pick-up when they switch between EQ and STEM ISO.
     for n in 0..app.deck_count().min(4) as usize {
@@ -2205,6 +2225,14 @@ pub fn apply(app: &mut App, hub: &Arc<Hub>, device: &str, f: &Func, deck: u8, va
     let release = matches!(val, Val::On(false, _));
     let rel = if let Val::Rel(n) = val { n } else { 0 };
     let unit = val.unit();
+    // A lever's release belongs to its original deck, even after a layout change
+    // hides that deck or the user closes the Groove Circuit panel.
+    if f.act == Act::DrumRelease && release {
+        if let Some(held) = deck.checked_sub(1).and_then(|n| app.midi.drum_release.get_mut(usize::from(n))) {
+            *held = false;
+        }
+        return;
+    }
     // Controllers act in PERFORMANCE mode; browsing works in both.
     if !app.performance() && !routing::browsing(f.act) {
         return;
@@ -2491,6 +2519,38 @@ pub fn apply(app: &mut App, hub: &Arc<Hub>, device: &str, f: &Func, deck: u8, va
         Act::BeatJumpPage(dir) => {
             if press {
                 app.midi.jump_page[ni] = (app.midi.jump_page[ni] as i32 + dir).clamp(1, 9) as u8;
+            }
+        }
+        Act::DrumSwap(row) => {
+            if press && app.groove_visible() && !app.deck_options.disable_play {
+                let bank = usize::from(app.gc.set.decks[ni].bank.min(1));
+                let slot = bank * crate::groove::ROWS + usize::from(row);
+                if app.gc.capture_on == Some(n) {
+                    // This writes a capture. A refused capture must not toggle playback.
+                    if !app.deck_options.disable_load {
+                        app.groove_capture(ni, slot);
+                    }
+                } else {
+                    // Another deck can be armed; its source never writes into this slot.
+                    app.groove_slot_play(ni, slot);
+                }
+            }
+        }
+        Act::DrumCapture => {
+            if press && app.groove_visible() && !app.deck_options.disable_load && !app.deck_options.disable_play {
+                app.groove_capture_toggle(n);
+            }
+        }
+        Act::DrumRelease => {
+            if press && app.groove_visible() && !app.deck_options.disable_play {
+                app.midi.drum_release[ni] = true;
+            }
+        }
+        Act::DrumGain => {
+            if app.groove_visible() {
+                if let Some(p) = unit {
+                    app.groove_set_deck_gain(ni, p * 100.0);
+                }
             }
         }
         Act::StemPart(src) => {
@@ -3255,6 +3315,16 @@ pub fn stub(app: &mut App, hub: &Arc<Hub>, s: Stub, deck: u8, val: Val) {
     }
 }
 
+fn drum_slot_lights(engine: Option<&crate::groove::Engine>, bank: u8) -> [Led; crate::groove::ROWS] {
+    std::array::from_fn(|row| {
+        if engine.is_some_and(|e| e.is_played(row, usize::from(bank.min(1)))) { Led::On } else { Led::Off }
+    })
+}
+
+fn drum_capture_light(armed: Option<u8>, deck: u8) -> Led {
+    if armed == Some(deck) { Led::On } else { Led::Off }
+}
+
 /// The lights of every connected controller, from the app's state.
 fn leds(app: &mut App, hub: &Arc<Hub>) {
     let devs: Vec<Arc<Device>> = hub.devices.lock().iter().filter(|d| d.has_output).cloned().collect();
@@ -3285,6 +3355,9 @@ fn leds(app: &mut App, hub: &Arc<Hub>) {
         })
         .collect();
     let on = |b: bool| if b { Led::On } else { Led::Off };
+    let groove_enabled = app.groove_visible() && !app.deck_options.disable_play;
+    // Read each mapped Groove deck once, without waiting on its audio callback.
+    let drum_slots: [_; crate::groove::DECKS] = std::array::from_fn(|_| std::cell::OnceCell::new());
     let (seq_playing, seq_rec, seq_cur) = crate::sampler::SAMPLER.try_lock().and_then(|g| g.as_ref().map(|e| (e.seq.playing, e.seq.rec, e.seq.current()))).unwrap_or((false, false, 0));
     for dev in devs {
         for (tag, deck) in dev.out_keys() {
@@ -3321,6 +3394,16 @@ fn leds(app: &mut App, hub: &Arc<Hub>) {
                     None => Led::Off,
                 },
                 Act::BeatJumpPad(_) | Act::BeatLoopPad(_) => on(d.loaded),
+                Act::DrumCapture if groove_enabled && !app.deck_options.disable_load => drum_capture_light(app.gc.capture_on, n),
+                Act::DrumSwap(row) if groove_enabled => {
+                    let state = drum_slots[ni].get_or_init(|| {
+                        crate::groove::ENGINES[ni].try_lock()
+                            .map(|e| drum_slot_lights(e.as_deref(), app.gc.set.decks[ni].bank))
+                    });
+                    let Some(lights) = state else { continue };
+                    lights[usize::from(row)]
+                }
+                Act::DrumSwap(_) | Act::DrumCapture => Led::Off,
                 Act::StemPart(src) => on(app.player.decks[ni].try_lock().map(|s| s.stem_on[(src as usize).min(3)]).unwrap_or(true)),
                 Act::StemFx(row) => on(app.px.stem_fx[(row as usize).min(3)]),
                 Act::StemSolo => on(app.prefs.stem_solo),
