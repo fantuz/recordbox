@@ -6,10 +6,41 @@ Choose the drive root that contains `PIONEER`. Check which library your player r
 | --- | --- |
 | No recognized device catalog | A classic export can create `PIONEER/rekordbox/export.pdb` and `exportExt.pdb`, copy audio to `Contents` and write track analysis under `PIONEER/USBANLZ`. |
 | Classic Device Library | recordbox reads the classic catalogs and can update playlists, tracks and preparation data. Check the cue, playlist-removal and track-deletion options in Device Sync Manager before applying them. |
-| OneLibrary only (`exportLibrary.db`) | recordbox identifies the drive and blocks classic export to this target. Use AlphaTheta Rekordbox to update its OneLibrary catalog. |
+| OneLibrary only (`exportLibrary.db`) | The optional inspector reads regular playlist order. recordbox blocks classic export to this target. Use AlphaTheta Rekordbox to update its OneLibrary catalog. |
 | Both catalogs | recordbox can update the classic catalog or add new classic files. Existing audio, artwork, analysis and player settings are protected. Removing a track from the classic catalog leaves its files on the drive. A player that reads OneLibrary will continue to display the contents of that catalog. |
 
 OneLibrary is the current name for Device Library Plus. The two catalogs can coexist on one drive and can have different playlists and playback histories. In AlphaTheta Rekordbox, **Convert from Device Library** overwrites an existing OneLibrary, including playlists and histories present only there. Before converting, use AlphaTheta’s USB Export Guide to bring back device-only playlists or histories you want to keep. [USB Export Guide](https://cdn.rekordbox.com/files/20251021171528/USB_export_guide_en_251007.pdf) · [Conversion FAQ](https://rekordbox.com/en/support/faq/onelibrary-7/#faq-q700038) · [Playlist and history FAQ](https://rekordbox.com/en/support/faq/onelibrary-7/#faq-q700031) · [Deletion FAQ](https://rekordbox.com/en/support/faq/onelibrary-7/#faq-89312)
+
+## Inspect OneLibrary playlists
+
+Close AlphaTheta Rekordbox and wait for any device export to finish. In **Devices**, right-click the selected USB drive and choose **Inspect OneLibrary playlists…**. On a mixed drive the same button appears in **Sync Manager**. Select a OneLibrary playlist to view its tracks. Select a classic playlist independently to compare the exact sequence of exported audio paths. IDs are local to each catalog. Repeated paths count as separate entries. Hover a track to see its full path.
+
+Install the optional reader once on the computer running recordbox. Packaged builds include the inspection command and use a separately installed Python interpreter with the public `rbox` 0.3.1 library. [rbox package](https://pypi.org/project/rbox/0.3.1/)
+
+**macOS or Linux** with Python 3.12
+
+```sh
+python3.12 -m venv "$HOME/.recordbox-onelibrary"
+"$HOME/.recordbox-onelibrary/bin/python" -m pip install --only-binary=:all: rbox==0.3.1
+```
+
+**Windows PowerShell** with Python 3.12
+
+```powershell
+py -3.12 -m venv "$HOME/.recordbox-onelibrary"
+& "$HOME/.recordbox-onelibrary/Scripts/python.exe" -m pip install --only-binary=:all: rbox==0.3.1
+```
+
+For an existing virtual environment, set `RECORDBOX_ONELIBRARY_PYTHON` to its interpreter’s absolute path before launching recordbox. The CLI takes the drive root above `PIONEER` and prints JSON. The first command lists playlist names and IDs in each catalog. Substitute IDs from that report into the second command.
+
+```sh
+recordbox --inspect-onelibrary "/path/to/USB"
+recordbox --inspect-onelibrary "/path/to/USB" --playlist 1 --classic-playlist 2
+```
+
+Version 1000 is the qualified OneLibrary schema. Inspection copies the OneLibrary database and any sibling classic main catalog into a private temporary directory. Only these copies reach the external reader. recordbox reads each source twice and checks its length, modification time, SHA-256 and current catalog layout before displaying the report. An active USB export journal, SQLite sidecar or changing source stops inspection. If a sidecar remains after closing Rekordbox, keep it with the original database and use a cleanly closed export. The inspector accepts up to 256 MiB per catalog, 50,000 playlist nodes per catalog, 50,000 returned tracks per playlist, and a 16 MiB report.
+
+The comparison covers the order of **resolved track paths**. The public OneLibrary API joins playlist links to existing tracks. A link pointing to a missing track can therefore be omitted, and this report cannot verify orphan entries. Matching paths do not establish audio-file identity or database integrity. The inspector reads no audio or ANLZ and offers no write-back. The public mixed-export test reorders a playlist in a disposable copy using the external writer, observes disagreement with the classic catalog, and restores the order. [Public regression](../packaging/test_public_onelibrary_roundtrip.py)
 
 ## What the files contain
 

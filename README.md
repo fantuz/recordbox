@@ -48,7 +48,7 @@ On Linux, `./recordbox --disable-load` disables deck loading for the session. Us
 
 ### Homebrew on macOS
 
-On Apple Silicon or Intel, you can build recordbox locally with Homebrew and the Xcode Command Line Tools. The first install downloads the pinned source and build dependencies, then compiles the app on your Mac.
+If you already use Homebrew and have the Xcode Command Line Tools, the formula builds the tagged release on your Mac and manages upgrades. The first install downloads the Rust toolchain and compiles the app. For a prebuilt app, use the ZIP above.
 
 ```sh
 brew tap fantuz/recordbox https://github.com/fantuz/recordbox
@@ -56,18 +56,22 @@ brew install --build-from-source fantuz/recordbox/recordbox
 recordbox
 ```
 
-To open the installed macOS app bundle, run `open "$(brew --prefix fantuz/recordbox/recordbox)/libexec/Recordbox.app"`. Homebrew manages the bundle and its command-line launcher. The local build uses an ad-hoc signature. Apple Developer ID signing and notarization are separate steps for distributing prebuilt downloads.
+To open the Homebrew app in Finder, run `open "$(brew --prefix fantuz/recordbox/recordbox)/libexec/Recordbox.app"`. Homebrew applies a local ad-hoc signature. Use the Cargo instructions below when developing or testing a particular revision. [macOS distribution and notarization](docs/BUILD-AND-PACKAGING.md#distributing-a-macos-app-to-djs)
 
 ## Prepare and play
 
 - **Build a collection.** Import local tracks and folders, M3U playlists or a rekordbox XML collection. Rate and tag tracks, organise playlists, and back up or restore your recordbox library.
-- **Prepare a track in EXPORT.** Analyse BPM, key and waveforms, edit the beat grid, and set loops, memory cues and hot cues. Optional high-precision analysis refines beat timing for both steady and changing tempos.
+- **Prepare a track in EXPORT.** Analyse BPM, key and waveforms, edit the beat grid, and set loops, memory cues and hot cues. New analysis uses the Rekordbox-compatible beat detector. Choose **recordbox classic** in **Preferences → Analysis → Beat grid estimator** to use the earlier detector. Optional high-precision refinement works with either choice.
   By default, press **1–8** to set or recall hot cues A–H. Hold **Shift** and press the same number to clear that slot.
-- **Mix in PERFORMANCE.** Choose a two- or four-deck horizontal layout. Use the on-screen mixer, crossfader, Beat FX and sampler to rehearse transitions.
-- **Use the library on a second screen.** The overlapping-windows button at the far right of the top bar detaches the browser in either mode. Your playlist, search, selection and scroll position follow it. Close the library window to reattach it.
+- **Prepare phrases.** Deck loading and USB export can reuse Rekordbox phrase data. To generate missing phrases, choose **Rekordbox-compatible** or **recordbox classic** under **Preferences → Analysis → Phrase estimator**.
+- **Mix in PERFORMANCE.** Use MIDI Learn to map the decks, mixer and pads, or try the experimental XDJ-RX3 profile for one connection. The DDJ-GRV6 Groove Circuit mappings cover drum swap, capture, gain and release. SPACE, GATE COMP, Beat FX, Pad FX and MERGE FX are available for rehearsing and recording a set. [XDJ-RX3 setup](docs/studies/XDJ-RX3.md) · [Controller support and effects](docs/UPSTREAM-INTEGRATION.md#controllers-and-effects)
+- **Edit an arrangement.** Use the EDIT timeline to arrange, audition and render a local track. WAV, AIFF and FLAC are available across platforms. M4A uses the macOS AAC encoder.
+- **Use the library on a second screen.** The overlapping-windows button at the far right of the top bar detaches the library browser. Your playlist, search, selection and scroll position follow it. Close the library window to reattach it.
   **F11** toggles fullscreen for both windows together. **Space** plays or pauses the active deck when you’re outside a text field.
 - **Separate a track into STEMS.** In **Preferences → Extensions → STEMS**, download HTDemucs for speed or HTDemucs fine-tuned for sound quality. Both save drums, bass, instruments and vocals as four stereo parts. Completed separations are available across decks and restarts.
   Saved parts from both models share a 20 GB budget by default. Choose **Keep all saved stems** to retain completed results without a size limit. [STEMS storage and backups](docs/LIBRARY-SYNC.md#how-much-separation-is-saved)
+
+If an imported MP3 cue sounds early or late, you can audition the same timestamp using a separate collection. [Compare MP3 cue timing](docs/PLAYBACK-PERFORMANCE.md#auditioning-rekordbox-mp3-timing) · [Integration report and measurements](docs/UPSTREAM-INTEGRATION.md)
 
 ## Working with AlphaTheta libraries and USB drives
 
@@ -79,7 +83,7 @@ Desktop sync reads the original audio files without modifying them. Use the sync
   Close AlphaTheta Rekordbox and its agent before applying changes. **Back up and apply** checks for conflicts and saves a verified recovery copy before updating the original database and any affected analysis files. For newly created or retimed cues, use collection XML export. [Supported edits, limits and recovery](docs/LIBRARY-SYNC.md) · [ANLZ import compatibility](docs/ANLZ-IMPORT-INTEGRITY.md)
 
 For **USB export**, use **Device Sync Manager**. It writes the classic Device Library catalog, music and analysis files to the selected drive.
-On a drive with both catalogs, recordbox updates the classic library. To update OneLibrary (formerly Device Library Plus), use AlphaTheta Rekordbox.
+On a drive with both catalogs, recordbox updates the classic library. To inspect OneLibrary playlists, right-click the device and choose **Inspect OneLibrary playlists…**. The optional reader can compare the two catalogs’ track order. Use AlphaTheta Rekordbox to update OneLibrary. [Reader setup](docs/USB-COMPATIBILITY.md#inspect-onelibrary-playlists)
 Check the player model and firmware when choosing a format. [USB formats and player compatibility](docs/USB-COMPATIBILITY.md)
 
 ## Review missing tracks and duplicates

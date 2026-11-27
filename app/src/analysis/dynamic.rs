@@ -491,10 +491,10 @@ mod tests {
         }).collect();
         let seconds = t + 0.1;
         let x = clicks(&times, seconds, sr);
-        let mut opts = super::super::AnalysisSettings { dynamic: true, ..Default::default() };
-        let normal = super::super::analyze_grid(&x, sr, &opts).1.unwrap();
+        let mut opts = super::super::AnalysisSettings { use_recordbox_estimator: true, dynamic: true, ..Default::default() };
+        let normal = super::super::grid_from_mono(&x, sr, &opts).1.unwrap();
         opts.high_precision = true;
-        let refined = super::super::analyze_grid(&x, sr, &opts).1.unwrap();
+        let refined = super::super::grid_from_mono(&x, sr, &opts).1.unwrap();
         assert!(refined.anchors.len() >= 2);
         assert_eq!(normal.anchors.iter().map(|a| a.beat).collect::<Vec<_>>(), refined.anchors.iter().map(|a| a.beat).collect::<Vec<_>>());
         assert!((refined.first_bpm() - 120.0).abs() < 0.3);

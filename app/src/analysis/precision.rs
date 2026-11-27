@@ -120,7 +120,7 @@ mod tests {
         refine(&audio, sr, &mut grid, 70.0, 180.0);
         assert_eq!(grid, original);
         let silence = vec![0.0; audio.len()];
-        let settings = super::super::AnalysisSettings { high_precision: true, ..Default::default() };
-        assert!(super::super::analyze_grid(&silence, sr, &settings).1.is_none());
+        let settings = super::super::AnalysisSettings { use_recordbox_estimator: true, high_precision: true, ..Default::default() };
+        assert!(super::super::grid_from_mono(&silence, sr, &settings).1.is_none());
     }
 }

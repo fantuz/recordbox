@@ -49,6 +49,7 @@ const CHAPTERS: [(&str, &str, &str); 14] = [
 <li><i>Track &gt; Stop Analyzing</i> empties the queue.</li>
 </ul>
 <p>Preferences &gt; Analysis sets the <b>Analysis Mode</b> (Normal for steady tempo, Dynamic for tempo that drifts), the <b>BPM Range</b>, and which items are analysed. <b>CUE Analysis</b> can place a memory cue on the first beat and hot cue A ("1.1Bars") on the first downbeat when a track is first analysed.</p>
+<p>To check where an imported MP3 cue lands against a drum hit, open <b>Preferences &gt; Analysis &gt; Track Analysis &gt; MP3 cue timing</b>. It shows which timing is active and how to audition the same cue in a separate collection. Starting recordbox normally returns to your usual collection.</p>
 "#),
     ("browser", "The browser and track list", r#"
 <ul>
@@ -125,7 +126,7 @@ const CHAPTERS: [(&str, &str, &str); 14] = [
 <li>Pick the device and the playlists, then Export. Progress is shown in the footer; it can be cancelled.</li>
 </ol>
 <p>A classic export writes music into <code>/Contents</code>, the catalogs <code>export.pdb</code> and <code>exportExt.pdb</code>, analysis files, artwork and player settings. Select the drive root that contains <code>PIONEER</code>. An interrupted export is rolled back or completed the next time the drive is seen.</p>
-<p>If the drive has both classic Device Library and OneLibrary, recordbox updates the classic catalog and protects existing audio, artwork, analysis files and player settings. Players that read OneLibrary continue to show that catalog's contents. For a OneLibrary-only drive, use AlphaTheta Rekordbox.</p>
+<p>If the drive has both classic Device Library and OneLibrary, recordbox updates the classic catalog and protects existing audio, artwork, analysis files and player settings. Players that read OneLibrary continue to show that catalog's contents. For a closed OneLibrary export, right-click the drive and choose <b>Inspect OneLibrary playlists…</b> to read track order with the optional rbox reader. Use AlphaTheta Rekordbox to update the OneLibrary catalog.</p>
 <h3>On the device</h3>
 <ul>
 <li>Under Devices you can browse a drive's playlists and tracks, delete playlists from it, update its playlists from the library, and clean up files nothing refers to.</li>
@@ -149,7 +150,7 @@ const CHAPTERS: [(&str, &str, &str); 14] = [
 <ul>
 <li><b>View</b> — <i>Display Type</i>: tooltips, list font size and line space, key format (Classic / Alphanumeric). Full / Half Waveform, Beat Count Display. <i>Layout</i>: which sources the Media Browser shows, the playlist palette, cue markers on previews, the playlist search filter, All Tracks and track counts in the playlist tree, phrases and vocal positions on the full waveform. <i>Color</i>: waveform colour. <i>recordbox</i>: time mode, quantize resolution, the other source tiles, My Tag window, column browser, sub-browser.</li>
 <li><b>Audio</b> — <i>Configuration</i>: output device, sample rate, buffer size, metronome click sound and volume, preview volume. <i>Input/Output</i>: output channels.</li>
-<li><b>Analysis</b> — <i>Track Analysis</i>: high precision BeatGrid analysis, Analysis Mode, BPM Range, what is analysed, Auto Analysis, Auto Gain. <i>CUE Analysis</i>: cues set automatically on first analysis.</li>
+<li><b>Analysis</b> — <i>Track Analysis</i>: choose the Rekordbox-compatible estimator (default) or the earlier recordbox classic estimator. Normal follows a steady tempo and Dynamic follows tempo changes. Either estimator can refine beat timing from audio transients. Normal can additionally use a compatible installed model. The page also controls the BPM range, automatic analysis, and auto gain. These choices apply to new analysis jobs. To replace an existing unlocked grid, select BPM / Grid and choose Track &gt; Analyze Track. <i>CUE Analysis</i>: cues set automatically on first analysis.</li>
 <li><b>DJ System</b> — everything written to USB drives: General, Category, Sort, Column, My Settings, Device, Others.</li>
 <li><b>Keyboard</b> — every shortcut, by category. Click one and press the new keys; Esc cancels. Profiles can be exported and imported.</li>
 <li><b>Advanced</b> — <i>Database</i>: where the library is, backup and restore. <i>Browse</i>: iTunes library file, rekordbox xml, My Tag in comments, Color comments (your names for the eight track colours), folders for Auto Relocate. <i>Others</i>: rekordbox library sync. <i>STEMS</i>: the STEMS function, 3 or 4 parts, sound quality or speed, resetting muted parts on load, the separation model.</li>

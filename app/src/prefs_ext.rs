@@ -7,7 +7,7 @@
 //! - `cue_markers_on_preview`: the Preview column in ui_browser.rs.
 //! - `wave_half`: the enlarged and overview waveforms in ui_player.rs.
 //! - `color_names`: every colour menu, through `Prefs::color_name`; the device colour table.
-//! - `refine_beatgrid_transients`, `analysis_mode`: the analysis code.
+//! - `use_recordbox_estimator`, `refine_beatgrid_transients`, `use_installed_beatgrid_model`, `analysis_mode`: the beat grid analysis settings.
 //! - `memory_cue_first_beat`: `App::apply_analysis` calls `memory_cue_at_first_beat`.
 //! - `audio_buffer`, `audio_rate`, `audio_channel`: the output stream (audio.rs).
 //! - `device_bg_color`, `delete_history_after_import`: the USB code.
@@ -60,7 +60,7 @@ pub fn tree_item_available(name: &str) -> bool {
     matches!(name, "Collection" | "Playlists" | "Related Tracks" | "Explorer" | "Devices" | "Histories") || TREE_ITEMS_EXTRA.contains(&name)
 }
 /// Sources added by the library code since (kept apart so adding one is a one-word edit).
-pub const TREE_ITEMS_EXTRA: &[&str] = &["Matching", "Tag List", "iTunes", "rekordbox xml", "Hot Cue Bank List", "Track Suggestion"];
+pub const TREE_ITEMS_EXTRA: &[&str] = &["Matching", "Tag List", "iTunes", "rekordbox xml", "Hot Cue Bank List", "Track Suggestion", "Recordings"];
 
 impl Prefs {
     /// Whether a Tree View source is shown. Collection always is.
@@ -84,7 +84,7 @@ impl Prefs {
 // ------------------------------------------------------------------ keyboard actions
 
 /// (id, label, default shortcut in stored form or "" for none, category).
-pub const ACTIONS: [(&str, &str, &str, &str); 140] = [
+pub const ACTIONS: [(&str, &str, &str, &str); 145] = [
     ("play", "Play/Pause", "Space", "Player"),
     ("cue", "Cue", "C", "Player"),
     ("jump_back", "Jump Reverse", "ArrowLeft", "Player"),
@@ -213,6 +213,13 @@ pub const ACTIONS: [(&str, &str, &str, &str); 140] = [
     ("seq_load4", "Sequence Load (Deck4)", "", "Sampler"),
     ("padmode_sampler", "Pad mode - Sampler", "", "Sampler"),
     ("padmode_seqcall", "Pad mode - Sequence Call", "", "Sampler"),
+    // Recording (PERFORMANCE mode): rekordbox's `RecControlPanel` commands; Start/Pause REC
+    // has the key of its "Performance 1" preset.
+    ("rec_toggle", "Start/Pause REC", "Cmd+Enter", "Recordings"),
+    ("rec_level_up", "Increase REC level", "", "Recordings"),
+    ("rec_level_down", "Decrease REC level", "", "Recordings"),
+    ("rec_start", "Start REC", "", "Recordings"),
+    ("rec_pause", "Pause REC", "", "Recordings"),
     ("list_up", "Up", "ArrowUp", "Browse"),
     ("list_down", "Down", "ArrowDown", "Browse"),
     ("load", "Load track to player 1", "Enter", "Browse"),
@@ -230,7 +237,7 @@ pub const ACTIONS: [(&str, &str, &str, &str); 140] = [
 ];
 
 /// Categories in the order the Keyboard page shows them.
-pub const ACTION_CATEGORIES: [&str; 8] = ["Player", "Hot Cue", "Memory Cue", "Loop", "Grid", "Sampler", "Browse", "Others"];
+pub const ACTION_CATEGORIES: [&str; 9] = ["Player", "Hot Cue", "Memory Cue", "Loop", "Grid", "Sampler", "Recordings", "Browse", "Others"];
 
 /// Actions the key loop in main.rs handles itself, because they react to key releases,
 /// key repeats or held modifiers.
@@ -265,6 +272,8 @@ pub enum Act {
     Filter,
     Menu(&'static str),
     Sampler(crate::sampler_ext::SmpAct),
+    /// A recording command (ui_rec.rs: `App::rec_command`).
+    Rec(u8),
 }
 
 impl Act {
@@ -303,6 +312,11 @@ impl Act {
             "export_playlists_info" => Act::Menu("export_playlists_info"),
             "prefs" => Act::Menu("prefs"),
             "about" => Act::Menu("about"),
+            "rec_toggle" => Act::Rec(0),
+            "rec_level_up" => Act::Rec(1),
+            "rec_level_down" => Act::Rec(2),
+            "rec_start" => Act::Rec(3),
+            "rec_pause" => Act::Rec(4),
             _ => {
                 if let Some(n) = num("clear_hot").filter(|n| (1..=8).contains(n)) {
                     Act::ClearHot(n as i32 - 1)
@@ -327,6 +341,12 @@ impl Act {
 /// Carry out a one-shot keyboard action.
 pub fn run_action(app: &mut App, act: Act) {
     match act {
+        // (rekordbox has the recording commands in PERFORMANCE mode only.)
+        Act::Rec(cmd) => {
+            if app.performance() {
+                app.rec_command(cmd);
+            }
+        }
         Act::Track(dir) => app.load_adjacent(dir),
         Act::Volume(d) => {
             let mut s = app.player.state.lock();
@@ -552,7 +572,7 @@ pub fn stem_click(on: [bool; 4], srcs: &[usize], solo: bool) -> [bool; 4] {
 pub fn stem_part_click(app: &mut App, srcs: &[usize]) {
     let (have, on) = {
         let s = app.player.state.lock();
-        (s.stems.is_some(), s.stem_on)
+        (s.has_playable_stems(), s.stem_on)
     };
     if !have {
         // rekordbox's status line for a part pressed before its data exists. recordbox also

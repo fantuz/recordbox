@@ -17,7 +17,7 @@ pub enum DeviceLayout {
 pub(super) struct Catalogs {
     pub main: Option<PathBuf>,
     pub ext: Option<PathBuf>,
-    modern: bool,
+    modern: Vec<PathBuf>,
     writer_spelling: bool,
 }
 
@@ -107,7 +107,7 @@ impl Catalogs {
         let mut result = Self {
             main: None,
             ext: None,
-            modern: false,
+            modern: Vec::new(),
             writer_spelling: true,
         };
         for name in ["Contents", ".Recordbox", ".PrepDeck"] {
@@ -173,7 +173,9 @@ impl Catalogs {
                 );
                 result.writer_spelling &= root.join("PIONEER/rekordbox/exportExt.pdb").is_file();
             }
-            result.modern |= files.contains_key("exportLibrary.db");
+            if let Some(path) = files.remove("exportLibrary.db") {
+                result.modern.push(path);
+            }
         }
         ensure!(
             result.ext.is_none()
@@ -184,7 +186,7 @@ impl Catalogs {
         Ok(result)
     }
     pub fn layout(&self) -> DeviceLayout {
-        match (self.main.is_some(), self.modern) {
+        match (self.main.is_some(), !self.modern.is_empty()) {
             (false, false) => DeviceLayout::Empty,
             (true, false) => DeviceLayout::Classic,
             (false, true) => DeviceLayout::OneLibrary,
@@ -199,11 +201,36 @@ impl DeviceLayout {
     }
 }
 
+/// Files for a single closed OneLibrary snapshot, with its classic sibling if present.
+pub(crate) fn inspect_onelibrary_files(root: &Path) -> Result<(PathBuf, Option<PathBuf>)> {
+    let catalogs = Catalogs::inspect(root)?;
+    let [modern] = catalogs.modern.as_slice() else {
+        bail!("Select a drive containing exactly one OneLibrary exportLibrary.db");
+    };
+    if let Some(classic) = &catalogs.main {
+        ensure!(classic.parent() == modern.parent(), "The catalogs are in different export folders");
+    }
+    let filename = modern.file_name().context("Invalid OneLibrary filename")?.to_string_lossy();
+    let sidecars = ["-wal", "-shm", "-journal"].map(|ext| format!("{filename}{ext}"));
+    let folder = modern.parent().context("Invalid OneLibrary folder")?;
+    for entry in fs::read_dir(folder)? {
+        let name = entry?.file_name();
+        ensure!(!sidecars.iter().any(|s| name.eq_ignore_ascii_case(std::ffi::OsStr::new(s))),
+            "OneLibrary has a SQLite sidecar. Close Rekordbox and use a cleanly closed export. Leave the sidecars in place.");
+    }
+    if let Some(recordbox) = entries(root, &[".Recordbox"])?.get(".Recordbox") {
+        if let Some(journal) = entries(recordbox, &["journal"])?.get("journal") {
+            ensure!(entries(journal, &["journal.log"])?.is_empty(), "A recordbox USB export is active or needs recovery");
+        }
+    }
+    Ok((modern.to_owned(), catalogs.main))
+}
+
 pub fn inspect_target(root: &Path) -> Result<(DeviceLayout, Option<String>)> {
     let paths = Catalogs::inspect(root)?;
     let layout = paths.layout();
     let reason = if layout == DeviceLayout::OneLibrary {
-        Some("This drive contains only OneLibrary (Device Library Plus). Use AlphaTheta Rekordbox for this catalog, or choose a separate classic export target.")
+        Some("This drive contains only OneLibrary (Device Library Plus). Use AlphaTheta Rekordbox to update it, or select a separate classic export target.")
     } else if !paths.writer_spelling {
         Some("The existing USB layout can be read, but writing here would create a second tree with different spelling. Use the canonical PIONEER/rekordbox layout or a separate target.")
     } else {

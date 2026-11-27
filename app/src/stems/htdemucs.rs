@@ -17,7 +17,7 @@
 mod metal_fast;
 
 use candle_core::{DType, Device, Module, Result, Tensor};
-#[cfg(any(target_os = "macos", feature = "directml"))]
+#[cfg(any(test, target_os = "macos", feature = "directml"))]
 use anyhow::Context as _;
 use rustfft::{num_complex::Complex, FftPlanner};
 use std::collections::HashMap;
@@ -205,6 +205,48 @@ pub(crate) fn pos2(f: usize, t: usize, c: usize) -> Vec<f32> {
     out
 }
 
+/// Candle's PthTensors::get reopens the ZIP directory for each weight. Reuse one
+/// archive reader for the complete checkpoint, transferring each tensor immediately.
+fn read_checkpoint(path: &Path, device: &Device) -> Result<HashMap<String, Tensor>> {
+    use std::io::Read;
+    let pth = candle_core::pickle::PthTensors::new(path, Some("state"))?;
+    let infos = pth.tensor_infos();
+    if infos.len() != 533 {
+        candle_core::bail!("expected an HTDemucs checkpoint with 533 tensors, found {}", infos.len())
+    }
+    let mut archive = zip::ZipArchive::new(std::io::BufReader::new(std::fs::File::open(path)?))
+        .map_err(|e| candle_core::Error::Msg(e.to_string()))?;
+    let mut weights = HashMap::with_capacity(infos.len());
+    for (name, info) in infos {
+        let mut entry = archive.by_name(&info.path).map_err(|e| candle_core::Error::Msg(e.to_string()))?;
+        let layout = &info.layout;
+        let fortran = layout.is_fortran_contiguous();
+        if !layout.is_contiguous() && !fortran {
+            candle_core::bail!("unsupported layout in tensor {name}")
+        }
+        let bytes = layout.dims().iter().copied().try_fold(info.dtype.size_in_bytes(), usize::checked_mul)
+            .ok_or_else(|| candle_core::Error::Msg(format!("invalid size for tensor {name}")))?;
+        // Candle's pickle reader records the start offset in bytes.
+        let skip = layout.start_offset() as u64;
+        if skip.checked_add(bytes as u64).is_none_or(|end| end > entry.size()) {
+            candle_core::bail!("tensor {name} exceeds its checkpoint entry")
+        }
+        if skip != 0 {
+            std::io::copy(&mut entry.by_ref().take(skip), &mut std::io::sink())?;
+        }
+        let mut buf = vec![0; bytes];
+        entry.read_exact(&mut buf)?;
+        let mut tensor = Tensor::from_raw_buffer(&buf, info.dtype, layout.dims(), device)?;
+        let rank = layout.dims().len();
+        if fortran && rank > 1 {
+            tensor = tensor.reshape(layout.dims().iter().rev().copied().collect::<Vec<_>>())?
+                .permute((0..rank).rev().collect::<Vec<_>>())?;
+        }
+        weights.insert(name.clone(), tensor);
+    }
+    Ok(weights)
+}
+
 /// One loaded HTDemucs network.
 pub struct Graph {
     #[cfg(all(target_os = "linux", feature = "vulkan"))]
@@ -275,17 +317,7 @@ impl Graph {
     pub(super) fn read_weights(path: &Path, device: &Device) -> Result<HashMap<String, Tensor>> {
         let raw: HashMap<String, Tensor> = match path.extension().and_then(|e| e.to_str()) {
             Some("safetensors") => candle_core::safetensors::load(path, device)?,
-            _ => {
-                // torch.save({"klass", "args", "kwargs", "state": state_dict, ...})
-                let pth = candle_core::pickle::PthTensors::new(path, Some("state"))?;
-                let mut m = HashMap::new();
-                for name in pth.tensor_infos().keys() {
-                    if let Some(t) = pth.get(name)? {
-                        m.insert(name.clone(), t.to_device(device)?);
-                    }
-                }
-                m
-            }
+            _ => read_checkpoint(path, device)?,
         };
         let weights = raw.into_iter().map(|(k, v)| Ok((k, v.to_dtype(DType::F32)?))).collect::<Result<HashMap<_, _>>>()?;
         if weights.len() != 533 {
@@ -716,6 +748,27 @@ static GPU: std::sync::Mutex<()> = std::sync::Mutex::new(());
 /// Returns planar [source][channel][frame] (4 × 2 × len), or [channel][frame] of the one
 /// source asked for. The callback reports completed chunks and is also polled between model layers.
 pub fn separate(graph: &Graph, device: &Device, audio: &[f32], len: usize, opts: &Options, progress: &mut dyn FnMut(usize, usize) -> bool) -> anyhow::Result<Vec<f32>> {
+    separate_publishing(graph, device, audio, len, opts, progress, None)
+}
+
+pub(super) fn separate_publishing(graph: &Graph, device: &Device, audio: &[f32], len: usize, opts: &Options, progress: &mut dyn FnMut(usize, usize) -> bool, publication: Option<super::live::Publication<'_>>) -> anyhow::Result<Vec<f32>> {
+    run_parts(&[(graph, opts.source)], device, audio, len, opts, progress, publication)
+}
+
+/// Each completed window contains all four fine-tuned parts. The same overlap-add
+/// and normalization as the single-network path determine when it can be published.
+pub(super) fn separate_quality_windows(
+    graphs: [&Graph; 4], device: &Device, audio: &[f32], len: usize, overlap: f64,
+    progress: &mut dyn FnMut(usize, usize) -> bool, publication: super::live::Publication<'_>,
+) -> anyhow::Result<Vec<f32>> {
+    let parts = std::array::from_fn::<_, 4, _>(|i| (graphs[i], Some(i)));
+    run_parts(&parts, device, audio, len, &Options { overlap, source: None }, progress, Some(publication))
+}
+
+fn run_parts(
+    parts: &[(&Graph, Option<usize>)], device: &Device, audio: &[f32], len: usize, opts: &Options,
+    progress: &mut dyn FnMut(usize, usize) -> bool, publication: Option<super::live::Publication<'_>>,
+) -> anyhow::Result<Vec<f32>> {
     if len == 0 || audio.len() != 2 * len {
         anyhow::bail!("empty or malformed input")
     }
@@ -724,51 +777,68 @@ pub fn separate(graph: &Graph, device: &Device, audio: &[f32], len: usize, opts:
     }
     if !progress(0, 1) { anyhow::bail!("stopped"); }
     #[cfg(target_os = "macos")]
-    if let Some(fast) = &graph.fast {
-        return separate_accelerated(audio, len, opts, 2, progress, |spec, wave, source| {
-            let (freq, frames, segment) = (NFFT/2, Stft::frames(TRAINING_FRAMES), TRAINING_FRAMES);
+    if let Some(fast) = parts.iter().map(|(g, src)| Some((g.fast.as_ref()?, *src))).collect::<Option<Vec<_>>>() {
+        // Each queued fine-tuned result contains eight time-domain planes and sixteen
+        // spectral planes. A rendezvous limits staging while all four graphs are resident.
+        let buffered = if fast.len() == 1 { 2 } else { 0 };
+        return separate_accelerated(audio, len, opts, buffered, progress, publication, |spec, wave, poll| {
+            let (freq, frames, segment) = (NFFT / 2, Stft::frames(TRAINING_FRAMES), TRAINING_FRAMES);
             let x = Tensor::from_vec(spec, (4, freq, frames), device)?;
             let xt = Tensor::from_vec(wave, (2, 1, segment), device)?;
-            let (mut y, mut yt) = fast.forward(&x, &xt)?;
-            if let Some(s) = source {
-                y = y.narrow(0, s * 4, 4)?;
-                yt = yt.narrow(0, s * 2, 2)?;
-            }
-            Ok((metal_fast::read(&y)?, metal_fast::read(&yt)?))
+            collect_parts(&fast, poll, |(net, src)| {
+                let (mut y, mut yt) = net.forward(&x, &xt)?;
+                if let Some(s) = *src {
+                    y = y.narrow(0, s * 4, 4)?;
+                    yt = yt.narrow(0, s * 2, 2)?;
+                }
+                Ok((metal_fast::read(&y)?, metal_fast::read(&yt)?))
+            })
         });
     }
     #[cfg(feature = "directml")]
-    if let Some(engine) = &graph.directml {
-        return separate_accelerated(audio, len, opts, engine.buffered_segments(), progress, |spec, wave, source| {
-            engine.forward(spec, wave, source)
-        });
+    if let [(graph, source)] = parts {
+        if let Some(engine) = &graph.directml {
+            return separate_accelerated(audio, len, opts, engine.buffered_segments(), progress, publication, |spec, wave, _| {
+                engine.forward(spec, wave, *source)
+            });
+        }
     }
     let segment = TRAINING_FRAMES;
     let (offsets, weight) = plan(len, opts.overlap);
-    let sources: Vec<usize> = opts.source.map(|s| vec![s]).unwrap_or_else(|| (0..4).collect());
-    let mut out = vec![0f32; sources.len() * 2 * len];
+    let planes: usize = parts.iter().map(|(_, source)| if source.is_some() { 2 } else { 8 }).sum();
+    let mut out = vec![0f32; planes * len];
     let mut sums = vec![0f32; len];
     for (k, &offset) in offsets.iter().enumerate() {
         let chunk_len = (len - offset).min(segment);
-        let x = Tensor::from_vec(segment_at(audio, len, offset), (1, 2, segment), device)?;
-        let y = {
-            let _gpu = GPU.lock();
-            graph.forward(&x, &mut || {
-                if !progress(k, offsets.len()) { anyhow::bail!("stopped"); }
-                Ok(())
-            })?.to_device(&Device::Cpu)?.flatten_all()?.to_vec1::<f32>()?
-        };
         let crop = (segment - chunk_len) / 2;
-        for (n, &s) in sources.iter().enumerate() {
-            for ch in 0..2 {
-                let (dst, src) = (&mut out[(n * 2 + ch) * len + offset..][..chunk_len], &y[(s * 2 + ch) * segment + crop..][..chunk_len]);
+        let x = Tensor::from_vec(segment_at(audio, len, offset), (1, 2, segment), device)?;
+        let mut first_plane = 0;
+        for &(graph, source) in parts {
+            let y = {
+                let _gpu = GPU.lock();
+                let result = graph.forward(&x, &mut || {
+                    if !progress(k, offsets.len()) { anyhow::bail!("stopped"); }
+                    Ok(())
+                })?;
+                let result = match source {
+                    Some(s) => result.narrow(1, s, 1)?,
+                    None => result,
+                };
+                result.to_device(&Device::Cpu)?.flatten_all()?.to_vec1::<f32>()?
+            };
+            for plane in y.chunks_exact(segment) {
+                let dst = &mut out[first_plane * len + offset..][..chunk_len];
                 for i in 0..chunk_len {
-                    dst[i] += weight[i] * src[i];
+                    dst[i] += weight[i] * plane[crop + i];
                 }
+                first_plane += 1;
             }
         }
         for i in 0..chunk_len {
             sums[offset + i] += weight[i];
+        }
+        if let Some(publish) = publication {
+            publish.advance(&out, &sums, offsets.get(k + 1).copied().unwrap_or(len));
         }
         if !progress(k + 1, offsets.len()) {
             anyhow::bail!("stopped")
@@ -782,6 +852,28 @@ pub fn separate(graph: &Graph, device: &Device, audio: &[f32], len: usize, opts:
     Ok(out)
 }
 
+/// Join each specialist's spectral and time-domain stereo output for the common
+/// inverse-transform/overlap-add stage. No output escapes on failure or cancellation.
+#[cfg(any(target_os = "macos", test))]
+fn collect_parts<T>(
+    parts: &[T], poll: &mut dyn FnMut() -> bool,
+    mut infer: impl FnMut(&T) -> anyhow::Result<(Vec<f32>, Vec<f32>)>,
+) -> anyhow::Result<(Vec<f32>, Vec<f32>)> {
+    let (mut spec, mut wave) = (Vec::new(), Vec::new());
+    for (i, part) in parts.iter().enumerate() {
+        if !poll() { anyhow::bail!("stopped"); }
+        let pair = infer(part)?;
+        if parts.len() == 1 { return Ok(pair); }
+        if i == 0 {
+            spec.try_reserve_exact(pair.0.len() * parts.len())?;
+            wave.try_reserve_exact(pair.1.len() * parts.len())?;
+        }
+        spec.extend(pair.0);
+        wave.extend(pair.1);
+    }
+    Ok((spec, wave))
+}
+
 /// Mean and (unbiased) standard deviation, accumulated in f64.
 fn mean_std(x: &[f32]) -> (f32, f32) {
     let n = x.len() as f64;
@@ -791,7 +883,7 @@ fn mean_std(x: &[f32]) -> (f32, f32) {
 }
 
 /// One segment ready for the GPU: normalised spectrogram and waveform with their statistics.
-#[cfg(any(target_os = "macos", feature = "directml"))]
+#[cfg(any(test, target_os = "macos", feature = "directml"))]
 struct Prepared {
     offset: usize,
     spec: Vec<f32>,
@@ -801,7 +893,7 @@ struct Prepared {
 }
 
 /// The network's two outputs for one segment, still normalised.
-#[cfg(any(target_os = "macos", feature = "directml"))]
+#[cfg(any(test, target_os = "macos", feature = "directml"))]
 struct Raw {
     offset: usize,
     spec: Vec<f32>,
@@ -812,9 +904,9 @@ struct Raw {
 /// The accelerated path: three stages run side by side so the GPU never waits for the CPU. A
 /// thread prepares segments (normalisation and the forward transform), this thread runs the
 /// network, and a third does the inverse transform and the overlap-add.
-#[cfg(any(target_os = "macos", feature = "directml"))]
-fn separate_accelerated(audio: &[f32], len: usize, opts: &Options, buffered_segments: usize, progress: &mut dyn FnMut(usize, usize) -> bool,
-    mut forward: impl FnMut(Vec<f32>, Vec<f32>, Option<usize>) -> anyhow::Result<(Vec<f32>, Vec<f32>)>) -> anyhow::Result<Vec<f32>> {
+#[cfg(any(test, target_os = "macos", feature = "directml"))]
+fn separate_accelerated(audio: &[f32], len: usize, opts: &Options, buffered_segments: usize, progress: &mut dyn FnMut(usize, usize) -> bool, publication: Option<super::live::Publication<'_>>,
+    mut forward: impl FnMut(Vec<f32>, Vec<f32>, &mut dyn FnMut() -> bool) -> anyhow::Result<(Vec<f32>, Vec<f32>)>) -> anyhow::Result<Vec<f32>> {
     let segment = TRAINING_FRAMES;
     let freq = NFFT / 2;
     let frames = Stft::frames(segment);
@@ -856,7 +948,7 @@ fn separate_accelerated(audio: &[f32], len: usize, opts: &Options, buffered_segm
         });
         let out = &mut out;
         let post = scope.spawn(move || {
-            for raw in rx_out {
+            for (index, raw) in rx_out.into_iter().enumerate() {
                 let chunk_len = (len - raw.offset).min(segment);
                 let crop = (segment - chunk_len) / 2;
                 let raw = &raw;
@@ -875,6 +967,9 @@ fn separate_accelerated(audio: &[f32], len: usize, opts: &Options, buffered_segm
                         });
                     }
                 });
+                if let Some(publish) = publication {
+                    publish.advance_segments(out, offsets.get(index + 1).copied().unwrap_or(len), offsets, weight);
+                }
             }
         });
         let mut run = || -> anyhow::Result<()> {
@@ -882,7 +977,7 @@ fn separate_accelerated(audio: &[f32], len: usize, opts: &Options, buffered_segm
                 if !progress(k, offsets.len()) { anyhow::bail!("stopped"); }
                 let (spec, wave) = {
                     let _gpu = GPU.lock();
-                    forward(p.spec, p.wave, opts.source).with_context(|| format!("Separation segment {} of {}", k + 1, offsets.len()))?
+                    forward(p.spec, p.wave, &mut || progress(k, offsets.len())).with_context(|| format!("Separation segment {} of {}", k + 1, offsets.len()))?
                 };
                 if tx_out.send(Raw { offset: p.offset, spec, wave, stats: p.stats }).is_err() {
                     anyhow::bail!("stem post-processing stopped")
@@ -922,6 +1017,109 @@ fn separate_accelerated(audio: &[f32], len: usize, opts: &Options, buffered_segm
 mod tests {
     use super::*;
 
+    /// Check the fast ZIP reader against Candle on an optional local Demucs checkpoint.
+    #[test]
+    #[ignore = "set PREPDECK_STEM_TH to a downloaded HTDemucs checkpoint"]
+    fn checkpoint_reader_matches_candle() {
+        let path = std::env::var_os("PREPDECK_STEM_TH").expect("provide a local .th checkpoint");
+        let path = Path::new(&path);
+        let actual = read_checkpoint(path, &Device::Cpu).unwrap();
+        let reference = candle_core::pickle::PthTensors::new(path, Some("state")).unwrap();
+        assert_eq!(actual.len(), reference.tensor_infos().len());
+        for (name, tensor) in actual {
+            let expected = reference.get(&name).unwrap().unwrap();
+            assert_eq!(tensor.dtype(), expected.dtype(), "{name}");
+            assert_eq!(tensor.dims(), expected.dims(), "{name}");
+            let values = |t: Tensor| t.to_dtype(DType::F32).unwrap().flatten_all().unwrap().to_vec1::<f32>().unwrap();
+            assert!(values(tensor).iter().zip(values(expected)).all(|(a, b)| a.to_bits() == b.to_bits()), "{name}");
+        }
+    }
+
+    #[test]
+    fn published_overlap_add_matches_final_accelerated_output_without_a_gpu() {
+        let len = TRAINING_FRAMES + 97;
+        let audio: Vec<_> = (0..2 * len).map(|i| (i % 17) as f32 * 0.01).collect();
+        let live = super::super::live::Live::with_len(len).unwrap();
+        let prior = vec![0.25; 6 * len];
+        let publish = super::super::live::Publication { live: &live, previous: &prior };
+        let mut segments = 0;
+        let out = separate_accelerated(
+            &audio, len, &Options { source: Some(3), ..Default::default() }, 0,
+            &mut |_, _| true, Some(publish), |mut spec, mut wave, _| {
+                // Distinct adjacent segments exercise the normalization at the overlap.
+                segments += 1;
+                spec.fill(0.0);
+                wave.fill(segments as f32);
+                Ok((spec, wave))
+            },
+        ).unwrap();
+        assert_eq!(segments, 2);
+        assert_eq!(live.ready_frames(), len);
+        for i in 0..len {
+            assert_eq!(live.sample(5, i), Some(0.25));
+            assert_eq!(live.sample(6, i), Some(out[i]));
+            assert_eq!(live.sample(7, i), Some(out[len + i]));
+        }
+    }
+
+    #[test]
+    fn quality_window_preserves_specialist_order_and_stops_between_forwards() {
+        let sources = [0, 1, 2, 3];
+        let pair = |&n: &u8| Ok((vec![f32::from(n); 4], vec![f32::from(n); 2]));
+        let (spec, wave) = collect_parts(&sources, &mut || true, pair).unwrap();
+        for (source, (s, w)) in sources.into_iter().zip(spec.chunks_exact(4).zip(wave.chunks_exact(2))) {
+            assert_eq!(s, [f32::from(source); 4]);
+            assert_eq!(w, [f32::from(source); 2]);
+        }
+        let calls = std::cell::Cell::new(0);
+        let stopped = collect_parts(&sources, &mut || calls.get() < 2, |&n| {
+            calls.set(calls.get() + 1);
+            pair(&n)
+        }).unwrap_err();
+        assert_eq!(stopped.to_string(), "stopped");
+        assert_eq!(calls.get(), 2);
+    }
+
+    /// Run with RECORDBOX_TEST_QUALITY_MODELS pointing to the four checkpoint files.
+    #[test]
+    #[ignore = "requires the four HTDemucs fine-tuned checkpoints"]
+    fn quality_windows_match_independent_specialists() -> anyhow::Result<()> {
+        let dir = std::path::PathBuf::from(std::env::var_os("RECORDBOX_TEST_QUALITY_MODELS").expect("checkpoint directory"));
+        let files = super::super::CATALOG[0].files;
+        let mut graphs = Vec::new();
+        for file in files { graphs.push(Graph::load(&dir.join(file), &Device::Cpu)?); }
+        // Two windows overlap; the final window also needs left context and padding.
+        let len = 6 * SAMPLE_RATE as usize;
+        let audio = signal(len);
+        let live = super::super::live::Live::with_len(len).unwrap();
+        let mut early = 0;
+        let mut cb = |done, total| {
+            if done == 1 && total == 2 { early = live.ready_frames(); }
+            true
+        };
+        let part_graphs = std::array::from_fn(|i| &graphs[i]);
+        let publish = super::super::live::Publication { live: &live, previous: &[] };
+        let result = separate_quality_windows(part_graphs, &Device::Cpu, &audio, len, 0.25, &mut cb, publish)?;
+        assert!(early > 0 && early < len);
+        assert_eq!(live.ready_frames(), len);
+        for (i, g) in graphs.iter().enumerate() {
+            let reference = separate(g, &Device::Cpu, &audio, len, &Options { overlap: 0.25, source: Some(i) }, &mut |_, _| true)?;
+            let got = &result[i * 2 * len..(i + 1) * 2 * len];
+            let mut max_error = 0.0f32;
+            let mut energy = 0.0f64;
+            for (frame, (&expected, &actual)) in reference.iter().zip(got).enumerate() {
+                assert!(expected.is_finite() && actual.is_finite());
+                let difference = (expected - actual).abs();
+                max_error = max_error.max(difference);
+                energy += f64::from(difference).powi(2);
+                assert_eq!(live.sample(2 * i + frame / len, frame % len), Some(actual));
+            }
+            println!("{}: max abs {max_error:.8}, RMS {:.8}", SOURCES[i], (energy / got.len() as f64).sqrt());
+            assert_eq!(max_error, 0.0);
+        }
+        Ok(())
+    }
+
     #[cfg(feature = "directml")]
     #[test]
     fn driver_failure_on_second_segment_keeps_the_cause_and_returns_no_partial_stems() {
@@ -929,7 +1127,7 @@ mod tests {
         let audio = vec![0.; 2 * len];
         let mut calls = 0;
         let result = separate_accelerated(&audio, len, &Options { source: Some(3), ..Default::default() },
-            0, &mut |_, _| true, |spec, wave, _| {
+            0, &mut |_, _| true, None, |spec, wave, _| {
                 calls += 1;
                 if calls == 2 { return Err(crate::stems::DirectMlFailure("simulated provider error".into()).into()); }
                 Ok((spec, wave))
@@ -940,7 +1138,7 @@ mod tests {
         assert_eq!(calls, 2);
 
         let stopped = separate_accelerated(&audio, len, &Default::default(), 0,
-            &mut |_, _| false, |_, _, _| panic!("Cancelled work called the provider")).unwrap_err();
+            &mut |_, _| false, None, |_, _, _| panic!("Cancelled work called the provider")).unwrap_err();
         assert!(!stopped.is::<crate::stems::DirectMlFailure>());
     }
 

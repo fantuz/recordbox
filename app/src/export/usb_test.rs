@@ -138,6 +138,34 @@ fn snapshot(root: &std::path::Path) -> std::collections::BTreeMap<String, Vec<u8
     out
 }
 
+#[test]
+fn stopping_phrase_analysis_leaves_the_usb_contents_intact() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("device");
+    std::fs::create_dir(&root).unwrap();
+    std::fs::write(root.join("existing.txt"), b"on the drive before export").unwrap();
+    let tracks = demo_tracks(&temp.path().join("audio"), 1);
+    let request = ExportRequest {
+        root: root.clone(),
+        nodes: vec![ExportNode { name: "Set".into(), tracks: vec![1], ..Default::default() }],
+        tracks,
+        phrases: true,
+        ..Default::default()
+    };
+    let before = snapshot(&root);
+    let cancel = AtomicBool::new(false);
+    let result = run_export(request, &|event| {
+        if matches!(event, Progress::Step { text, .. } if text.starts_with("Analyzing phrases")) {
+            cancel.store(true, Ordering::Relaxed);
+        }
+    }, &cancel);
+    assert!(cancel.load(Ordering::Relaxed), "the export reached phrase analysis");
+    assert!(result.unwrap_err().to_string().contains("stopped"));
+    assert_eq!(snapshot(&root), before);
+}
+
 /// USB-005: an export cut short at any journal step (as if the program died there) is either
 /// undone or finished by recovery: the drive is byte-for-byte the "before" or the "after".
 #[test]
@@ -157,6 +185,9 @@ fn interrupted_export_recovers_to_before_or_after() {
         settings: Default::default(),
         browse: Default::default(),
         phrases: true,
+        // This test replays every journal failure on the same songs. Keep real PSSI
+        // generation here; full_export_to_folder exercises the default estimator.
+        classic_phrase_estimator: true,
         ..Default::default()
     };
     let cancel = std::sync::atomic::AtomicBool::new(false);

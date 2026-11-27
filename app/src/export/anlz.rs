@@ -605,6 +605,36 @@ pub fn section_list(b: &[u8]) -> Vec<(String, Vec<u8>)> {
     out
 }
 
+/// Load only the supported PSSI section for deck analysis and USB export planning.
+/// Waveforms can dwarf the phrase table, so seek past every other section.
+pub fn read_pssi(path: &std::path::Path) -> Option<Vec<u8>> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut file = std::fs::File::open(path).ok()?;
+    let len = file.metadata().ok()?.len();
+    let mut header = [0u8; 12];
+    file.read_exact(&mut header).ok()?;
+    let size = |s: &[u8]| u32::from_be_bytes(s.try_into().unwrap()) as u64;
+    if &header[..4] != b"PMAI" || size(&header[4..8]) != 28 || size(&header[8..]) != len { return None; }
+    let mut offset = 28;
+    for _ in 0..1024 {
+        if offset + 12 > len { return None; }
+        file.seek(SeekFrom::Start(offset)).ok()?;
+        file.read_exact(&mut header).ok()?;
+        let section_len = size(&header[8..]);
+        if !(12..=section_len).contains(&size(&header[4..8])) || section_len > len - offset { return None; }
+        if &header[..4] == b"PSSI" {
+            // 32-byte header and at most u16::MAX entries, each 24 bytes.
+            if !(32..=32 + 24 * u16::MAX as u64).contains(&section_len) { return None; }
+            let mut bytes = vec![0; section_len as usize];
+            bytes[..12].copy_from_slice(&header);
+            file.read_exact(&mut bytes[12..]).ok()?;
+            return crate::phrase::supported_section(&bytes).then_some(bytes);
+        }
+        offset += section_len;
+    }
+    None
+}
+
 /// Every top-level section of an ANLZ file, by tag (first occurrence), as raw bytes.
 pub fn read_sections(path: &std::path::Path) -> std::collections::HashMap<String, Vec<u8>> {
     let mut out = std::collections::HashMap::new();
@@ -723,7 +753,13 @@ pub fn build_with(usb_path: &str, beats: &[Beat], wave: &Waveform, cues: &[Cue],
         ov?.device.values().flatten().find(|(t, _)| t == tag).map(|(_, b)| b.clone())
     };
     let take = |tag: &str| ov.and_then(|o| o.sections.get(tag).cloned()).or_else(|| from_device(tag));
-    let take_grid = |tag: &str| ov.filter(|o| o.grid_same).and_then(|o| o.sections.get(tag).cloned());
+    // A signed shift or shortened native PQTZ can change beat numbering even
+    // when its first tempo anchor still compares equal. Locally edited or
+    // inferred phrases must be paired with exactly the grid used to number them.
+    let grid_ov = ov.filter(|o| o.grid_same && o.sections.get("PQTZ").is_some_and(|s| {
+        if o.pssi.is_some() { crate::rbimport::pqtz_matches_all_beats(s, beats) } else { crate::rbimport::valid_pqtz_section(s) }
+    }));
+    let take_grid = |tag: &str| grid_ov.and_then(|o| o.sections.get(tag).cloned());
     let or = |tag: &str, f: &dyn Fn() -> Vec<u8>| take(tag).unwrap_or_else(f);
     let dat = vec![
         ppth(usb_path),
@@ -757,7 +793,8 @@ pub fn build_with(usb_path: &str, beats: &[Beat], wave: &Waveform, cues: &[Cue],
     ext.push(or("PWV4", &|| pwv4(wave)));
     // Phrases: rekordbox's own when its grid still applies, else Recordbox's. Written with the
     // XOR mask rekordbox 6+ applies to exported files.
-    if let Some(mut s) = take_grid("PSSI").or_else(|| ov.and_then(|o| o.pssi.clone())) {
+    let valid_pssi = |bytes: &Vec<u8>| crate::phrase::supported_section(bytes);
+    if let Some(mut s) = take_grid("PSSI").filter(valid_pssi).or_else(|| ov.and_then(|o| o.pssi.clone()).filter(valid_pssi)) {
         if !crate::phrase::is_masked(&s) {
             crate::phrase::mask_section(&mut s);
         }
@@ -810,6 +847,75 @@ mod tests {
         assert!(validate(&bytes).is_err());
         assert!(validate(&file(vec![section(b"PNEW", &[], &[]); 1025])).is_err());
     }
+    #[test]
+    fn phrase_reader_seeks_over_waveforms_and_checks_extent() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("a.EXT");
+        let phrase = crate::phrase::pssi(&crate::phrase::Structure { mood: 2, phrases: vec![], end_beat: 128, rb: None });
+        let mut bytes = file(vec![section(b"PWV5", &[], &[42; 16384]), phrase.clone()]);
+        std::fs::write(&path, &bytes).unwrap();
+        assert_eq!(read_pssi(&path), Some(phrase));
+        bytes[36..40].copy_from_slice(&u32::MAX.to_be_bytes());
+        std::fs::write(&path, &bytes).unwrap();
+        assert!(read_pssi(&path).is_none());
+    }
+
+    #[test]
+    fn local_phrase_rows_follow_the_exported_grid() {
+        let beats = crate::model::BeatGrid::constant(0.443, 137.0, 1).beats(1.1);
+        let local_grid = pqtz(&beats);
+        let local_pssi = crate::phrase::pssi(&crate::phrase::Structure {
+            mood: 2, phrases: vec![crate::phrase::Phrase { beat: 2, kind: 2 }], end_beat: 3, rb: None,
+        });
+        let mut ov = Overrides { grid_same: true, pssi: Some(local_pssi), sections: Default::default(), device: Default::default(), pvdi: None };
+        let output = |ov: &Overrides| {
+            let f = build_with("/a.wav", &beats, &Waveform::default(), &[], 0, 44100, Some(ov));
+            assert!(section_list(&f.ext).iter().any(|(tag, _)| tag == "PSSI"));
+            section_list(&f.dat).into_iter().find(|(tag, _)| tag == "PQTZ").unwrap().1
+        };
+        assert_eq!(output(&ov), local_grid, "no native grid");
+        let mut same = local_grid.clone();
+        same[16] = 7; // Opaque header marks that the compatible original is preserved.
+        ov.sections.insert("PQTZ".into(), same.clone());
+        assert_eq!(output(&ov), same);
+        ov.grid_same = false;
+        assert_eq!(output(&ov), local_grid, "changed local grid");
+        ov.grid_same = true;
+        let native_beats = crate::model::BeatGrid::constant(0.029, 137.0, 1).beats(1.0);
+        let mut shifted = pqtz(&native_beats);
+        shifted[18..20].copy_from_slice(&414i16.to_be_bytes());
+        ov.sections.insert("PQTZ".into(), shifted);
+        assert_eq!(output(&ov), local_grid, "positive native shift inserted a preceding local beat");
+        ov.sections.insert("PQTZ".into(), pqtz(&beats[..beats.len()-1]));
+        assert_eq!(output(&ov), local_grid, "local tail also needs beat records");
+    }
+
+    #[test]
+    fn export_skips_invalid_pssi_and_preserves_valid_source_bytes() {
+        let mut native = crate::phrase::pssi(&crate::phrase::Structure {
+            mood: 1, phrases: vec![crate::phrase::Phrase { beat: 1, kind: 2 }], end_beat: 64, rb: None,
+        });
+        native[30] = 9;
+        crate::phrase::mask_section(&mut native);
+        let mut ov = Overrides { sections: Default::default(), grid_same: true, pssi: None, device: Default::default(), pvdi: None };
+        let beats = crate::model::BeatGrid::constant(0.1, 120.0, 1).beats(1.1);
+        let exported = |ov: &Overrides| section_list(&build_with("/a.wav", &beats, &Waveform::default(), &[], 0, 44100, Some(ov)).ext)
+            .into_iter().find(|(tag, _)| tag == "PSSI").map(|(_, bytes)| bytes);
+        ov.sections.insert("PSSI".into(), native.clone());
+        assert!(exported(&ov).is_none(), "native PSSI requires an available companion grid");
+        let mut shifted = pqtz(&beats);
+        shifted[18..20].copy_from_slice(&600i16.to_be_bytes());
+        ov.sections.insert("PQTZ".into(), shifted);
+        assert_eq!(exported(&ov).as_ref(), Some(&native), "unchanged native pair retains its own numbering");
+        ov.sections.insert("PQTZ".into(), pqtz(&beats));
+        ov.sections.get_mut("PSSI").unwrap()[15] = 23;
+        assert!(exported(&ov).is_none());
+        ov.pssi = Some(native.clone());
+        assert_eq!(exported(&ov).as_ref(), Some(&native));
+        ov.pssi.as_mut().unwrap()[18..20].fill(0);
+        assert!(exported(&ov).is_none());
+    }
+
     /// Unknown sections already on the drive survive a rewrite; audio sections are reused.
     #[test]
     fn rewrite_keeps_device_sections() {

@@ -2,7 +2,7 @@
 
 use anyhow::{anyhow, Result};
 use parking_lot::Mutex;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use symphonia::core::audio::SampleBuffer;
 use symphonia::core::codecs::{DecoderOptions, CODEC_TYPE_NULL};
 use symphonia::core::formats::FormatOptions;
@@ -34,6 +34,59 @@ impl Decoded {
     }
 }
 
+/// One clock per process: a decode worker, a playback deck and a cache lookup
+/// must all interpret a sample position the same way.
+#[derive(PartialEq, Eq, Clone, Copy, Debug, Default)]
+pub enum Mp3Timeline {
+    #[default]
+    Legacy,
+    Rekordbox,
+}
+
+static MP3_TIMELINE: OnceLock<Mp3Timeline> = OnceLock::new();
+
+impl Mp3Timeline {
+    pub fn from_args(args: &[String]) -> Result<Self> {
+        let mut selected = None;
+        let mut args = args.iter().map(String::as_str);
+        while let Some(arg) = args.next() {
+            let value = if arg == "--mp3-timeline" {
+                args.next().unwrap_or("")
+            } else if let Some(value) = arg.strip_prefix("--mp3-timeline=") {
+                value
+            } else {
+                continue;
+            };
+            anyhow::ensure!(selected.is_none(), "Specify --mp3-timeline only once.");
+            selected = Some(match value {
+                "legacy" => Self::Legacy,
+                "rekordbox" => Self::Rekordbox,
+                _ => anyhow::bail!("Expected --mp3-timeline legacy or --mp3-timeline rekordbox."),
+            });
+        }
+        Ok(selected.unwrap_or_default())
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Legacy => "legacy",
+            Self::Rekordbox => "rekordbox",
+        }
+    }
+
+    pub fn initialize(self) {
+        MP3_TIMELINE.set(self).expect("initialize MP3 timeline only at startup");
+    }
+}
+
+pub fn mp3_timeline() -> Mp3Timeline {
+    MP3_TIMELINE.get().copied().unwrap_or_default()
+}
+
+pub fn is_mp3(path: &str) -> bool {
+    std::path::Path::new(path).extension().is_some_and(|ext| ext.eq_ignore_ascii_case("mp3"))
+}
+
 #[derive(PartialEq, Eq, Clone, Copy, Debug)]
 pub enum Mp3Timing {
     NotMp3,
@@ -48,7 +101,7 @@ pub const MP3_UNTAGGED_SKIP: usize = 1152;
 /// Look at the first MP3 frame for a LAME-style info tag and its encoder name.
 pub fn mp3_timing_class(path: &str) -> Mp3Timing {
     use std::io::Read;
-    if !path.to_ascii_lowercase().ends_with(".mp3") {
+    if !is_mp3(path) {
         return Mp3Timing::NotMp3;
     }
     let Ok(mut f) = std::fs::File::open(path) else { return Mp3Timing::NotMp3 };
@@ -92,6 +145,53 @@ pub fn decode_file(path: &str) -> Result<Decoded> {
 }
 
 pub fn decode_until(path: &str, cancelled: impl Fn() -> bool) -> Result<Decoded> {
+    decode_with_timeline(path, mp3_timeline(), cancelled)
+}
+
+fn decode_with_timeline(path: &str, timeline: Mp3Timeline, cancelled: impl Fn() -> bool) -> Result<Decoded> {
+    decode_with_budget(path, timeline, cancelled, None)
+}
+
+/// Read a bounded prefix for an effect sample. Stop at a packet boundary, retaining
+/// the requested audible frames, up to the shared PCM safety limit.
+pub fn decode_prefix(path: &str, seconds: usize) -> Result<Decoded> {
+    decode_with_budget(path, mp3_timeline(), || false, Some(DecodeLimit { seconds, prefix: true }))
+}
+
+/// Optional whole-track analysis must skip over-budget files, never infer phrases
+/// for a truncated prefix. The duration header is only an early-out.
+pub fn decode_bounded(path: &str, seconds: usize, cancelled: impl Fn() -> bool) -> Result<Decoded> {
+    decode_with_budget(path, mp3_timeline(), cancelled, Some(DecodeLimit { seconds, prefix: false }))
+}
+
+#[derive(Clone, Copy)]
+struct DecodeLimit {
+    seconds: usize,
+    prefix: bool,
+}
+
+impl DecodeLimit {
+    fn frames(self, sr: u32, trim: usize) -> usize {
+        // 256 MiB stereo PCM, even for unusually high source sample rates.
+        self.seconds.saturating_mul(sr as usize).min(32 * 1024 * 1024) + trim
+    }
+
+    fn packet(self, out: &mut Vec<f32>, sr: u32, trim: usize, frames: usize) -> Result<usize> {
+        let limit = self.frames(sr, trim);
+        let used = out.len() / 2;
+        let room = limit.saturating_sub(used);
+        anyhow::ensure!(used <= limit && (self.prefix || frames <= room), "audio exceeds the optional decode limit");
+        let frames = frames.min(room);
+        if (used + frames) * 2 > out.capacity() {
+            // Bound speculative allocation and avoid one reallocation per packet.
+            let capacity = (used + frames).max(out.capacity()).max(65536).min(limit);
+            out.try_reserve_exact(capacity * 2 - out.len())?;
+        }
+        Ok(frames)
+    }
+}
+
+fn decode_with_budget(path: &str, timeline: Mp3Timeline, cancelled: impl Fn() -> bool, limit: Option<DecodeLimit>) -> Result<Decoded> {
     if cancelled() { anyhow::bail!("stopped"); }
     let file = std::fs::File::open(path)?;
     let mss = MediaSourceStream::new(Box::new(file), Default::default());
@@ -99,11 +199,15 @@ pub fn decode_until(path: &str, cancelled: impl Fn() -> bool) -> Result<Decoded>
     if let Some(ext) = std::path::Path::new(path).extension().and_then(|e| e.to_str()) {
         hint.with_extension(ext);
     }
-    // MP3 start alignment follows the original's timeline (measured against its own grids,
-    // see MECHANICS.md): LAME-tagged files keep the encoder lead-in, ffmpeg-tagged files have it
-    // removed, untagged files lose one frame.
-    let class = mp3_timing_class(path);
-    let gapless = class == Mp3Timing::Ffmpeg;
+    // Earlier recordbox collections used an encoder-name heuristic. The optional
+    // Rekordbox clock keeps decoder delay and counts a matching leading Info frame.
+    let (gapless, trim_untagged, lead) = match timeline {
+        Mp3Timeline::Legacy => {
+            let class = mp3_timing_class(path);
+            (class == Mp3Timing::Ffmpeg, class == Mp3Timing::Untagged, 0)
+        }
+        Mp3Timeline::Rekordbox => (false, false, crate::analysis::mp3_timebase::lead_frames(path)),
+    };
     let probed = symphonia::default::get_probe().format(&hint, mss, &FormatOptions { enable_gapless: gapless, ..Default::default() }, &MetadataOptions::default())?;
     let mut format = probed.format;
     let track = format
@@ -112,19 +216,30 @@ pub fn decode_until(path: &str, cancelled: impl Fn() -> bool) -> Result<Decoded>
         .find(|t| t.codec_params.codec != CODEC_TYPE_NULL)
         .ok_or_else(|| anyhow!("no audio track"))?
         .clone();
-    let mut decoder = symphonia::default::get_codecs().make(&track.codec_params, &DecoderOptions::default())?;
     let track_id = track.id;
     let mut sr = track.codec_params.sample_rate.unwrap_or(44100);
-    let mut out: Vec<f32> = Vec::new();
+    let mut out = vec![0.0; lead * 2];
     let declared_frames = track.codec_params.n_frames;
     let time_base = track.codec_params.time_base;
-    if let Some(n) = track.codec_params.n_frames {
+    let trim = if trim_untagged { MP3_UNTAGGED_SKIP } else { 0 };
+    if let Some(limit) = limit {
+        anyhow::ensure!(limit.seconds > 0, "zero audio decode limit");
+        if !limit.prefix {
+            if let (Some(n), Some(tb)) = (declared_frames, time_base) {
+                let t = tb.calc_time(n);
+                let max_secs = limit.frames(sr, trim) as f64 / sr.max(1) as f64;
+                anyhow::ensure!(t.seconds as f64 + t.frac <= max_secs + 1.0, "audio exceeds the optional decode limit");
+            }
+        }
+    } else if let Some(n) = track.codec_params.n_frames {
         out.reserve((n as usize).min(60 * 60 * 48000) * 2);
     }
+    let mut decoder = symphonia::default::get_codecs().make(&track.codec_params, &DecoderOptions::default())?;
     let mut sbuf: Option<SampleBuffer<f32>> = None;
     let mut damaged = 0usize;
     loop {
         if cancelled() { anyhow::bail!("stopped"); }
+        if limit.is_some_and(|l| l.prefix && out.len() / 2 >= l.frames(sr, trim)) { break; }
         let packet = match format.next_packet() {
             Ok(p) => p,
             Err(symphonia::core::errors::Error::IoError(_)) => break,
@@ -140,7 +255,8 @@ pub fn decode_until(path: &str, cancelled: impl Fn() -> bool) -> Result<Decoded>
                 // Silence for the packet's length, so everything after stays where it belongs.
                 damaged += 1;
                 let n = (packet.dur as usize).min(1 << 20);
-                out.extend(std::iter::repeat(0.0f32).take(n * 2));
+                let n = match limit { Some(l) => l.packet(&mut out, sr, trim, n)?, None => n };
+                out.resize(out.len() + n * 2, 0.0);
                 continue;
             }
             Err(e) => return Err(e.into()),
@@ -148,12 +264,17 @@ pub fn decode_until(path: &str, cancelled: impl Fn() -> bool) -> Result<Decoded>
         let spec = *decoded.spec();
         sr = spec.rate;
         let ch = spec.channels.count();
+        let frames = decoded.frames();
+        let frames = if let Some(l) = limit {
+            anyhow::ensure!(ch != 0 && decoded.capacity().saturating_mul(ch) <= 8 * 1024 * 1024, "audio packet exceeds the optional decode limit");
+            l.packet(&mut out, sr, trim, frames)?
+        } else { frames };
         if sbuf.as_ref().map(|b| b.capacity() < decoded.capacity() * ch).unwrap_or(true) {
             sbuf = Some(SampleBuffer::<f32>::new(decoded.capacity() as u64, spec));
         }
         let b = sbuf.as_mut().unwrap();
         b.copy_interleaved_ref(decoded);
-        let s = b.samples();
+        let s = &b.samples()[..frames * ch];
         if ch == 1 {
             for v in s {
                 out.push(*v);
@@ -201,7 +322,7 @@ pub fn decode_until(path: &str, cancelled: impl Fn() -> bool) -> Result<Decoded>
             }
         }
     }
-    let decoded_frames = out.len() / 2;
+    let decoded_frames = out.len() / 2 - lead;
     // Compared in seconds: some containers (MP4) count the declared length in their own time
     // units rather than sample frames.
     let declared_secs = declared_frames.map(|n| match time_base {
@@ -212,18 +333,92 @@ pub fn decode_until(path: &str, cancelled: impl Fn() -> bool) -> Result<Decoded>
         None => n as f64 / sr.max(1) as f64,
     });
     let truncated = declared_secs.map(|d| decoded_frames as f64 / sr.max(1) as f64 + 1.0 < d).unwrap_or(false);
-    let mut raw_frames = decoded_frames;
-    if class == Mp3Timing::Ffmpeg {
+    if limit.is_some_and(|l| !l.prefix) && truncated {
+        anyhow::bail!("incomplete audio for whole-track analysis");
+    }
+    let mut raw_frames = decoded_frames + lead;
+    if gapless {
         raw_frames += track.codec_params.delay.unwrap_or(0) as usize + track.codec_params.padding.unwrap_or(0) as usize;
     }
-    if class == Mp3Timing::Untagged {
+    if trim_untagged {
         let drop = (MP3_UNTAGGED_SKIP * 2).min(out.len());
         out.drain(..drop);
     }
-    if out.is_empty() {
+    if decoded_frames == 0 || out.is_empty() {
         return Err(anyhow!("no audio decoded"));
     }
     Ok(Decoded { sr, samples: out, raw_frames, damaged, truncated })
+}
+
+#[cfg(test)]
+mod mp3_timeline_tests {
+    use super::*;
+
+    #[test]
+    fn legacy_remains_default_and_invalid_or_repeated_clocks_are_rejected() {
+        let parse = |args: &[&str]| Mp3Timeline::from_args(&args.iter().copied().map(String::from).collect::<Vec<_>>());
+        assert_eq!(parse(&[]).unwrap(), Mp3Timeline::Legacy);
+        assert_eq!(parse(&["--mp3-timeline", "legacy"]).unwrap(), Mp3Timeline::Legacy);
+        assert_eq!(parse(&["--disable-load", "--mp3-timeline=rekordbox"]).unwrap(), Mp3Timeline::Rekordbox);
+        assert!(parse(&["--mp3-timeline"]).is_err());
+        assert!(parse(&["--mp3-timeline", "other"]).is_err());
+        assert!(parse(&["--mp3-timeline=rekordbox", "--mp3-timeline=legacy"]).is_err());
+    }
+
+    #[test]
+    fn optional_decodes_respect_time_and_pcm_budgets() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("two_seconds.wav");
+        let sr = 8_000u32;
+        let frames = sr * 2;
+        let bytes = frames * 2;
+        let mut wav = Vec::from(&b"RIFF"[..]);
+        wav.extend_from_slice(&(bytes + 36).to_le_bytes());
+        wav.extend_from_slice(b"WAVEfmt ");
+        for value in [16u32, 0x00010001, sr, sr * 2, 0x00100002] { wav.extend_from_slice(&value.to_le_bytes()); }
+        wav.extend_from_slice(b"data");
+        wav.extend_from_slice(&bytes.to_le_bytes());
+        for i in 0..frames { wav.extend_from_slice(&(i as i16).to_le_bytes()); }
+        std::fs::write(&path, wav)?;
+        let path = path.to_str().unwrap();
+        let one = decode_prefix(path, 1)?;
+        let two = decode_bounded(path, 2, || false)?;
+        assert_eq!(one.frames(), sr as usize);
+        assert_eq!(two.frames(), frames as usize);
+        assert_eq!(one.samples, two.samples[..one.samples.len()]);
+        assert!(decode_bounded(path, 1, || false).is_err());
+        let polls = std::cell::Cell::new(0);
+        assert!(decode_bounded(path, 2, || { polls.set(polls.get() + 1); polls.get() == 3 }).is_err());
+        // The output budget also applies when the container omits its duration.
+        let limit = DecodeLimit { seconds: 1, prefix: false };
+        let mut out = vec![0.0; sr as usize * 2 - 2];
+        assert!(limit.packet(&mut out, sr, 0, 2).is_err());
+        assert_eq!(DecodeLimit { prefix: true, ..limit }.packet(&mut out, sr, 0, 2)?, 1);
+        assert_eq!(limit.frames(u32::MAX, 0), 32 * 1024 * 1024);
+        Ok(())
+    }
+
+    #[test]
+    fn untagged_mp3_keeps_its_first_frame_only_on_the_rekordbox_clock() -> Result<()> {
+        // Eight MPEG-1 Layer III frames at 320 kbps, 44.1 kHz, with silent granules.
+        let mut frame = vec![0; 1044];
+        frame[..4].copy_from_slice(&[0xff, 0xfb, 0xe0, 0x64]);
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("silent.MP3");
+        std::fs::write(&path, frame.repeat(8))?;
+        let path = path.to_str().unwrap();
+        let legacy = decode_with_timeline(path, Mp3Timeline::Legacy, || false)?;
+        let rb = decode_with_timeline(path, Mp3Timeline::Rekordbox, || false)?;
+        assert_eq!(rb.raw_frames, legacy.raw_frames);
+        assert_eq!(rb.frames(), legacy.frames() + MP3_UNTAGGED_SKIP);
+        assert_eq!(legacy.samples, rb.samples[MP3_UNTAGGED_SKIP * 2..]);
+        let polls = std::cell::Cell::new(0);
+        assert!(decode_with_timeline(path, Mp3Timeline::Rekordbox, || {
+            polls.set(polls.get() + 1);
+            polls.get() == 3
+        }).err().is_some_and(|error| error.to_string() == "stopped"));
+        Ok(())
+    }
 }
 
 /// Shared playback state read by the audio callback.
@@ -239,6 +434,7 @@ pub struct PlayState {
     /// Separated stems of the loaded track (44.1 kHz) and which are audible, in source order
     /// drums, bass, other, vocals. With all on (or no stems) the original mix plays.
     pub stems: Option<Arc<crate::stems::Stems>>,
+    pub stem_preview: Option<Arc<crate::stems::Live>>,
     pub stem_on: [bool; 4],
     /// STEM ISO gain of each source (same order): 0 kills it, 1 leaves it, up to +6 dB
     /// (`stem_iso_gain` turns a knob position into this).
@@ -298,6 +494,10 @@ pub struct PlayState {
     pub sync_follow: bool,
     /// Speed correction the audio callback applies to hold the beat phase (BEAT SYNC).
     pub sync_bend: f64,
+    /// The deck engine's own state (`deck.rs`): reverse, jog, vinyl ramps, sync rate, routes.
+    pub dk: crate::deck::Engine,
+    /// The pad modes' engines (slicer, active censor): `pad_audio.rs`.
+    pub pads: crate::pad_audio::DeckPads,
     click_phase: usize,
     next_click: usize,
     search_count: usize,
@@ -305,6 +505,13 @@ pub struct PlayState {
 }
 
 pub const DEFAULT_VOLUME: f32 = 0.9;
+
+impl PlayState {
+    /// Mute and solo become available as soon as a playable prefix exists.
+    pub fn has_playable_stems(&self) -> bool {
+        self.stems.is_some() || self.stem_preview.as_ref().is_some_and(|p| p.ready_frames() >= 4)
+    }
+}
 
 impl Default for PlayState {
     fn default() -> Self {
@@ -318,6 +525,7 @@ impl Default for PlayState {
             metronome: None,
             metronome_vol: 0.5,
             stems: None,
+            stem_preview: None,
             stem_on: [true; 4],
             stem_iso: [1.0; 4],
             search: 0.0,
@@ -346,6 +554,8 @@ impl Default for PlayState {
             grid: None,
             sync_follow: false,
             sync_bend: 0.0,
+            dk: Default::default(),
+            pads: Default::default(),
             click_phase: usize::MAX,
             next_click: 0,
             search_count: 0,
@@ -432,7 +642,7 @@ impl Player {
     pub fn transport_running(&self) -> bool {
         self.decks.iter().any(|deck| {
             let s = deck.lock();
-            s.playing || s.search != 0.0
+            s.playing || s.search != 0.0 || matches!(s.dk.jog, crate::deck::Jog::Speed(_)) || crate::groove::wants_render(&s)
         })
     }
 
@@ -634,8 +844,8 @@ pub fn sync_rate(master_bpm: f64, own_bpm: f64) -> f64 {
     if master_bpm <= 0.0 || own_bpm <= 0.0 {
         return 1.0;
     }
-    let r = master_bpm / own_bpm;
-    [r, r * 2.0, r / 2.0].into_iter().min_by(|a, b| a.ln().abs().total_cmp(&b.ln().abs())).unwrap_or(1.0)
+    // (rekordbox's thresholds: half under 2/3 of the master's BPM, double over 1.5 times.)
+    master_bpm * crate::deck::sync_rate_auto(master_bpm, own_bpm) / own_bpm
 }
 
 /// One second-order filter section for both channels (transposed direct form II).
@@ -744,6 +954,7 @@ struct Src<'a> {
     audio: &'a Decoded,
     frames: usize,
     stems: Option<&'a crate::stems::Stems>,
+    preview: Option<(&'a crate::stems::Live, usize)>,
     /// Gains for this frame: the original, then drums, bass, other, vocals.
     g: std::cell::Cell<[f32; 5]>,
     stem_ratio: f64,
@@ -764,25 +975,49 @@ impl Src<'_> {
         let ii = i as isize;
         let (ol, or) = (cubic(at(ii - 1, 0), at(ii, 0), at(ii + 1, 0), at(ii + 2, 0), fr), cubic(at(ii - 1, 1), at(ii, 1), at(ii + 1, 1), at(ii + 2, 1), fr));
         let g = self.g.get();
-        let st = match self.stems {
-            Some(st) if st.len > 1 && (g[1] != 0.0 || g[2] != 0.0 || g[3] != 0.0 || g[4] != 0.0) => st,
+        if g == [1.0, 0.0, 0.0, 0.0, 0.0] {
+            return (ol, or);
+        }
+        let sp = p * self.stem_ratio;
+        let (len, ready) = match (self.stems, self.preview) {
+            (Some(st), _) => (st.len, st.len),
+            (None, Some((live, ready))) => (live.len(), ready),
             _ => return (ol * g[0], or * g[0]),
         };
-        let sp = p * self.stem_ratio;
-        let si = (sp as usize).min(st.len - 2);
+        if len < 2 { return (ol, or); }
+        let sp = sp.min((len - 1) as f64);
+        let si = sp as usize;
         let sf = (sp - si as f64) as f32;
-        let n = st.len as isize;
-        let k = si as isize;
-        let part = |src: usize| -> (f32, f32) {
-            let lb = src * 2 * st.len;
-            let rb = lb + st.len;
-            let at = |base: usize, k: isize| st.data[base + k.clamp(0, n - 1) as usize];
-            (cubic(at(lb, k - 1), at(lb, k), at(lb, k + 1), at(lb, k + 2), sf), cubic(at(rb, k - 1), at(rb, k), at(rb, k + 1), at(rb, k + 2), sf))
+        let taps = [si.saturating_sub(1), si, (si+1).min(len-1), (si+2).min(len-1)];
+        if taps[3] >= ready {
+            // A seek, loop or jog can immediately reach an unfinished portion of the track.
+            return (ol, or);
+        }
+        let plane = |index: usize| -> Option<f32> {
+            if let Some(st) = self.stems {
+                let row = &st.data[index*len..(index+1)*len];
+                return Some(cubic(row[taps[0]], row[si], row[taps[2]], row[taps[3]], sf));
+            }
+            let live = self.preview?.0;
+            let first = taps[0];
+            if let Some(span) = live.plane_span(index, first, taps[3]+1) {
+                return Some(cubic(span[0], span[si-first], span[taps[2]-first], span[taps[3]-first], sf));
+            }
+            // Interpolating across the boundary between two finished slabs.
+            Some(cubic(live.sample(index, first)?, live.sample(index, si)?, live.sample(index, taps[2])?, live.sample(index, taps[3])?, sf))
         };
-        let (d, b, v) = (part(0), part(1), part(3));
+        let part = |src: usize| Some((plane(2*src)?, plane(2*src+1)?));
+        let (Some(d), Some(b), Some(v)) = (part(0), part(1), part(3)) else { return (ol, or) };
         // Instruments: the mix less drums, bass and vocals.
         let o = (ol - d.0 - b.0 - v.0, or - d.1 - b.1 - v.1);
-        (g[0] * ol + g[1] * d.0 + g[2] * b.0 + g[3] * o.0 + g[4] * v.0, g[0] * or + g[1] * d.1 + g[2] * b.1 + g[3] * o.1 + g[4] * v.1)
+        let mixed = (g[0] * ol + g[1] * d.0 + g[2] * b.0 + g[3] * o.0 + g[4] * v.0, g[0] * or + g[1] * d.1 + g[2] * b.1 + g[3] * o.1 + g[4] * v.1);
+        if ready < len {
+            // Blend into the original over the last 3.3 ms of a growing prefix.
+            let wet = (((ready - 1) as f64 - sp) / (STEM_RAMP_SECS as f64 * crate::stems::htdemucs::SAMPLE_RATE as f64)).clamp(0.0, 1.0) as f32;
+            (ol + wet * (mixed.0 - ol), or + wet * (mixed.1 - or))
+        } else {
+            mixed
+        }
     }
     /// Left + right of whole source frame `i` (for aligning grains).
     #[inline]
@@ -812,9 +1047,23 @@ impl ClipReader {
     /// output frame; `pitch_step`: source frames per output frame the sound is read at.
     #[inline]
     pub fn frame(&mut self, audio: &Decoded, pos: f64, step: f64, pitch_step: f64, hop: usize) -> (f32, f32) {
-        let src = Src { audio, frames: audio.frames(), stems: None, g: std::cell::Cell::new([1.0, 0.0, 0.0, 0.0, 0.0]), stem_ratio: 1.0 };
+        let src = Src { audio, frames: audio.frames(), stems: None, preview: None, g: std::cell::Cell::new([1.0, 0.0, 0.0, 0.0, 0.0]), stem_ratio: 1.0 };
         if (step - pitch_step).abs() > 1e-9 {
-            self.st.frame(&src, pos, pitch_step, hop)
+            // A grain reads on at the pitch's rate while the position moves at `step`, so its
+            // sound falls behind (or runs ahead) by up to hop x (step - pitch) frames before
+            // the next grain starts. Starting each grain half of that ahead keeps a beat of a
+            // tempo-synced loop within half a grain's drift of its place instead of always late.
+            let lead = 0.5 * hop as f64 * (step - pitch_step);
+            // A loop's wrap (the position goes back by more than a grain) starts a new grain
+            // at once: fading into it would soften the first beat of every pass.
+            if self.st.active && pos + lead < self.st.expect - hop as f64 {
+                self.st.active = false;
+            }
+            let out = self.st.frame(&src, pos + lead, pitch_step, hop);
+            // Where the next frame is expected: without this every frame looked like a seek
+            // and the stretcher never got past the first sample of a grain.
+            self.st.expect = pos + lead + step;
+            out
         } else {
             self.st.active = false;
             src.at(pos)
@@ -978,7 +1227,7 @@ impl Stretch {
         } else if self.n >= hop {
             let natural = self.cur + h * self.ps;
             self.prev = self.cur;
-            self.cur = if (ps - self.ps).abs() < 1e-12 { self.pick(src, pos, natural) } else { pos };
+            self.cur = if (ps - self.ps).abs() < 1e-12 && ps > 0.0 { self.pick(src, pos, natural) } else { pos };
             // The grain fading out keeps the pitch it was started with.
             self.prev += h * (self.ps - ps);
             self.ps = ps;
@@ -1011,16 +1260,30 @@ struct DeckDsp {
     ch_fader: f32,
     /// Where the position was going to be at the next frame (a difference means a jump).
     expect: f64,
-    /// A cross-fade away from the old position after a jump: (old position, frames left).
-    xf: Option<(f64, u32)>,
-    /// Play / pause fade in use (0 silent .. 1 playing).
-    gate: f32,
+    /// The source frame that sounds. It is the deck's position, except while the sound of
+    /// the place a jump left fades out (`pending`): then it runs on and the position waits.
+    snd: f64,
+    pending: bool,
+    /// Speed in use (1.0 = the track's own speed, negative backwards), and the vinyl ramp
+    /// running: 0 none, 1 start, 2 stop.
+    vel: f64,
+    ramp: u8,
+    /// Fade in use as a step of the fade curve (0 silent .. FADE_N - 1 full).
+    att: u8,
+    /// Output frames since a loop wrap or a quantized jump (for its fade in).
+    since: u8,
+    was_playing: bool,
+    was_jog: crate::deck::Jog,
+    /// Crossfader gain (2 ms ramp) and crossfader assign (3.3 ms out, then in).
+    xfade: crate::deck::Ramp,
+    assign: crate::deck::Ramp,
+    route: u8,
     cfx: crate::cfx::Cfx,
 }
 
 impl DeckDsp {
     fn new() -> DeckDsp {
-        DeckDsp { st: Stretch::new(), eq: Iso3::new(), fader: 1.0, stem_g: [1.0, 0.0, 0.0, 0.0, 0.0], eq3: crate::mixer::Eq3::new(), trim: 1.0, ch_fader: 1.0, expect: 0.0, xf: None, gate: 0.0, cfx: crate::cfx::Cfx::new() }
+        DeckDsp { st: Stretch::new(), eq: Iso3::new(), fader: 1.0, stem_g: [1.0, 0.0, 0.0, 0.0, 0.0], eq3: crate::mixer::Eq3::new(), trim: 1.0, ch_fader: 1.0, expect: 0.0, snd: 0.0, pending: false, vel: 0.0, ramp: 0, att: 0, since: u8::MAX, was_playing: false, was_jog: crate::deck::Jog::None, xfade: crate::deck::Ramp::at(1.0), assign: crate::deck::Ramp::at(1.0), route: 255, cfx: crate::cfx::Cfx::new() }
     }
 }
 
@@ -1070,6 +1333,38 @@ pub static HP_ACTIVE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicB
 /// First channel of the headphones pair wanted (Preferences > Audio > Input/Output); -1 = none.
 pub static HP_CHANNEL: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(-1);
 
+/// BEAT SYNC: the follower plays at the master's tempo (set by the interface), and here its
+/// beats are put on the master's: when they are more than 0.01 beat apart the deck jumps the
+/// shortest way (rekordbox's `shouldJumpForSyncBeat` / `jumpToSyncBeat`; jumps under 10
+/// frames are left). Not while it is bent, scratched, reversed, looping or mid-fade.
+fn sync_hold(f: &mut PlayState, master: &[f64], t_m: f64, rate: u32) {
+    let top = (crate::deck::FADE_N - 1) as u8;
+    if f.dk.jog != crate::deck::Jog::None || f.dk.reverse || f.bend != 0.0 || f.dk.bend_acc != 0.0 || f.dk.bend_slope != 0.0 || f.loop_range.is_some() {
+        return;
+    }
+    if f.smooth && (f.dsp.pending || f.dsp.ramp != 0 || f.dsp.att < top) {
+        return;
+    }
+    let (Some(gf), Some(af)) = (f.grid.clone(), f.audio.clone()) else { return };
+    let sr = af.sr as f64;
+    let t_f = f.pos / sr;
+    let (Some(pf), Some(pm)) = (beat_pos(&gf, t_f), beat_pos(master, t_m)) else { return };
+    let r = if f.dk.sync_rate > 0.0 { f.dk.sync_rate } else { 1.0 };
+    let e = crate::deck::sync_phase_error(pf, pm, r);
+    if e.abs() <= 0.01 {
+        return;
+    }
+    let i = gf.partition_point(|b| *b <= t_f).clamp(1, gf.len() - 1);
+    let len = (gf[i] - gf[i - 1]) * sr;
+    let jump = -e * r.min(1.0) * len;
+    if jump.abs() < 10.0 {
+        return;
+    }
+    // (The deck fades out for 43 frames before it moves; it lands where it should be by then.)
+    let lead = if f.smooth { (top - 1) as f64 * (sr / rate as f64) * (f.tempo + f.sync_bend).clamp(0.0, 2.0) } else { 0.0 };
+    f.pos = (f.pos + jump + lead).clamp(0.0, af.frames().saturating_sub(2) as f64);
+}
+
 /// `render`, also filling the headphones output `cue` (stereo; empty = none): the cued decks
 /// before their faders plus the master mix, as the MIX knob balances them.
 fn render_cue(states: &[Arc<Mutex<PlayState>>], out: &mut [f32], cue: &mut [f32], channels: usize, rate: u32) {
@@ -1085,10 +1380,15 @@ fn render_cue(states: &[Arc<Mutex<PlayState>>], out: &mut [f32], cue: &mut [f32]
     for (g, st) in guards.iter_mut().zip(states.iter()) {
         *g = lock_for_audio(st);
     }
+    // Lift the common master control before Mix Point Link applies its per-deck
+    // SILENT region. The muted part of a linked deck must also be silent on REC.
+    let rec_lift = crate::recorder::lift_master(&mut guards);
+    // MIX POINT LINK: a linked deck starts here, on the block its start position falls in.
+    crate::mpl::pre_render(&mut guards);
     let master = MASTER_DECK.load(std::sync::atomic::Ordering::Relaxed) as usize;
     if master < states.len() {
         // The master's part of the comparison, taken before the followers are changed.
-        let m = guards[master].as_deref().map(|m| (m.playing, m.search, m.grid.clone(), m.audio.as_ref().map(|a| a.sr), m.pos));
+        let m = guards[master].as_deref().map(|m| (m.playing && m.dk.jog == crate::deck::Jog::None && !m.dk.reverse, m.search, m.grid.clone(), m.audio.as_ref().map(|a| a.sr), m.pos));
         for (i, g) in guards.iter_mut().enumerate() {
             if let Some(f) = g.as_deref_mut() {
                 f.sync_bend = 0.0;
@@ -1097,11 +1397,7 @@ fn render_cue(states: &[Arc<Mutex<PlayState>>], out: &mut [f32], cue: &mut [f32]
                 }
                 if let Some((true, search, Some(gm), Some(sr), pos)) = m.clone() {
                     if f.sync_follow && f.playing && f.search == 0.0 && search == 0.0 {
-                        if let (Some(gf), Some(af)) = (&f.grid, &f.audio) {
-                            if let Some(e) = phase_error(gf, f.pos / af.sr as f64, &gm, pos / sr as f64) {
-                                f.sync_bend = sync_correction(e);
-                            }
-                        }
+                        sync_hold(f, &gm, pos / sr as f64, rate);
                     }
                 }
             }
@@ -1172,9 +1468,12 @@ fn render_cue(states: &[Arc<Mutex<PlayState>>], out: &mut [f32], cue: &mut [f32]
         }
     }
     drop(rack);
+    crate::recorder::restore_master(&mut guards, rec_lift);
     drop(guards);
+    crate::edit_audio::mix(out, channels, rate);
     // The master section (Performance mixer): peak limiter, then the master level meter.
     use std::sync::atomic::Ordering::Relaxed;
+    crate::recorder::tap(out, channels, rate, rec_lift);
     if let Some(mut lim) = MASTER_LIMITER.try_lock() {
         lim.process(out, channels, rate, LIMITER_ON.load(Relaxed));
     }
@@ -1251,14 +1550,24 @@ pub fn render_deck(s: &mut PlayState, out: &mut [f32], channels: usize, rate: u3
 /// `render_deck`, also adding the deck's headphones CUE feed to `cue` (stereo, as long as
 /// `out` in frames; empty when there is no headphones output).
 pub fn render_deck_cue(s: &mut PlayState, out: &mut [f32], cue: &mut [f32], channels: usize, rate: u32) {
+    use crate::deck::{fade_curve, Jog, BEND_LIMIT, FADE_N};
     let searching = s.search != 0.0;
     let smooth = s.smooth;
-    if !s.playing && !searching && (!smooth || s.dsp.gate <= 0.0) {
+    let jog = s.dk.jog;
+    let top = (FADE_N - 1) as u8;
+    // Nothing sounds and nothing moves: the deck rests where it is.
+    if !s.playing && !searching && !matches!(jog, Jog::Speed(_)) && (!smooth || (s.dsp.att == 0 && s.dsp.ramp == 0)) && !crate::groove::wants_render(s) {
         s.search_count = 0;
         s.dsp.st.active = false;
         s.dsp.expect = s.pos;
-        s.dsp.xf = None;
-        s.dsp.gate = 0.0;
+        s.dsp.snd = s.pos;
+        s.dsp.pending = false;
+        s.dsp.vel = 0.0;
+        s.dsp.ramp = 0;
+        s.dsp.att = 0;
+        s.dsp.was_playing = false;
+        s.dsp.was_jog = jog;
+        s.dk.vel = 0.0;
         if !s.slip {
             s.slip_pos = None;
         }
@@ -1267,129 +1576,345 @@ pub fn render_deck_cue(s: &mut PlayState, out: &mut [f32], cue: &mut [f32], chan
     let Some(audio) = s.audio.clone() else { return };
     let step = audio.sr as f64 / rate as f64;
     let frames = audio.frames();
+    let last = frames.saturating_sub(2) as f64;
     let vol = if s.muted { 0.0 } else { s.volume * s.gain * if searching { 0.7 } else { 1.0 } };
     let click_len = (rate as f64 * 0.03) as usize;
     let stems = s.stems.clone();
+    let live = s.stem_preview.clone();
+    let preview = live.as_deref().map(|p| (p, p.ready_frames()));
+    let stem_ratio = crate::stems::htdemucs::SAMPLE_RATE as f64 / audio.sr.max(1) as f64;
+    let preview_here = preview.is_some_and(|(p, ready)| ready >= 4 && (ready == p.len() || s.pos.max(0.0) * stem_ratio + 2.0 < ready as f64));
     // Where the gains of the original and the parts are heading. The parts are used only
     // while one of them is muted or off unity; until then the original plays untouched.
-    let use_parts = stems.is_some() && (0..4).any(|i| !s.stem_on[i] || s.stem_iso[i] != 1.0);
+    let use_parts = (stems.is_some() || preview_here) && (0..4).any(|i| !s.stem_on[i] || s.stem_iso[i] != 1.0);
     let mut stem_target = [if use_parts { 0.0 } else { 1.0 }, 0.0, 0.0, 0.0, 0.0];
     if use_parts {
         for i in 0..4 {
             stem_target[1 + i] = if s.stem_on[i] { s.stem_iso[i].clamp(0.0, 10.0) } else { 0.0 };
         }
     }
-    if stems.is_none() {
+    if stems.is_none() && !preview_here {
         s.dsp.stem_g = [1.0, 0.0, 0.0, 0.0, 0.0];
     }
     // A full on/off change takes 3.3 ms (rekordbox's `udsp::GainController`: 145.53 frames
     // at 44.1 kHz), at a constant slope, so smaller moves are proportionally quicker.
     let stem_k = 1.0 / (STEM_RAMP_SECS * rate as f32);
-    let src = Src { audio: &audio, frames, stems: stems.as_deref(), g: std::cell::Cell::new(s.dsp.stem_g), stem_ratio: crate::stems::htdemucs::SAMPLE_RATE as f64 / audio.sr.max(1) as f64 };
+    let src = Src { audio: &audio, frames, stems: stems.as_deref(), preview, g: std::cell::Cell::new(s.dsp.stem_g), stem_ratio };
     let metro = if searching { None } else { s.metronome.clone() };
-    let grain = search_grain(rate);
-    // Speed and pitch for this buffer. The pitch follows the speed unless Master Tempo holds
-    // it; the key shift is on top of either.
-    let speed = if searching { 1.0 } else { (s.tempo + s.bend + s.sync_bend).clamp(0.05, 4.0) };
+    // Search grains: 60 ms, or the length the deck asks for (rekordbox's scan: 133 ms).
+    let grain = if s.dk.scan_grain > 0.0 { ((s.dk.scan_grain * rate as f64) as usize).max(1) } else { search_grain(rate) };
+    let n_out = out.len() / channels.max(1);
+    // Bend slope (rekordbox's `BendTaskOnPreRender`): the bend grows by the slope for every
+    // millisecond, up to +-0.42.
+    if s.dk.bend_slope != 0.0 {
+        s.dk.bend_acc = (s.dk.bend_acc + s.dk.bend_slope * n_out as f64 * 1000.0 / rate as f64).clamp(-BEND_LIMIT, BEND_LIMIT);
+    }
+    // Speed and pitch for this buffer. The base tempo is limited to -100 .. +100 % as in
+    // rekordbox's engine (speed 0 .. 2). The pitch follows the speed unless Master Tempo
+    // holds it; the key shift is on top of either.
+    let speed = if searching { 1.0 } else { (s.tempo + s.bend + s.dk.bend_acc + s.sync_bend).clamp(0.0, 2.0) };
+    let dir = if s.dk.reverse { -1.0 } else { 1.0 };
     let pitch = if searching { 1.0 } else { (if s.master_tempo { 1.0 } else { speed }) * 2f64.powf(s.key_shift as f64 / 12.0) };
     let stretch = (pitch - speed).abs() > 1e-9;
     let hop = ((rate as usize) / 50).clamp(64, 4096);
     let fader_k = (1.0 / (0.005 * rate as f32)).min(1.0);
-    // The channel strip: none (Export), the equalizer, or the isolator (rekordbox's band
-    // gains: kill at the left end, flat at the centre, +6 dB at the right, the same curve as
-    // STEM ISO).
-    let strip = s.strip;
-    let eq_on = s.eq_on || strip == 2;
+    // The channel strip: none (Export), the equalizer (1: DJM-900NXS2 type, 3: DJM-900NXS
+    // type), or the isolator (rekordbox's band gains: kill at the left end, flat at the
+    // centre, +6 dB at the right, the same curve as STEM ISO).
+    // A change of type fades the old one out and the new one in, 3.3 ms each (`EqIso`); the
+    // DJM-900NXS type follows its knobs in filter steps (deck.rs).
+    let want_strip = s.strip;
+    let mut strip = s.dk.eqsw.begin(want_strip, rate);
+    let mut eq_on = s.eq_on || strip == 2;
     if eq_on {
         s.dsp.eq.prepare(rate);
     }
-    if strip == 1 {
-        s.dsp.eq3.prepare(rate, s.eq_pos, out.len() / channels.max(1));
+    let eq_knobs = if strip == 3 {
+        s.dk.nxs.advance(s.eq_pos, n_out, rate)
+    } else {
+        s.dk.nxs.ready = false;
+        s.eq_pos
+    };
+    if strip == 1 || strip == 3 {
+        s.dsp.eq3.nxs = strip == 3;
+        s.dsp.eq3.prepare(rate, eq_knobs, n_out);
     }
-    let iso_gain = if strip == 2 { [stem_iso_gain(s.eq_pos[0]), stem_iso_gain(s.eq_pos[1]), stem_iso_gain(s.eq_pos[2])] } else { s.eq_gain };
+    let iso_of = |strip: u8, pos: [f32; 3], gain: [f32; 3]| if strip == 2 { [stem_iso_gain(pos[0]), stem_iso_gain(pos[1]), stem_iso_gain(pos[2])] } else { gain };
+    let mut iso_gain = iso_of(strip, s.eq_pos, s.eq_gain);
     let mut peak = s.peak;
     let cfx_on = strip != 0;
     if !stretch {
         s.dsp.st.active = false;
     }
-    // SLIP: start the background position when a loop begins or a pad is held, and come back
-    // to it when that ends.
-    if s.slip && s.playing && (s.loop_range.is_some() || s.slip_hold) {
+    // Crossfader: the gain of the side the deck is assigned to moves in a 2 ms ramp; a new
+    // assignment fades the old side out over 3.3 ms, then the new one in (rekordbox's
+    // `CrossFaderVolumeControl` and `CrossFaderAssign`).
+    let route_on = s.dk.route != 255;
+    if route_on {
+        let n33 = (0.0033 * rate as f32).round().max(1.0);
+        let side = |r: u8| match r {
+            1 => s.dk.xf[0],
+            2 => s.dk.xf[1],
+            _ => 1.0,
+        };
+        let d = &mut s.dsp;
+        if d.route == 255 {
+            d.route = s.dk.route;
+            d.assign = crate::deck::Ramp::at(1.0);
+            d.xfade = crate::deck::Ramp::at(side(d.route));
+        }
+        if d.route != s.dk.route && d.assign.idle() {
+            if d.assign.cur > 0.0 {
+                d.assign.set(0.0, n33);
+            } else {
+                d.route = s.dk.route;
+                d.xfade = crate::deck::Ramp::at(side(d.route));
+                d.assign.set(1.0, n33);
+            }
+        }
+        d.xfade.set(side(d.route), (0.002 * rate as f32).round().max(1.0));
+    }
+    // Vinyl start and stop: the speed changes in a straight line, taking the set time for a
+    // full speed's worth (rekordbox's `VinylSpeedAdjustor`). Which ramp runs is decided where
+    // play, pause and the jog change.
+    let (k_start, k_stop) = if smooth { (1000.0 / (s.dk.start_ms.max(0.1) as f64 * rate as f64), 1000.0 / (s.dk.stop_ms.max(0.1) as f64 * rate as f64)) } else { (f64::INFINITY, f64::INFINITY) };
+    {
+        let d = &mut s.dsp;
+        if !smooth || searching {
+            d.ramp = 0;
+        } else if jog != d.was_jog {
+            d.ramp = match jog {
+                // A touch brakes the platter to a stop; letting go starts it again.
+                Jog::Touch => 2,
+                Jog::Speed(_) => d.ramp,
+                Jog::None => s.playing as u8,
+            };
+        } else if s.playing != d.was_playing && jog == Jog::None {
+            // With Master Tempo and less than two blocks of stop ramp, pause only fades.
+            let short = d.vel.abs() / k_stop < 2.0 * 256.0 * rate as f64 / 44100.0;
+            d.ramp = if s.playing { 1 } else if s.master_tempo && short { 0 } else { 2 };
+        }
+        // A real movement of the platter ends a ramp.
+        if matches!(jog, Jog::Speed(v) if v.abs() >= 0.05) {
+            d.ramp = 0;
+        }
+        d.was_jog = jog;
+        d.was_playing = s.playing;
+    }
+    // SLIP: the background position starts when a loop begins, a pad is held, the deck is
+    // reversed or scratched, and playback comes back to it when that ends. (Slip reverse
+    // does the same without the SLIP button.)
+    let slip_action = s.loop_range.is_some() || s.slip_hold || s.dk.reverse || jog != Jog::None;
+    if s.playing && ((s.slip && slip_action) || (s.dk.reverse && s.dk.slip_reverse)) {
         if s.slip_pos.is_none() {
             s.slip_pos = Some(s.pos);
         }
     } else if let Some(b) = s.slip_pos.take() {
-        if s.slip && s.playing {
-            s.pos = b.clamp(0.0, frames.saturating_sub(2) as f64);
+        if (s.slip || s.dk.slip_return) && s.playing {
+            // (The deck fades out before it moves: it lands where the track is by then.)
+            let lead = if smooth && s.dsp.att > 0 { (top - 1) as f64 * step * speed } else { 0.0 };
+            s.pos = (b + lead).clamp(0.0, last);
         }
     }
-    // A position that is not where the last buffer left it has been moved: cross-fade from
-    // where it was (4 ms; rekordbox fades out, moves and fades in, over a time not traced).
-    let fade_n = ((0.004 * rate as f32) as u32).max(1);
-    if smooth && s.playing && s.dsp.gate > 0.0 && (s.pos - s.dsp.expect).abs() > 2.0 * step.max(1.0) {
-        s.dsp.xf = Some((s.dsp.expect, fade_n));
+    s.dk.slip_return = s.dk.reverse && s.dk.slip_reverse;
+    // A position that is not where the last buffer left it has been moved. As in rekordbox
+    // (`doFadeOutAndMovePlayingPos`), what was sounding fades out first (44 frames, raised
+    // cosine), then the deck moves and fades in.
+    if (s.pos - s.dsp.expect).abs() > 2.0 * step.max(1.0) {
+        if smooth && s.dsp.att > 0 {
+            s.dsp.pending = true;
+        } else {
+            s.dsp.snd = s.pos;
+            s.dsp.pending = false;
+        }
+    } else if !s.dsp.pending {
+        s.dsp.snd = s.pos;
     }
+    let target = if searching {
+        1.0
+    } else {
+        match jog {
+            Jog::Speed(v) => v,
+            Jog::Touch => 0.0,
+            Jog::None => if s.playing { dir * speed } else { 0.0 },
+        }
+    };
+    // The loop as whole source frames, so that every pass is the same samples. Its wrap is
+    // smoothed (fade out before, fade in after) unless the loop is 2 ms or shorter.
+    let mut lp = s.loop_range.map(|(a, b)| ((a * audio.sr as f64).round(), (b * audio.sr as f64).round())).filter(|(a, b)| b > a);
+    let mut lp_smooth = smooth && lp.map(|(a, b)| (b - a) / audio.sr as f64 > crate::deck::LOOP_SMOOTH_SECS).unwrap_or(false);
     let cue_gain = if cue.len() * channels.max(1) >= out.len() * 2 { s.cue_gain * s.gain } else { 0.0 };
+    // Groove Circuit: this deck's DRUM SWAP slots (and its drums under DRUM RELEASE FX).
+    let gc = crate::groove::deck_block(s, &audio, speed, &mut stem_target, out.len() / channels.max(1), rate);
     for (fi, f) in out.chunks_mut(channels).enumerate() {
-        // Fading out after pause: the sound carries on from where it was for the length of
-        // the fade, while the deck's position already stands where it was put.
-        let fading_out = smooth && !s.playing && !searching;
-        if fading_out {
-            s.dsp.gate -= 1.0 / fade_n as f32;
-            if s.dsp.gate <= 0.0 || s.dsp.expect as usize + 2 >= frames {
-                s.dsp.gate = 0.0;
-                s.dsp.expect = s.pos;
-                s.dsp.xf = None;
-                break;
+        let d = &mut s.dsp;
+        // ---- speed
+        match d.ramp {
+            1 => {
+                let diff = target - d.vel;
+                if diff.abs() <= k_start {
+                    d.vel = target;
+                    d.ramp = 0;
+                } else {
+                    d.vel += k_start * diff.signum();
+                }
             }
-        } else if smooth && s.dsp.gate < 1.0 {
-            s.dsp.gate = (s.dsp.gate + 1.0 / fade_n as f32).min(1.0);
+            2 => {
+                if d.vel.abs() <= k_stop {
+                    d.vel = 0.0;
+                    d.ramp = 0;
+                    d.att = 0;
+                } else {
+                    d.vel -= k_stop * d.vel.signum();
+                }
+            }
+            // (After pause without a ramp the sound runs on for the length of the fade.)
+            _ => {
+                if target != 0.0 || d.att == 0 || !smooth || matches!(jog, Jog::Speed(_)) {
+                    d.vel = target;
+                }
+            }
         }
-        if fading_out {
-        } else if searching {
-            // After each grain the position skips so that, overall, it moves at `search`
-            // times normal speed (backward for negative values).
-            s.search_count += 1;
-            if s.search_count >= grain {
-                s.search_count = 0;
-                s.pos = (s.pos + (s.search - 1.0) * grain as f64 * step).clamp(0.0, frames.saturating_sub(2) as f64);
+        // ---- level
+        let run = searching || matches!(jog, Jog::Speed(_)) || (s.playing && jog == Jog::None) || d.ramp != 0;
+        let want = !d.pending && run;
+        if !smooth {
+            d.att = top;
+        } else if want {
+            if d.att < top {
+                d.att += 1;
             }
-        } else if let Some((a, b)) = s.loop_range {
-            let bf = b * audio.sr as f64;
-            if s.pos >= bf {
-                s.pos = a * audio.sr as f64 + (s.pos - bf);
-            }
+        } else if d.att > 0 {
+            d.att -= 1;
         }
-        let p = if fading_out { s.dsp.expect } else { s.pos };
-        if p as usize + 1 >= frames {
-            s.playing = false;
-            s.pos = frames.saturating_sub(1) as f64;
+        if d.att == 0 && d.pending {
+            // Faded out: now the deck moves.
+            d.pending = false;
+            d.snd = s.pos;
+            d.st.active = false;
+        }
+        if d.att == 0 && !(run && !d.pending) && d.ramp == 0 {
+            d.vel = 0.0;
+            d.expect = s.pos;
             break;
         }
-        if s.dsp.stem_g != stem_target {
-            for (g, t) in s.dsp.stem_g.iter_mut().zip(stem_target) {
+        let g_stop = if d.ramp == 2 { fade_curve(((d.vel.abs() / k_stop) as usize).min(FADE_N - 1)) } else { 1.0 };
+        // ---- position rules (for the deck's own sound, not for one that is fading out)
+        let mut dip = 1.0f32;
+        if !d.pending {
+            if searching {
+                // After each grain the position skips so that, overall, it moves at `search`
+                // times normal speed (backward for negative values).
+                s.search_count += 1;
+                if s.search_count >= grain {
+                    s.search_count = 0;
+                    d.snd = (d.snd + (s.search - 1.0) * grain as f64 * step).clamp(0.0, last);
+                }
+            } else {
+                // SLICER: its roll, return and loop-mode jumps (pad_audio.rs).
+                s.pads.position(&mut d.snd, step * d.vel);
+                // A quantized jump waiting for its place (sample exact, like a loop's wrap).
+                if let Some((exit, enter)) = s.dk.warp {
+                    if (d.vel > 0.0 && d.snd >= exit) || (d.vel < 0.0 && d.snd <= exit) {
+                        d.snd = (enter + (d.snd - exit)).clamp(0.0, last);
+                        s.dk.warp = None;
+                        // (An auto beat loop entered on its lattice starts now; deck.rs.)
+                        if let Some((a, b)) = s.dk.arm_loop.take() {
+                            s.loop_range = Some((a, b));
+                            lp = Some(((a * audio.sr as f64).round(), (b * audio.sr as f64).round())).filter(|(a, b)| b > a);
+                            lp_smooth = smooth && (b - a) > crate::deck::LOOP_SMOOTH_SECS;
+                        }
+                        if smooth {
+                            d.since = 0;
+                        }
+                    } else if smooth && d.vel != 0.0 {
+                        let dist = (exit - d.snd) / (step * d.vel);
+                        if dist >= 0.0 && dist < top as f64 {
+                            dip = fade_curve(dist as usize);
+                        }
+                    }
+                }
+                if let Some((a, b)) = lp {
+                    let len = b - a;
+                    if d.vel >= 0.0 && d.snd >= b {
+                        d.snd = a + (d.snd - b) % len;
+                        if lp_smooth {
+                            d.since = 0;
+                        }
+                    } else if d.vel < 0.0 && d.snd < a {
+                        d.snd = b - (a - d.snd) % len;
+                        if lp_smooth {
+                            d.since = 0;
+                        }
+                    } else if lp_smooth && d.vel != 0.0 {
+                        let dist = if d.vel > 0.0 { b - d.snd } else { d.snd - a } / (step * d.vel.abs());
+                        if dist < top as f64 {
+                            dip = dip.min(fade_curve(dist.max(0.0) as usize));
+                        }
+                    }
+                }
+            }
+            if (d.since as usize) < FADE_N - 1 {
+                dip = dip.min(fade_curve(d.since as usize));
+                d.since += 1;
+            }
+        }
+        // ---- the ends of the track
+        let p = d.snd;
+        if (p as usize + 1 >= frames && d.vel >= 0.0) || (p <= 0.0 && d.vel < 0.0) {
+            if d.pending {
+                d.pending = false;
+                d.snd = s.pos;
+                d.att = 0;
+                continue;
+            }
+            if jog == Jog::None || searching {
+                if p > 0.0 || !searching {
+                    s.playing = false;
+                }
+                s.pos = if p <= 0.0 { 0.0 } else { frames.saturating_sub(1) as f64 };
+                d.snd = s.pos;
+                d.expect = s.pos;
+                d.vel = 0.0;
+                d.ramp = 0;
+                d.att = 0;
+                break;
+            }
+            // (Scratched against an end: the platter turns, the sound stays at the end.)
+            d.snd = p.clamp(0.0, last);
+        }
+        let p = d.snd;
+        if d.stem_g != stem_target {
+            for (g, t) in d.stem_g.iter_mut().zip(stem_target) {
                 *g += (t - *g).clamp(-stem_k, stem_k);
             }
-            src.g.set(s.dsp.stem_g);
+            src.g.set(d.stem_g);
         }
-        let (mut l, mut r) = if stretch { s.dsp.st.frame(&src, p, pitch * step, hop) } else { src.at(p) };
-        if let Some((op, left)) = s.dsp.xf {
-            // Raised cosine from the old position's sound to the new one's.
-            let w = 0.5 - 0.5 * (std::f32::consts::PI * (1.0 - left as f32 / fade_n as f32)).cos();
-            let (ol, or) = src.at(op.clamp(0.0, frames.saturating_sub(2) as f64));
-            l = l * w + ol * (1.0 - w);
-            r = r * w + or * (1.0 - w);
-            s.dsp.xf = if left > 1 { Some((op + step * speed, left - 1)) } else { None };
-        }
-        if smooth && s.dsp.gate != 1.0 {
-            // Raised cosine only while the play / pause fade is moving. A settled
-            // gate is exactly unity; avoid a cosine for every audible sample.
-            let g = 0.5 - 0.5 * (std::f32::consts::PI * s.dsp.gate).cos();
+        // Key lock only while the deck plays at its own speed: ramps, scratching and a sound
+        // that is fading out are plain resampling (rekordbox's `updateTimeStretchMode`).
+        let plain = !stretch || d.pending || d.ramp != 0 || jog != Jog::None || searching || d.vel != dir * speed;
+        let (mut l, mut r) = if plain {
+            d.st.active = false;
+            src.at(p)
+        } else {
+            d.st.frame(&src, p, pitch * step * dir, hop)
+        };
+        // The settled attenuator is unity. Skip the trigonometric curve on ordinary
+        // playback, while still applying seek/loop dips and a moving stop ramp.
+        if smooth && (d.att < top || dip != 1.0 || g_stop != 1.0) {
+            // The fade curve of rekordbox's `Attenuator`: a raised cosine over 44 frames.
+            let g = fade_curve(d.att as usize) * dip * g_stop;
             l *= g;
             r *= g;
         }
+        // (Groove Circuit's slots after the deck's own fades: a slot also sounds while the
+        // deck stands.)
+        if let Some(g) = gc.as_ref() {
+            let (gl, gr) = g.at(fi);
+            l += gl;
+            r += gr;
+        }
         if eq_on {
-            let d = &mut s.dsp;
             for k in 0..3 {
                 d.eq.g[k] += (iso_gain[k] - d.eq.g[k]) * fader_k;
             }
@@ -1397,17 +1922,33 @@ pub fn render_deck_cue(s: &mut PlayState, out: &mut [f32], cue: &mut [f32], chan
             r = d.eq.run(1, r);
         }
         if strip != 0 {
-            s.dsp.trim += (s.trim - s.dsp.trim) * fader_k;
-            l *= s.dsp.trim;
-            r *= s.dsp.trim;
-            if strip == 1 {
-                l = s.dsp.eq3.run(0, l);
-                r = s.dsp.eq3.run(1, r);
+            d.trim += (s.trim - d.trim) * fader_k;
+            l *= d.trim;
+            r *= d.trim;
+            if strip == 1 || strip == 3 {
+                l = d.eq3.run(0, l);
+                r = d.eq3.run(1, r);
             }
+            let (eg, switched) = s.dk.eqsw.next(want_strip, rate);
+            if let Some(m) = switched {
+                // The new type starts from a clean state (`initialize`).
+                strip = m;
+                eq_on = s.eq_on || strip == 2;
+                d.eq = Iso3::new();
+                d.eq.prepare(rate);
+                d.eq3 = crate::mixer::Eq3::new();
+                d.eq3.nxs = strip == 3;
+                s.dk.nxs.ready = false;
+                let k = if strip == 3 { s.dk.nxs.advance(s.eq_pos, 0, rate) } else { s.eq_pos };
+                d.eq3.prepare(rate, k, n_out);
+                iso_gain = iso_of(strip, s.eq_pos, s.eq_gain);
+            }
+            l *= eg;
+            r *= eg;
             // Sound Color FX: after the EQ, before the meter, the CUE feed and the faders.
             if cfx_on {
                 let mut fr = [l, r];
-                s.dsp.cfx.process(s.cfx_kind, s.cfx_color, s.cfx_param, &mut fr, rate);
+                d.cfx.process(s.cfx_kind, s.cfx_color, s.cfx_param, &mut fr, rate);
                 l = fr[0];
                 r = fr[1];
             }
@@ -1420,9 +1961,16 @@ pub fn render_deck_cue(s: &mut PlayState, out: &mut [f32], cue: &mut [f32], chan
                 cue[fi * 2 + 1] += r * cue_gain;
             }
         }
-        s.dsp.ch_fader += (s.ch_fader - s.dsp.ch_fader) * fader_k;
-        s.dsp.fader += (s.fader - s.dsp.fader) * fader_k;
-        let vol = vol * s.dsp.fader * s.dsp.ch_fader;
+        // ACT. CENSR: the effect inside a censored region (pad_audio.rs).
+        s.pads.sound(p, &mut l, &mut r, rate);
+        d.ch_fader += (s.ch_fader - d.ch_fader) * fader_k;
+        let xf = if route_on {
+            d.xfade.next() * d.assign.next()
+        } else {
+            d.fader += (s.fader - d.fader) * fader_k;
+            d.fader
+        };
+        let vol = vol * xf * d.ch_fader;
         let mut click = 0.0f32;
         if let Some(beats) = metro.as_ref() {
             // The beat list can be replaced by a shorter one (another track, a grid edit).
@@ -1452,17 +2000,23 @@ pub fn render_deck_cue(s: &mut PlayState, out: &mut [f32], cue: &mut [f32], chan
         } else {
             f[0] += 0.5 * (l + r) * vol + click;
         }
-        if fading_out {
-            s.dsp.expect += step * speed;
-            continue;
+        // ---- move on
+        d.snd += step * d.vel;
+        if jog != Jog::None {
+            d.snd = d.snd.clamp(0.0, last);
         }
-        s.pos += step * speed;
-        s.dsp.st.expect = s.pos;
-        s.dsp.expect = s.pos;
-        if let Some(b) = s.slip_pos.as_mut() {
-            *b += step * speed;
+        d.st.expect = d.snd;
+        if !d.pending {
+            s.pos = d.snd;
+        }
+        d.expect = s.pos;
+        if s.playing {
+            if let Some(b) = s.slip_pos.as_mut() {
+                *b += step * speed;
+            }
         }
     }
+    s.dk.vel = s.dsp.vel;
     s.peak = peak;
     clear_zero_gain_tail(&mut s.dsp.ch_fader, s.ch_fader);
     clear_zero_gain_tail(&mut s.dsp.fader, s.fader);
@@ -1923,11 +2477,70 @@ mod dsp_tests {
         let e = phase_error(f.lock().grid.as_ref().unwrap(), pf, m.lock().grid.as_ref().unwrap(), pm).unwrap();
         assert!(e.abs() > 0.15, "{e}");
     }
+
+    #[test]
+    fn beat_sync_jumps_when_more_than_a_hundredth_of_a_beat_off() {
+        // Both at 120 BPM (22050 frames a beat). `off`: how far the follower starts ahead.
+        let grid = || -> Arc<Vec<f64>> { Arc::new((0..600).map(|i| i as f64 * 0.5).collect()) };
+        let silence = || Arc::new(Decoded { sr: 44100, samples: vec![0.0; 44100 * 2 * 30], raw_frames: 44100 * 30, damaged: 0, truncated: false });
+        let error_after = |off_beats: f64, rate: f64, smooth: bool| -> f64 {
+            let m = Arc::new(Mutex::new(PlayState { grid: Some(grid()), smooth, ..deck(silence()) }));
+            let f = Arc::new(Mutex::new(PlayState { grid: Some(grid()), sync_follow: true, smooth, tempo: rate, ..deck(silence()) }));
+            f.lock().dk.sync_rate = rate;
+            let states = [m.clone(), f.clone()];
+            let mut buf = vec![0.0f32; 512];
+            // Both start together, the follower off the beat.
+            m.lock().pos = 22050.0;
+            f.lock().pos = 22050.0 * rate + off_beats * 22050.0;
+            for _ in 0..40 {
+                render(&states, &mut buf, 2, 44100);
+            }
+            let (pm, pf) = (m.lock().pos / 22050.0, f.lock().pos / 22050.0);
+            crate::deck::sync_phase_error(pf, pm, rate)
+        };
+        for smooth in [false, true] {
+            // Under the threshold the deck is left where it is.
+            assert!((error_after(0.009, 1.0, smooth) - 0.009).abs() < 1e-3, "{}", error_after(0.009, 1.0, smooth));
+            assert!((error_after(-0.008, 1.0, smooth) + 0.008).abs() < 1e-3);
+            // Over it, it jumps onto the beat (the shortest way, either direction).
+            assert!(error_after(0.02, 1.0, smooth).abs() < 2e-3, "{}", error_after(0.02, 1.0, smooth));
+            assert!(error_after(-0.3, 1.0, smooth).abs() < 2e-3);
+            assert!(error_after(0.45, 1.0, smooth).abs() < 2e-3);
+        }
+        // At double rate every second beat of the follower falls on a master beat.
+        assert!(error_after(0.2, 2.0, false).abs() < 2e-3);
+    }
 }
 
 #[cfg(test)]
 mod stem_mix_tests {
     use super::*;
+
+    #[test]
+    fn progressive_stems_play_only_the_published_prefix() {
+        let (mut player, original, parts) = deck();
+        let completed = player.stems.take().unwrap();
+        let preview = crate::stems::Live::test_prefix(completed.len, &completed.data, 16384);
+        player.stem_preview = Some(preview.clone());
+        assert!(player.has_playable_stems());
+        let src = Src {
+            audio: player.audio.as_ref().unwrap(),
+            frames: original.len(),
+            stems: None,
+            preview: Some((&preview, preview.ready_frames())),
+            g: std::cell::Cell::new([0.0, 1.0, 0.0, 0.0, 0.0]),
+            stem_ratio: 1.0,
+        };
+        for frame in [1000, 8191, 8192, 12000] {
+            assert_eq!(src.at(frame as f64), (parts[0][frame], parts[0][frame]));
+        }
+        // Forward seek past the completed prefix and a cubic read straddling its end.
+        for frame in [16383, 20000] {
+            assert_eq!(src.at(frame as f64), (original[frame], original[frame]));
+        }
+        player.stem_preview = None;
+        assert!(!player.has_playable_stems());
+    }
 
     /// A track whose parts are known: original = drums + bass + other + vocals, where the
     /// stored "other" is deliberately wrong (the instruments are taken as the residual).
@@ -2086,12 +2699,18 @@ mod smooth_tests {
         x.windows(2).map(|w| (w[1] - w[0]).abs()).fold(0.0, f32::max)
     }
 
+    fn settle_at_play_speed(s: &mut PlayState) {
+        s.dsp.att = (crate::deck::FADE_N - 1) as u8;
+        s.dsp.vel = 1.0;
+        s.dsp.was_playing = true;
+    }
+
     #[test]
     fn settled_play_fade_preserves_every_output_sample() {
         for rate in [22050, 44100, 48000, 96000] {
             for channels in [1, 2, 4] {
                 let (mut smooth, mut plain) = (deck(), deck());
-                smooth.dsp.gate = 1.0;
+                settle_at_play_speed(&mut smooth);
                 plain.smooth = false;
                 for frames in [1, 33, 512, 1025] {
                     let (mut a, mut b) = (vec![0.0; frames * channels], vec![0.0; frames * channels]);
@@ -2100,7 +2719,7 @@ mod smooth_tests {
                     assert!(a.iter().zip(&b).all(|(x, y)| x.to_bits() == y.to_bits()),
                             "rate {rate}, channels {channels}, frames {frames}");
                     assert_eq!(smooth.pos, plain.pos);
-                    assert_eq!(smooth.dsp.gate, 1.0);
+                    assert_eq!(smooth.dsp.att as usize, crate::deck::FADE_N - 1);
                 }
             }
         }
@@ -2135,7 +2754,7 @@ mod smooth_tests {
         for channel in [false, true] {
             for target in [0.0, -0.0, 0.1, 0.7, 1.0] {
                 let mut s = deck();
-                s.dsp.gate = 1.0;
+                settle_at_play_speed(&mut s);
                 if channel { s.ch_fader = target; } else { s.fader = target; }
                 let audio = s.audio.clone().unwrap();
                 let (mut gain, mut frame) = (1.0f32, 0usize);
@@ -2346,40 +2965,53 @@ mod smooth_tests {
     #[test]
     fn play_pause_and_jumps_do_not_step() {
         let mut s = deck();
-        // Play: the level rises over 4 ms instead of starting at 0.2.
+        // Play: the level rises over rekordbox's 44-step fade instead of starting at 0.2.
         let a = run(&mut s, 1000);
         assert!(a[0].abs() < 0.01 && (a[999] - 0.2).abs() < 0.01);
         assert!(max_step(&a) < 0.01);
-        // A jump of two seconds (0.3 in level): cross-faded, no step.
+        // A jump of two seconds (0.3 in level): what sounded fades out (the old place runs
+        // on meanwhile), then the deck moves and fades in. No step; silent in between.
         s.pos += 88200.0;
         let b = run(&mut s, 1000);
-        assert!(max_step(&b) < 0.01, "{}", max_step(&b));
+        assert!(max_step(&b) < 0.02, "{}", max_step(&b));
         assert!((b[999] - 0.5).abs() < 0.02);
-        // Pause: fades out over 4 ms, and the position stays where it was at the pause.
+        assert!(b[10] > 0.15 && b[10] < 0.21 && b[42] == 0.0 && b[90] > 0.49);
+        // Pause: the vinyl stop ramp (1 ms at the default setting) and the fade; the deck
+        // comes to rest within that millisecond.
         s.playing = false;
         let pos = s.pos;
         let c = run(&mut s, 1000);
-        assert!(max_step(&c) < 0.01 && c[999] == 0.0 && c[0] > 0.4);
-        assert_eq!(s.pos, pos);
-        // A loop wrap is not faded (it is meant to be sample exact).
+        assert!(max_step(&c) < 0.03 && c[999] == 0.0 && c[0] > 0.4, "{}", max_step(&c));
+        assert!(s.pos >= pos && s.pos - pos < 45.0, "{}", s.pos - pos);
+        // A loop wrap is at the same sample with and without smoothing; smoothed (loops
+        // over 2 ms) it dips to silence around the wrap instead of stepping.
         let mut s = deck();
         run(&mut s, 1000);
         s.loop_range = Some((0.0, 1500.0 / 44100.0));
         let d = run(&mut s, 1000);
-        assert!(max_step(&d) > 0.005);
+        assert!(max_step(&d) < 0.01, "{}", max_step(&d));
+        let mut h = PlayState { smooth: false, ..deck() };
+        run(&mut h, 1000);
+        h.loop_range = Some((0.0, 1500.0 / 44100.0));
+        let e = run(&mut h, 1000);
+        assert!(max_step(&e) > 0.005);
+        // (The smoothed deck is the 1 ms start ramp behind: half of 44 frames.)
+        assert!((h.pos - s.pos - 21.5).abs() < 1.0, "{}", h.pos - s.pos);
+        assert!(d.iter().skip(100).any(|v| *v < 0.001));
     }
 
     #[test]
     fn slip_returns_to_where_the_track_would_be() {
         let mut s = PlayState { slip: true, ..deck() };
         run(&mut s, 2000);
+        let at = s.pos;
         // A loop of 500 frames for 3000 frames, then out of it.
         s.loop_range = Some((2000.0 / 44100.0, 2500.0 / 44100.0));
         run(&mut s, 3000);
         assert!(s.pos < 2501.0 && s.slip_pos.is_some());
         s.loop_range = None;
         run(&mut s, 100);
-        assert!((s.pos - 5100.0).abs() < 1.5, "{}", s.pos);
+        assert!((s.pos - (at + 3100.0)).abs() < 1.5, "{}", s.pos);
         assert!(s.slip_pos.is_none());
         // Without SLIP the loop's end is where playback goes on.
         let mut s = deck();
@@ -2392,14 +3024,16 @@ mod smooth_tests {
         // A held hot cue with SLIP: back to the background position on release.
         let mut s = PlayState { slip: true, ..deck() };
         run(&mut s, 2000);
+        let at = s.pos;
         s.slip_pos = Some(s.pos);
         s.slip_hold = true;
         s.pos = 40000.0;
         run(&mut s, 1000);
-        assert!((s.pos - 41000.0).abs() < 1.5);
+        // (The pad's place is reached after the 1 ms fade out.)
+        assert!((s.pos - 40958.0).abs() < 1.5, "{}", s.pos);
         s.slip_hold = false;
-        run(&mut s, 10);
-        assert!((s.pos - 3010.0).abs() < 1.5, "{}", s.pos);
+        run(&mut s, 100);
+        assert!((s.pos - (at + 1100.0)).abs() < 1.5, "{}", s.pos);
     }
 }
 
@@ -2444,4 +3078,24 @@ mod beat_pos_tests {
         assert!((at(5.25) - 8.5).abs() < 1e-9, "{}", at(5.25));
         assert!(super::beat_pos(&[1.0], 2.0).is_none());
     }
+    #[test]
+    fn the_sampler_stretcher_keeps_the_pitch_and_runs_its_grains() {
+        // A 441 Hz tone read at 0.8 of its speed with the pitch kept: one second of output
+        // still crosses zero about 882 times (not 706, as plain slow playback would).
+        let sr = 44100usize;
+        let x: Vec<f32> = (0..sr * 3).flat_map(|i| { let v = (i as f32 * 441.0 * std::f32::consts::TAU / sr as f32).sin() * 0.5; [v, v] }).collect();
+        let audio = super::Decoded { sr: sr as u32, samples: x, raw_frames: sr * 3, damaged: 0, truncated: false };
+        let mut r = super::ClipReader::new();
+        let (mut pos, mut last, mut crossings) = (1000.0f64, 0.0f32, 0);
+        for _ in 0..sr {
+            let (l, _) = r.frame(&audio, pos, 0.8, 1.0, 882);
+            if (l >= 0.0) != (last >= 0.0) {
+                crossings += 1;
+            }
+            last = l;
+            pos += 0.8;
+        }
+        assert!((860..=905).contains(&crossings), "zero crossings in a second: {crossings}");
+    }
+
 }

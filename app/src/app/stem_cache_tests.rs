@@ -175,6 +175,38 @@ fn late_speed_result_preserves_the_selected_quality_parts() -> Result<()> {
 }
 
 #[test]
+fn progressive_preview_follows_the_model_and_stops_without_saving() -> Result<()> {
+    isolated("progressive_preview_follows_the_model_and_stops_without_saving", |dir| {
+        let mut app = open_app();
+        let (id, cache) = track(&app, dir, "preview.wav")?;
+        app.reload_tracks();
+        app.load_track(id);
+        finish_loading(&mut app);
+        let key = app.deck.stem_cache_key.clone().unwrap();
+        app.stem.separating = Some((id, 0.25));
+        app.stem.active_key = Some(key.clone());
+        let preview = stems::Live::test_prefix(FRAMES, &vec![0.25; FRAMES * 8], FRAMES);
+        app.stem.tx.send(StemMsg::Preview(key.clone(), preview.clone())).unwrap();
+        app.poll_stems();
+        assert!(app.player.state.lock().has_playable_stems());
+        app.select_stem_model(stems::spec("htdemucs").unwrap());
+        assert!(!app.player.state.lock().has_playable_stems());
+        app.stem.tx.send(StemMsg::Preview(key.clone(), preview.clone())).unwrap();
+        app.poll_stems();
+        assert!(!app.player.state.lock().has_playable_stems());
+        app.select_stem_model(stems::spec(MODEL).unwrap());
+        assert!(app.player.state.lock().has_playable_stems());
+        app.stop_separation();
+        app.stem.tx.send(StemMsg::Preview(key, preview)).unwrap();
+        app.stem.tx.send(StemMsg::Done(id, Err(anyhow::anyhow!("stopped")))).unwrap();
+        app.poll_stems();
+        assert!(!app.player.state.lock().has_playable_stems());
+        assert!(!cache.exists());
+        Ok(())
+    })
+}
+
+#[test]
 fn performance_part_button_can_read_a_cache_while_another_deck_separates() -> Result<()> {
     isolated(
         "performance_part_button_can_read_a_cache_while_another_deck_separates",

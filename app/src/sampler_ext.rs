@@ -137,18 +137,27 @@ pub fn capture_dir(chosen: &str) -> std::path::PathBuf {
     if chosen.trim().is_empty() { crate::db::data_dir().join("Sampler").join("Capture") } else { std::path::PathBuf::from(chosen.trim()) }
 }
 
-/// rekordbox's file name for a capture: the first 48 characters of the title, a suffix,
-/// ".wav"; a name that exists gets "(n)".
-pub fn capture_name(dir: &std::path::Path, title: &str, suffix: &str) -> std::path::PathBuf {
+/// Publish a complete stereo WAV in the capture folder. If another capture already
+/// owns a name, retain its bytes and try the next numbered suffix.
+pub fn save_capture(dir: &std::path::Path, title: &str, suffix: &str, sr: u32, samples: &[f32]) -> std::io::Result<std::path::PathBuf> {
+    use std::io::{Error, ErrorKind, Write};
+    std::fs::create_dir_all(dir)?;
+    let mut file = tempfile::NamedTempFile::new_in(dir)?;
+    file.write_all(&crate::player_ext::wav16_bytes(sr, 2, samples))?;
+    let mut pending = file.into_temp_path();
+
     let clean: String = title.chars().take(48).map(|c| if matches!(c, '/' | ':' | '\\' | '\0') { '_' } else { c }).collect();
     let base = format!("{}{}", if clean.trim().is_empty() { "sample" } else { clean.trim() }, suffix);
-    let mut p = dir.join(format!("{base}.wav"));
-    let mut n = 1;
-    while p.exists() {
-        p = dir.join(format!("{base}({n}).wav"));
-        n += 1;
+    for number in 0..=u32::MAX {
+        let name = if number == 0 { format!("{base}.wav") } else { format!("{base}({number}).wav") };
+        let target = dir.join(name);
+        match pending.persist_noclobber(&target) {
+            Ok(()) => return Ok(target),
+            Err(e) if e.error.kind() == ErrorKind::AlreadyExists => pending = e.path,
+            Err(e) => return Err(e.error),
+        }
     }
-    p
+    Err(Error::new(ErrorKind::AlreadyExists, "All numbered capture names are in use"))
 }
 
 impl App {
@@ -215,7 +224,7 @@ impl App {
                 if let Some(e) = sampler::SAMPLER.lock().as_mut() {
                     if stop {
                         e.stop(pad, bank, true);
-                    } else {
+                    } else if !self.deck_options.disable_play {
                         loop_refused = e.launch(pad, bank, velocity);
                     }
                 }
@@ -305,11 +314,10 @@ impl App {
             return false;
         }
         let dir = capture_dir(&self.prefs.sampler.capture_dir);
-        let path = capture_name(&dir, &title, "_capture");
-        if std::fs::create_dir_all(&dir).and_then(|_| crate::player_ext::write_wav16(&path, audio.sr, 2, &audio.samples[f0 * 2..f1 * 2])).is_err() {
+        let Ok(path) = save_capture(&dir, &title, "_capture", audio.sr, &audio.samples[f0 * 2..f1 * 2]) else {
             self.toast_err("The captured loop could not be written.");
             return false;
-        }
+        };
         // The loop's own tempo: its beats over its length when it sits on the grid.
         let n = beats.iter().filter(|x| **x >= a - 0.0015 && **x < b - 0.0015).count();
         let bpm = if n >= 1 && b > a { (n as f64 * 60.0 / (b - a)) as f32 } else { bpm as f32 };
@@ -340,11 +348,10 @@ impl App {
         }
         let dir = capture_dir(&self.prefs.sampler.capture_dir);
         let name = self.prefs.sampler.seq.name(cur);
-        let path = capture_name(&dir, &name, "");
-        if std::fs::create_dir_all(&dir).and_then(|_| crate::player_ext::write_wav16(&path, rate, 2, &audio)).is_err() {
+        let Ok(path) = save_capture(&dir, &name, "", rate, &audio) else {
             self.toast_err("The sequence could not be written.");
             return;
-        }
+        };
         // Into the collection with the sampler's tempo and a grid from its first frame, then
         // onto the deck.
         let mut t = crate::importer::read_track(&path);
@@ -391,7 +398,7 @@ impl App {
 
     /// Carry out a keyboard action of the sampler deck.
     pub fn sampler_action(&mut self, act: SmpAct) {
-        if !self.performance() {
+        if !self.performance() || (self.deck_options.disable_play && matches!(act, SmpAct::SeqPlay)) {
             return;
         }
         // Auto Panel Mode: a sampler or sequencer key shows the sampler panel first.
@@ -487,6 +494,9 @@ impl App {
     /// pattern again on the next beat, another one on the next bar (rekordbox's quantize
     /// arguments 0, 1 and 4 beats).
     pub fn sampler_seq_call(&mut self, slot: usize, stop: bool) {
+        if self.deck_options.disable_play && !stop {
+            return;
+        }
         if let Some(e) = sampler::SAMPLER.lock().as_mut() {
             if stop {
                 if e.seq.playing && e.seq.current() == slot {
@@ -585,16 +595,35 @@ mod tests {
 
     #[test]
     fn capture_names_follow_rekordboxs_rule() {
-        let dir = std::env::temp_dir().join(format!("recordbox-capname-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = tempfile::tempdir().unwrap();
         let long = "A".repeat(60);
-        let p = capture_name(&dir, &long, "_capture");
-        assert_eq!(p.file_name().unwrap().to_string_lossy(), format!("{}_capture.wav", "A".repeat(48)));
-        std::fs::write(&p, b"x").unwrap();
-        let p2 = capture_name(&dir, &long, "_capture");
-        assert_eq!(p2.file_name().unwrap().to_string_lossy(), format!("{}_capture(1).wav", "A".repeat(48)));
-        assert_eq!(capture_name(&dir, "a/b:c", "_capture").file_name().unwrap().to_string_lossy(), "a_b_c_capture.wav");
-        let _ = std::fs::remove_dir_all(&dir);
+        let save = |title: &str| save_capture(dir.path(), title, "_capture", 44100, &[0.0, 0.0]).unwrap();
+        assert_eq!(save(&long).file_name().unwrap().to_string_lossy(), format!("{}_capture.wav", "A".repeat(48)));
+        assert_eq!(save(&long).file_name().unwrap().to_string_lossy(), format!("{}_capture(1).wav", "A".repeat(48)));
+        assert_eq!(save("a/b:c").file_name().unwrap(), "a_b_c_capture.wav");
+    }
+
+    #[test]
+    fn concurrent_captures_preserve_all_three_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let existing = dir.path().join("mix_capture.wav");
+        std::fs::write(&existing, b"existing audio").unwrap();
+        let start = std::sync::Barrier::new(2);
+        let save = |sample| {
+            start.wait();
+            let stereo = [sample, sample];
+            let path = save_capture(dir.path(), "mix", "_capture", 44100, &stereo).unwrap();
+            assert_eq!(std::fs::read(&path).unwrap(), crate::player_ext::wav16_bytes(44100, 2, &stereo));
+            path
+        };
+        let mut paths = std::thread::scope(|scope| {
+            let first = scope.spawn(|| save(0.25));
+            let second = scope.spawn(|| save(-0.25));
+            [first.join().unwrap(), second.join().unwrap()]
+        });
+        paths.sort();
+        assert_eq!(paths, [dir.path().join("mix_capture(1).wav"), dir.path().join("mix_capture(2).wav")]);
+        assert_eq!(std::fs::read(existing).unwrap(), b"existing audio");
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 3);
     }
 }

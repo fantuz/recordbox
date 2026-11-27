@@ -18,7 +18,10 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-pub const FORMAT: u32 = 1;
+// Format 1 uses the original sample clock. Old readers will reject format 2,
+// so a Rekordbox-clock collection cannot silently replace a legacy collection.
+pub const FORMAT: u32 = 2;
+const LEGACY_FORMAT: u32 = 1;
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
 pub struct Manifest {
@@ -108,7 +111,7 @@ fn write_backup_to(db_path: &Path, artwork_dir: &Path, tmp: &Path, with_music: b
         }
     }
     let _cleanup = Cleanup(snap.clone());
-    let (schema, tracks, prefs): (i64, Vec<String>, Option<String>) = {
+    let (schema, tracks, prefs, format) = {
         let c = rusqlite::Connection::open(db_path)?;
         c.busy_timeout(std::time::Duration::from_secs(10))?;
         c.execute("VACUUM INTO ?1", [snap.to_string_lossy().to_string()])?;
@@ -116,9 +119,10 @@ fn write_backup_to(db_path: &Path, artwork_dir: &Path, tmp: &Path, with_music: b
         let s = rusqlite::Connection::open(&snap)?;
         let schema = s.query_row("PRAGMA user_version", [], |r| r.get(0))?;
         let mut st = s.prepare("SELECT path FROM tracks ORDER BY id")?;
-        let tracks = st.query_map([], |r| r.get::<_, String>(0))?.filter_map(|x| x.ok()).collect();
+        let tracks: Vec<String> = st.query_map([], |r| r.get::<_, String>(0))?.filter_map(|x| x.ok()).collect();
         let prefs = s.query_row("SELECT value FROM settings WHERE key='prefs'", [], |r| r.get::<_, String>(0)).ok();
-        (schema, tracks, prefs)
+        let rekordbox_clock: bool = s.query_row("SELECT EXISTS(SELECT 1 FROM settings WHERE key='mp3_timeline' AND value='rekordbox')", [], |r| r.get(0))?;
+        (schema, tracks, prefs, if rekordbox_clock { FORMAT } else { LEGACY_FORMAT })
     };
     cancelled(cancel)?;
     let art: Vec<PathBuf> = std::fs::read_dir(artwork_dir).map(|d| d.flatten().map(|e| e.path()).filter(|p| p.is_file()).collect()).unwrap_or_default();
@@ -165,7 +169,7 @@ fn write_backup_to(db_path: &Path, artwork_dir: &Path, tmp: &Path, with_music: b
             }
         }
     }
-    let m = Manifest { app: "recordbox".into(), format: FORMAT, created: chrono::Local::now().to_rfc3339(), schema, tracks: tracks.len(), artwork_files, music: map, music_missing: missing };
+    let m = Manifest { app: "recordbox".into(), format, created: chrono::Local::now().to_rfc3339(), schema, tracks: tracks.len(), artwork_files, music: map, music_missing: missing };
     zw.start_file("manifest.json", stored())?;
     zw.write_all(&serde_json::to_vec_pretty(&m)?)?;
     let f = zw.finish()?;
@@ -187,9 +191,23 @@ pub struct Staged {
     pub music_failed: Vec<String>,
 }
 
-pub fn read_manifest(archive: &Path) -> Result<Manifest> {
+fn open_backup(archive: &Path) -> Result<zip::ZipArchive<std::fs::File>> {
     let mut za = zip::ZipArchive::new(std::fs::File::open(archive)?).map_err(|_| anyhow!("This file is not a recordbox library backup."))?;
     za.validate_header_consistency().context("The backup's ZIP headers are inconsistent or damaged.")?;
+    // Sampler packs can be compressed. All versions of our library backup writer store entries.
+    for i in 0..za.len() {
+        if za.by_index_raw(i)?.compression() != zip::CompressionMethod::Stored {
+            bail!("Library backups must contain stored ZIP entries.");
+        }
+    }
+    Ok(za)
+}
+
+pub fn read_manifest(archive: &Path) -> Result<Manifest> {
+    read_archive_manifest(&mut open_backup(archive)?)
+}
+
+fn read_archive_manifest(za: &mut zip::ZipArchive<std::fs::File>) -> Result<Manifest> {
     let mut s = String::new();
     za.by_name("manifest.json").map_err(|_| anyhow!("This file is not a recordbox library backup."))?.read_to_string(&mut s)?;
     let m: Manifest = serde_json::from_str(&s).map_err(|_| anyhow!("The backup's contents list cannot be read."))?;
@@ -199,6 +217,10 @@ pub fn read_manifest(archive: &Path) -> Result<Manifest> {
     }
     if m.format > FORMAT {
         bail!("This backup was made by a newer version of recordbox.");
+    }
+    let clock = if m.format == FORMAT { crate::audio::Mp3Timeline::Rekordbox } else { crate::audio::Mp3Timeline::Legacy };
+    if clock != crate::audio::mp3_timeline() {
+        bail!("This backup uses the {} MP3 timeline. Restart with --mp3-timeline {} to restore it into its matching collection.", clock.name(), clock.name());
     }
     if za.by_name("library.db").is_err() {
         bail!("The backup has no database file.");
@@ -238,9 +260,8 @@ fn extract(za: &mut zip::ZipArchive<std::fs::File>, entry: &str, dest: &Path, ca
 /// is replaced.
 pub fn stage_restore(archive: &Path, work_dir: &Path, artwork_dir: &Path, with_music: bool, progress: Progress, cancel: &AtomicBool) -> Result<Staged> {
     progress(0, 1, "Preparing restore...");
-    let manifest = read_manifest(archive)?;
-    let mut za = zip::ZipArchive::new(std::fs::File::open(archive)?)?;
-    za.validate_header_consistency().context("The backup's ZIP headers are inconsistent or damaged.")?;
+    let mut za = open_backup(archive)?;
+    let manifest = read_archive_manifest(&mut za)?;
     let _ = std::fs::remove_dir_all(work_dir);
     std::fs::create_dir_all(work_dir)?;
     let names: Vec<String> = za.file_names().map(|name| name.map(|s| s.into_owned())).collect::<zip::result::ZipResult<_>>()?;
@@ -469,6 +490,18 @@ mod tests {
     }
 
     #[test]
+    fn sampler_deflate_support_does_not_change_library_backup_format() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("compressed.zip");
+        let mut archive = zip::ZipWriter::new(std::fs::File::create(&path).unwrap());
+        let options = zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+        archive.start_file("manifest.json", options).unwrap();
+        archive.write_all(b"{}").unwrap();
+        archive.finish().unwrap();
+        assert!(read_manifest(&path).unwrap_err().to_string().contains("stored ZIP entries"));
+    }
+
+    #[test]
     fn backup_restore_round_trip() {
         let d = dir("roundtrip");
         let (art, music) = (d.join("artwork"), d.join("music"));
@@ -632,7 +665,7 @@ mod tests {
             zw.start_file("library.db", stored()).unwrap();
             zw.write_all(&vec![0x55u8; 4096]).unwrap();
             zw.start_file("manifest.json", stored()).unwrap();
-            zw.write_all(&serde_json::to_vec(&Manifest { app: "recordbox".into(), format: FORMAT, ..Default::default() }).unwrap()).unwrap();
+            zw.write_all(&serde_json::to_vec(&Manifest { app: "recordbox".into(), format: LEGACY_FORMAT, ..Default::default() }).unwrap()).unwrap();
             zw.finish().unwrap();
         }
         assert!(stage_restore(&bad, &d.join("w3"), &art, true, &|_, _, _| {}, &never).is_err());

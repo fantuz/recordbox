@@ -2,10 +2,21 @@
 //! checkboxes, dropdowns, sliders, "?" buttons, buttons and the card layout, with the sizes
 //! and colours measured from the original's Preferences window (points = Retina pixels / 2).
 //! Everything is drawn with painter geometry; no artwork is loaded.
+//!
+//! The Preferences controls follow rekordbox's own drawing code (7.2.19: `drawRadioButton`
+//! 0x100496d88, `PreferenceBaseLookAndFeel::drawToggleButton` 0x100496968, `drawComboBox`
+//! 0x1004973cc, `drawLinearSlider` 0x10049701c, `PreferenceToggleAndColorBoxLookAndFeel::
+//! drawToggleButton` 0x10049b314) and its face and sizes (`prefs_font.rs`).
 
 use crate::theme::*;
 use eframe::egui;
 use egui::{pos2, vec2, Align2, Color32, FontId, Rect, Response, RichText, Sense, Stroke, StrokeKind, Ui, Vec2};
+pub use crate::prefs_font::{pref, pref_bold, Just};
+
+/// Height of a switch, radio button or check box row in rekordbox's layouts, and the size of
+/// the control and of its caption's font in it (0.85 of the row).
+pub const ROW_H: f32 = 19.0;
+pub const CTL: f32 = 0.85 * ROW_H;
 
 /// The blue of selected rows, tabs, switches and radio buttons.
 pub const PBLUE: Color32 = hex(0x1473EB);
@@ -184,9 +195,10 @@ pub fn card_x(ui: &mut Ui, title: &str, shift: Vec2, tip: Option<&str>, add: imp
         ui.add_space(20.0);
         set_flow(ui, Flow { prev: Kind::Title, indent: 52.0 });
         let (r, _) = ui.allocate_exact_size(vec2(w, 23.0), Sense::hover());
-        let tr = paint_text(ui, pos2(r.min.x + 25.0 + shift.x, r.center().y - 0.5 + shift.y), Align2::LEFT_CENTER, title, inter_bold(17.0), WHITE, 0.17);
+        // (A juce::Label at 20, 20, 580 x 22 with Font(20, bold): its text starts 5 pt in and 1 pt down.)
+        crate::prefs_font::draw(ui, Rect::from_min_size(pos2(r.min.x + 25.0 + shift.x, r.min.y + 1.0 + shift.y), vec2(570.0, 20.0)), title, 20.0, true, WHITE, Just::TopLeft);
         if let Some(tip) = tip {
-            help_in(ui, Rect::from_min_size(pos2(tr.max.x + HELP_GAP, r.center().y - 7.0), vec2(14.0, 12.0)), tip);
+            help_in(ui, Rect::from_min_size(pos2(r.min.x + help_x(ui, title, 20.0), r.min.y - 1.0 + 4.2), vec2(14.0, 11.6)), tip);
         }
         add(ui);
         ui.add_space(20.0);
@@ -202,9 +214,10 @@ pub fn sub(ui: &mut Ui, text: &str) {
 pub fn sub_help(ui: &mut Ui, text: &str, tip: Option<&str>) {
     row_at(ui, Kind::Sub, 20.0, 57.0, |ui| {
         let r = ui.max_rect();
-        let tr = paint_text(ui, pos2(r.min.x, r.center().y), Align2::LEFT_CENTER, text, inter_bold(15.75), WHITE, 0.12);
+        // (A juce::Label 52 pt in, 20 pt tall, Font(18, bold).)
+        crate::prefs_font::draw(ui, Rect::from_min_size(pos2(r.min.x, r.min.y + 1.0), vec2(540.0, 18.0)), text, 18.0, true, WHITE, Just::TopLeft);
         if let Some(tip) = tip {
-            help_in(ui, Rect::from_min_size(pos2(tr.max.x + 89.0, r.center().y - 6.5), vec2(14.0, 12.0)), tip);
+            help_in(ui, Rect::from_min_size(pos2(r.min.x - 57.0 + 32.0 + help_x(ui, text, 18.0), r.min.y + 4.2), vec2(14.0, 11.6)), tip);
         }
     });
     indent(ui, 84.0);
@@ -258,55 +271,75 @@ pub fn paint_text(ui: &Ui, pos: egui::Pos2, align: Align2, s: &str, font: FontId
     r
 }
 
-fn label_galley(ui: &Ui, s: &str, size: f32, color: Color32, tracking: f32) -> std::sync::Arc<egui::Galley> {
-    let mut job = egui::text::LayoutJob::default();
-    let mut add = |text: &str, tracking: f32| {
-        let mut f = egui::TextFormat::simple(inter(size), color);
-        f.line_height = Some((size * 16.0 / 14.0).round());
-        f.extra_letter_spacing = tracking;
-        job.append(text, 0.0, f);
-    };
-    if !s.chars().any(|c| c.is_lowercase()) {
-        // Labels in capitals ("BLUE", "CENTER", "OFF") are set wider in the original.
-        add(s, 0.8);
-    } else {
-        // In mixed labels the original's capitals are wider and its small letters closer than
-        // the kit's font sets them; how much was measured per kind of control (the kinds are
-        // told apart by their base tracking) on the 7.2.19 pages.
-        let (low, cap) = if tracking > 0.0 { (-0.16, 0.4) } else if tracking < -0.1 { (-0.25, 0.75) } else { (-0.08, 0.2) };
-        let mut run = String::new();
-        let mut run_cap = false;
-        for c in s.chars() {
-            let is_cap = c.is_uppercase();
-            if is_cap != run_cap && !run.is_empty() {
-                add(&run, if run_cap { cap } else { low });
-                run.clear();
-            }
-            run_cap = is_cap;
-            run.push(c);
-        }
-        if !run.is_empty() {
-            add(&run, if run_cap { cap } else { low });
-        }
+fn label_galley(ui: &Ui, s: &str, size: f32, color: Color32, _tracking: f32) -> std::sync::Arc<egui::Galley> {
+    // Captions are Font(0.85 x row height): 16.15 in the usual 19 pt row (`size` 14).
+    crate::prefs_font::galley(ui, s, CTL * size / 14.0, false, color)
+}
+
+/// A colour at JUCE's `setOpacity` for a control that is switched off (0.3 for switches,
+/// 0.5 for radio buttons and check boxes).
+fn faded(c: Color32, enabled: bool, opacity: f32) -> Color32 {
+    if enabled { c } else { c.gamma_multiply(opacity) }
+}
+
+/// The pill switch at `min`, in a row `h` pt tall: a track 2t x t (t = 0.85 h) with fully
+/// round ends, and a white knob 0.8 t across, 0.1 t in from the left end or 1.1 t when on.
+pub fn paint_pill(p: &egui::Painter, min: egui::Pos2, h: f32, on: bool, enabled: bool, hovered: bool) {
+    let t = 0.85 * h;
+    let track = Rect::from_min_size(min, vec2(2.0 * t, t));
+    p.rect_filled(track, t / 2.0, faded(if on { PBLUE } else { GREY }, enabled, 0.3));
+    let kx = if on { 1.1 * t } else { 0.1 * t };
+    p.circle_filled(pos2(min.x + kx + 0.4 * t, min.y + 0.5 * t), 0.4 * t, faded(WHITE, enabled, 0.3));
+    if enabled && hovered {
+        p.rect_filled(track, t / 2.0, Color32::from_white_alpha(26));
     }
-    job.wrap.max_width = f32::INFINITY;
-    ui.painter().layout_job(job)
+}
+
+/// The radio button at `min`: a disc t across (t = 0.85 h), blue with a white dot 0.425 h
+/// across when chosen.
+pub fn paint_radio_at(p: &egui::Painter, min: egui::Pos2, h: f32, on: bool, enabled: bool) {
+    let t = 0.85 * h;
+    let c = pos2(min.x + t / 2.0, min.y + t / 2.0);
+    p.circle_filled(c, t / 2.0, faded(if on { PBLUE } else { GREY }, enabled, 0.5));
+    if on {
+        p.circle_filled(pos2(min.x + 0.425 * h, min.y + 0.425 * h), 0.2125 * h, faded(WHITE, enabled, 0.5));
+    }
+}
+
+/// The check box at `min`: a square t across with a 1 pt grey outline; blue with JUCE's tick
+/// when ticked.
+pub fn paint_check_at(p: &egui::Painter, min: egui::Pos2, t: f32, on: bool, enabled: bool) {
+    let r = Rect::from_min_size(min, vec2(t, t));
+    if on {
+        p.rect_filled(r, 0.0, faded(PBLUE, enabled, 0.5));
+    }
+    p.rect_stroke(r, 0.0, Stroke::new(1.0, faded(GREY, enabled, 0.5)), StrokeKind::Middle);
+    if on {
+        // rekordbox's tick, measured on View > Layout (in 32nds of the box): thicker than
+        // the box's own lines and reaching just above its top right corner.
+        let at = |x: f32, y: f32| pos2(min.x + x * t / 32.0, min.y + y * t / 32.0);
+        let c = faded(WHITE, enabled, 0.5);
+        p.add(egui::Shape::convex_polygon(vec![at(3.0, 12.5), at(7.5, 9.5), at(13.5, 17.0), at(14.5, 24.5)], c, Stroke::NONE));
+        p.add(egui::Shape::convex_polygon(vec![at(13.5, 17.0), at(26.0, -0.5), at(32.0, 1.5), at(14.5, 24.5)], c, Stroke::NONE));
+    }
 }
 
 /// The switch alone: 32 x 16 pt pill, 12.5 pt white knob.
 pub fn paint_toggle(p: &egui::Painter, r: Rect, on: bool, enabled: bool) {
-    p.rect_filled(r, 8.0, if !enabled { hex(0x3A3A3A) } else if on { PBLUE } else { GREY });
-    let kx = if on { r.max.x - 7.75 } else { r.min.x + 7.75 };
-    p.circle_filled(pos2(kx, r.center().y), 6.25, if enabled { WHITE } else { OFF });
+    paint_pill(p, pos2(r.min.x, r.center().y - CTL / 2.0), ROW_H, on, enabled, false);
 }
 
 /// Switch with its label, inside a row. Returns true when it was switched.
 pub fn toggle_raw(ui: &mut Ui, on: &mut bool, label: &str) -> bool {
     let en = ui.is_enabled();
-    let g = label_galley(ui, label, 14.0, if en { WHITE } else { OFF }, -0.21);
-    let (r, resp) = ui.allocate_exact_size(vec2(37.0 + g.size().x, g.size().y.max(16.0)), Sense::click());
-    paint_toggle(ui.painter(), Rect::from_min_size(pos2(r.min.x, r.center().y - 8.0), vec2(32.0, 16.0)), *on, en);
-    ui.painter().galley(pos2(r.min.x + 37.0, r.center().y - g.size().y / 2.0), g, WHITE);
+    let g = label_galley(ui, label, 14.0, faded(WHITE, en, 0.3), -0.21);
+    let gh = caption_h(&g);
+    let (r, resp) = ui.allocate_exact_size(vec2(37.0 + g.size().x, gh.max(16.0)), Sense::click());
+    paint_pill(ui.painter(), pos2(r.min.x, r.center().y - CTL / 2.0), ROW_H, *on, en, resp.hovered());
+    if en {
+        crate::ui_prefs_item::kit_control("switch", label, r);
+    }
+    ui.painter().galley(pos2(r.min.x + 37.0, r.center().y - gh / 2.0), g, WHITE);
     if resp.clicked() {
         *on = !*on;
     }
@@ -329,10 +362,16 @@ pub fn toggle_off(ui: &mut Ui, label: &str, why: &str) -> bool {
 
 pub fn toggle_off_raw(ui: &mut Ui, label: &str, why: &str) -> bool {
     let g = label_galley(ui, label, 14.0, WHITE, -0.21);
-    let (r, resp) = ui.allocate_exact_size(vec2(37.0 + g.size().x, g.size().y.max(16.0)), Sense::click());
-    paint_toggle(ui.painter(), Rect::from_min_size(pos2(r.min.x, r.center().y - 8.0), vec2(32.0, 16.0)), false, true);
-    ui.painter().galley(pos2(r.min.x + 37.0, r.center().y - g.size().y / 2.0), g, WHITE);
+    let gh = caption_h(&g);
+    let (r, resp) = ui.allocate_exact_size(vec2(37.0 + g.size().x, gh.max(16.0)), Sense::click());
+    paint_pill(ui.painter(), pos2(r.min.x, r.center().y - CTL / 2.0), ROW_H, false, true, false);
+    ui.painter().galley(pos2(r.min.x + 37.0, r.center().y - gh / 2.0), g, WHITE);
     resp.on_hover_text(why).clicked()
+}
+
+/// Height of a caption laid out by `label_galley` (its lines are 16.15 pt apart).
+fn caption_h(g: &egui::Galley) -> f32 {
+    crate::prefs_font::height(g, CTL)
 }
 
 /// A switch that cannot be changed here: drawn in the state it really is in; hovering gives
@@ -340,9 +379,10 @@ pub fn toggle_off_raw(ui: &mut Ui, label: &str, why: &str) -> bool {
 pub fn toggle_locked(ui: &mut Ui, on: bool, label: &str, why: &str) -> bool {
     row(ui, 16.0, |ui| {
         let g = label_galley(ui, label, 14.0, WHITE, -0.21);
-        let (r, resp) = ui.allocate_exact_size(vec2(37.0 + g.size().x, g.size().y.max(16.0)), Sense::click());
-        paint_toggle(ui.painter(), Rect::from_min_size(pos2(r.min.x, r.center().y - 8.0), vec2(32.0, 16.0)), on, true);
-        ui.painter().galley(pos2(r.min.x + 37.0, r.center().y - g.size().y / 2.0), g, WHITE);
+        let gh = caption_h(&g);
+        let (r, resp) = ui.allocate_exact_size(vec2(37.0 + g.size().x, gh.max(16.0)), Sense::click());
+        paint_pill(ui.painter(), pos2(r.min.x, r.center().y - CTL / 2.0), ROW_H, on, true, false);
+        ui.painter().galley(pos2(r.min.x + 37.0, r.center().y - gh / 2.0), g, WHITE);
         resp.on_hover_text(why).clicked()
     })
 }
@@ -350,10 +390,11 @@ pub fn toggle_locked(ui: &mut Ui, on: bool, label: &str, why: &str) -> bool {
 /// A checkbox for something Recordbox does not have: greyed and not ticked, with the reason
 /// on hover. Inside a row.
 pub fn checkbox_off_raw(ui: &mut Ui, label: &str, why: &str) -> Response {
-    let g = label_galley(ui, label, 14.0, OFF, 0.1);
-    let (r, resp) = ui.allocate_exact_size(vec2(21.0 + g.size().x, g.size().y.max(16.5)), Sense::hover());
-    paint_checkbox(ui.painter(), Rect::from_min_size(pos2(r.min.x, r.center().y - 8.25), vec2(16.5, 16.5)), false, false);
-    ui.painter().galley(pos2(r.min.x + 21.0, r.center().y - g.size().y / 2.0), g, OFF);
+    let g = label_galley(ui, label, 14.0, faded(WHITE, false, 0.5), 0.1);
+    let gh = caption_h(&g);
+    let (r, resp) = ui.allocate_exact_size(vec2(21.0 + g.size().x, gh.max(16.0)), Sense::hover());
+    paint_check_at(ui.painter(), pos2(r.min.x, r.center().y - CTL / 2.0), CTL, false, false);
+    ui.painter().galley(pos2(r.min.x + 21.0, r.center().y - gh / 2.0), g, WHITE);
     resp.on_hover_text(why)
 }
 
@@ -385,27 +426,36 @@ pub fn slider(ui: &mut Ui, t: &mut f32) -> Response {
             }
         }
         let en = ui.is_enabled();
-        ui.painter().rect_filled(Rect::from_min_max(pos2(r.min.x, r.center().y - 2.0), pos2(r.max.x, r.center().y + 2.0)), 0.0, hex(0x0F0F0F));
-        let x = r.min.x + t.clamp(0.0, 1.0) * (w - handle_w);
-        ui.painter().rect_filled(Rect::from_min_size(pos2(x, r.min.y), vec2(handle_w, 20.0)), 0.5, if en { hex(0xE6E6E6) } else { OFF });
+        paint_slider(ui.painter(), r, r.min.x + t.clamp(0.0, 1.0) * (w - handle_w), en, resp.hovered() || resp.dragged());
         resp
     })
 }
 
+/// A slider's track and handle as rekordbox draws them: the track is the middle fifth of the
+/// height (#0F0F0F), the handle a 5 pt wide bar from `x`, white at 0.9 (full when the pointer
+/// is on it).
+pub fn paint_slider(p: &egui::Painter, track: Rect, x: f32, enabled: bool, hot: bool) {
+    let h = track.height();
+    p.rect_filled(Rect::from_min_size(pos2(track.min.x, track.min.y + (0.4 * h).round()), vec2(track.width(), (0.2 * h).round())), 0.0, faded(hex(0x0F0F0F), enabled, 0.3));
+    let a = if !enabled { 0.35 } else if hot { 1.0 } else { 0.9 };
+    p.rect_filled(Rect::from_min_size(pos2(x, track.min.y), vec2(5.0, h)), 0.0, WHITE.gamma_multiply(a));
+}
+
 pub fn paint_radio(p: &egui::Painter, c: egui::Pos2, on: bool, enabled: bool) {
-    p.circle_filled(c, 8.0, if !enabled { hex(0x3A3A3A) } else if on { PBLUE } else { hex(0x939393) });
-    if on {
-        p.circle_filled(c, 4.0, if enabled { WHITE } else { OFF });
-    }
+    paint_radio_at(p, pos2(c.x - CTL / 2.0, c.y - CTL / 2.0), ROW_H, on, enabled);
 }
 
 /// 16 pt radio button with its label 21 pt from its left edge. True when clicked.
 pub fn radio_raw(ui: &mut Ui, on: bool, label: &str) -> Response {
     let en = ui.is_enabled();
-    let g = label_galley(ui, label, 14.0, if en { WHITE } else { OFF }, -0.05);
-    let (r, resp) = ui.allocate_exact_size(vec2(21.0 + g.size().x, g.size().y.max(16.0)), Sense::click());
-    paint_radio(ui.painter(), pos2(r.min.x + 8.0, r.center().y), on, en);
-    ui.painter().galley(pos2(r.min.x + 21.0, r.center().y - g.size().y / 2.0), g, WHITE);
+    let g = label_galley(ui, label, 14.0, faded(WHITE, en, 0.5), -0.05);
+    let gh = caption_h(&g);
+    let (r, resp) = ui.allocate_exact_size(vec2(21.0 + g.size().x, gh.max(16.0)), Sense::click());
+    paint_radio_at(ui.painter(), pos2(r.min.x, r.center().y - CTL / 2.0), ROW_H, on, en);
+    if en {
+        crate::ui_prefs_item::kit_control("radio", label, r);
+    }
+    ui.painter().galley(pos2(r.min.x + 21.0, r.center().y - gh / 2.0), g, WHITE);
     resp
 }
 
@@ -414,30 +464,25 @@ pub fn radio(ui: &mut Ui, on: bool, label: &str) -> bool {
 }
 
 pub fn paint_checkbox(p: &egui::Painter, r: Rect, on: bool, enabled: bool) {
-    let edge = if enabled { GREY } else { OFF };
-    if on {
-        p.rect_filled(r, 0.0, if enabled { PBLUE } else { hex(0x3A3A3A) });
-    }
-    p.rect_stroke(r, 0.0, Stroke::new(0.5, edge), StrokeKind::Inside);
-    if on {
-        let at = |x: f32, y: f32| pos2(r.min.x + x * r.width() / 10.0, r.min.y + y * r.height() / 10.0);
-        let c = if enabled { WHITE } else { OFF };
-        p.add(egui::Shape::line(vec![at(1.6, 5.2), at(4.1, 7.6), at(8.6, 1.4)], Stroke::new(2.0, c)));
-    }
+    paint_check_at(p, r.min, r.width().min(r.height()), on, enabled);
 }
 
 /// 16.5 pt square checkbox with its label 21 pt from its left edge.
 pub fn checkbox_raw(ui: &mut Ui, on: &mut bool, label: &str) -> Response {
     let en = ui.is_enabled();
-    let g = label_galley(ui, label, 14.0, if en { WHITE } else { OFF }, 0.1);
-    let w = if label.is_empty() { 16.5 } else { 21.0 + g.size().x };
-    let (r, mut resp) = ui.allocate_exact_size(vec2(w, g.size().y.max(16.5)), Sense::click());
+    let g = label_galley(ui, label, 14.0, faded(WHITE, en, 0.5), 0.1);
+    let gh = caption_h(&g);
+    let w = if label.is_empty() { CTL } else { 21.0 + g.size().x };
+    let (r, mut resp) = ui.allocate_exact_size(vec2(w, gh.max(16.0)), Sense::click());
     if resp.clicked() {
         *on = !*on;
         resp.mark_changed();
     }
-    paint_checkbox(ui.painter(), Rect::from_min_size(pos2(r.min.x, r.center().y - 8.25), vec2(16.5, 16.5)), *on, en);
-    ui.painter().galley(pos2(r.min.x + 21.0, r.center().y - g.size().y / 2.0), g, WHITE);
+    paint_check_at(ui.painter(), pos2(r.min.x, r.center().y - CTL / 2.0), CTL, *on, en);
+    if en {
+        crate::ui_prefs_item::kit_control("check", label, r);
+    }
+    ui.painter().galley(pos2(r.min.x + 21.0, r.center().y - gh / 2.0), g, WHITE);
     resp
 }
 
@@ -445,22 +490,31 @@ pub fn checkbox(ui: &mut Ui, on: &mut bool, label: &str) -> Response {
     row(ui, 16.0, |ui| checkbox_raw(ui, on, label))
 }
 
-/// Distance from the end of a card heading to its "?" box.
-const HELP_GAP: f32 = 86.5;
+/// Where the "?" box of a heading starts, from the left edge of the card: rekordbox puts it
+/// 123 pt after the width the heading would have in the regular face (measured on "Auto Cue",
+/// "STEMS Analysis Process" and "STEM Waveform Display": 123.4, 122.1 and 123.1).
+pub fn help_x(ui: &Ui, title: &str, h: f32) -> f32 {
+    crate::prefs_font::width(ui, title, h, false).floor() + 123.5
+}
 
-/// The "?" box (14 x 12 pt); its text is shown on hover.
-fn help_in(ui: &mut Ui, r: Rect, tip: &str) -> Response {
-    let resp = ui.interact(r, ui.id().with(("help", r.min.x as i32, r.min.y as i32)), Sense::hover());
-    let c = if resp.hovered() { hex(0x8A8A8A) } else { hex(0x4A4A4A) };
-    ui.painter().rect_stroke(r, 1.5, Stroke::new(1.0, c), StrokeKind::Inside);
-    ui.painter().text(pos2(r.center().x, r.center().y + 0.25), Align2::CENTER_CENTER, "?", inter_bold(9.5), if resp.hovered() { WHITE } else { hex(0x8A8A8A) });
+/// The "?" box (14 x 11.6 pt: rekordbox's 23 x 19 px hint image fitted into the 14 pt inside
+/// of its 20 pt button); its text is shown on hover. The image is rekordbox's own when it is
+/// installed; otherwise the same box is drawn.
+pub fn help_in(ui: &mut Ui, r: Rect, tip: &str) -> Response {
+    let resp = ui.interact(r.expand(3.0), ui.id().with(("help", r.min.x as i32, r.min.y as i32)), Sense::hover());
+    if let Some((tex, _)) = crate::prefs_font::skin(ui.ctx(), "p3005_hint.png") {
+        crate::prefs_font::paint_skin(ui.painter(), &tex, r, if resp.hovered() { WHITE } else { Color32::from_white_alpha(255) });
+    } else {
+        ui.painter().rect_stroke(r, 1.0, Stroke::new(0.6, hex(0x646464)), StrokeKind::Inside);
+        ui.painter().text(pos2(r.center().x, r.center().y + 0.25), Align2::CENTER_CENTER, "?", inter_bold(9.0), hex(0x8C8C8C));
+    }
     resp.on_hover_text(tip)
 }
 
 /// "?" box `space` pt after the previous control of a row.
 pub fn help(ui: &mut Ui, space: f32, tip: &str) {
     ui.add_space(space);
-    let (r, _) = ui.allocate_exact_size(vec2(14.0, 12.0), Sense::hover());
+    let (r, _) = ui.allocate_exact_size(vec2(14.0, 11.6), Sense::hover());
     help_in(ui, r.translate(vec2(0.0, 1.0)), tip);
 }
 
@@ -475,16 +529,18 @@ pub fn chevron_dim(ui: &Ui, rect: Rect, _v: &egui::style::WidgetVisuals, _open: 
 }
 
 fn chevron_col(ui: &Ui, rect: Rect, c: Color32) {
-    // 15 x 6.5 pt arrow, its right end 2.5 pt from the field's right edge.
-    let right = rect.max.x + ui.spacing().button_padding.x - 2.75;
-    let y = rect.center().y + 0.75;
-    ui.painter().add(egui::Shape::line(vec![pos2(right - 14.5, y - 2.6), pos2(right - 7.25, y + 2.6), pos2(right, y - 2.6)], Stroke::new(1.6, c)));
+    // rekordbox's path, from the field's right edge w and middle height m: (w - 17, m - 2),
+    // (w - 10, m + 3), (w - 3, m - 2), 2 pt wide.
+    let w = rect.max.x + ui.spacing().button_padding.x;
+    let m = rect.center().y.floor();
+    ui.painter().add(egui::Shape::line(vec![pos2(w - 17.0, m - 2.0), pos2(w - 10.0, m + 3.0), pos2(w - 3.0, m - 2.0)], Stroke::new(2.0, c)));
 }
 
 /// Dropdown: black field with 3 pt corners, bold value, grey arrow. `size` is the value's
 /// font size (14 in most places, 12 on the DJ System pages).
 pub fn combo(id: impl std::hash::Hash, width: f32, value: impl Into<String>, size: f32) -> egui::ComboBox {
-    egui::ComboBox::from_id_salt(id).width(width).selected_text(RichText::new(value).font(inter_bold(size)).color(WHITE)).icon(chevron)
+    // (The value is Font(16, bold) in a 22 pt field; `size` 12 is the DJ System pages' smaller one.)
+    egui::ComboBox::from_id_salt(id).width(width).selected_text(RichText::new(value).font(pref_bold(size * 16.0 / 14.0)).color(WHITE)).icon(chevron)
 }
 
 /// A row holding one dropdown `h` pt tall (22, or 19 on the DJ System pages).
@@ -501,7 +557,7 @@ pub fn labeled<R>(ui: &mut Ui, label: &str, add: impl FnOnce(&mut Ui) -> R) -> R
     row_at(ui, Kind::Ctl, 22.0, 90.0, |ui| {
         let en = ui.is_enabled();
         let (r, _) = ui.allocate_exact_size(vec2(119.0, 22.0), Sense::hover());
-        paint_text(ui, pos2(r.min.x, r.center().y), Align2::LEFT_CENTER, label, inter(14.0), if en { WHITE } else { OFF }, -0.29);
+        crate::prefs_font::draw(ui, r, label, 16.0, false, if en { WHITE } else { OFF }, Just::Left);
         add(ui)
     })
 }
@@ -521,16 +577,16 @@ pub fn step_slider(ui: &mut Ui, v: &mut u32, max: u32, lo: &str, hi: &str) -> bo
                 changed = true;
             }
         }
-        ui.painter().rect_filled(Rect::from_min_max(pos2(r.min.x, r.center().y - 2.0), pos2(r.max.x, r.center().y + 2.0)), 0.0, hex(0x0F0F0F));
         let x = r.min.x + (*v).min(max) as f32 / max.max(1) as f32 * (w - handle_w);
-        ui.painter().rect_filled(Rect::from_min_size(pos2(x, r.min.y), vec2(handle_w, 20.0)), 0.5, hex(0xE8E8E8));
+        paint_slider(ui.painter(), r, x, true, resp.hovered() || resp.dragged());
     });
     ui.add_space(12.0);
     let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), 12.0), Sense::hover());
     ui.add_space(1.0);
     let w = track_w.min(r.width() - 114.0);
-    ui.painter().text(pos2(r.min.x + 89.5, r.center().y), Align2::LEFT_CENTER, lo, inter(12.5), WHITE);
-    ui.painter().text(pos2(r.min.x + 94.0 + w + 4.5, r.center().y), Align2::RIGHT_CENTER, hi, inter(12.5), WHITE);
+    // (Labels 84 .. 334 and 338 .. 588 pt, Font(14), top left and top right.)
+    crate::prefs_font::draw(ui, Rect::from_min_size(pos2(r.min.x + 89.0, r.min.y - 1.0), vec2(240.0, 14.0)), lo, 14.0, false, WHITE, Just::TopLeft);
+    crate::prefs_font::draw(ui, Rect::from_min_max(pos2(r.min.x + 343.0, r.min.y - 1.0), pos2(r.min.x + 94.0 + w + 9.0, r.min.y + 13.0)), hi, 14.0, false, WHITE, Just::TopRight);
     // The next row keeps 16 pt of distance, as after a separator.
     let mut f = flow(ui);
     f.prev = Kind::Sep;
@@ -688,5 +744,90 @@ impl Bars {
         if !self.mesh.is_empty() {
             p.add(egui::Shape::mesh(self.mesh));
         }
+    }
+}
+
+/// Where the pointer says a fader should be this frame, or None when it is not being moved.
+/// Covers the press, the drag, the frame the button is released in (a fast drag's last move
+/// arrives together with the release) and a press and release that both arrive in one frame,
+/// which egui reports as neither a click nor a drag when the pointer moved in between.
+pub(crate) fn slider_pos(ui: &Ui, resp: &egui::Response, hit: Rect) -> Option<egui::Pos2> {
+    if let Some(p) = resp.interact_pointer_pos().filter(|_| resp.dragged() || resp.is_pointer_button_down_on() || resp.clicked() || resp.drag_stopped()) {
+        ui.data_mut(|d| d.insert_temp(resp.id.with("slider_down"), resp.is_pointer_button_down_on()));
+        return Some(p);
+    }
+    // The button was held on the fader in the frame before: a release now ends that drag,
+    // wherever the pointer has got to (egui starts no drag when the move and the release
+    // arrive together).
+    let key = resp.id.with("slider_down");
+    let was_down = ui.data(|d| d.get_temp::<bool>(key)).unwrap_or(false);
+    ui.data_mut(|d| d.insert_temp(key, resp.is_pointer_button_down_on()));
+    let done = ui.input(|i| {
+        let (mut from, mut out) = (was_down.then_some(None), None);
+        for e in &i.events {
+            if let egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed, .. } = e {
+                if *pressed {
+                    from = hit.contains(*pos).then_some(Some(*pos));
+                } else if let Some(f) = from.take() {
+                    out = Some((f, *pos));
+                }
+            }
+        }
+        out
+    });
+    let (from, to) = done?;
+    // A press made in this same frame must not have gone through a menu or window lying
+    // over the fader.
+    from.map_or(true, |f| ui.ctx().layer_id_at(f).map_or(true, |l| l == resp.layer_id)).then_some(to)
+}
+
+#[cfg(test)]
+mod slider_tests {
+    use super::*;
+    use egui::{pos2, vec2, Event, PointerButton, RawInput, Sense};
+
+    /// Run one frame with these pointer events over a 100 pt fader at x 100..200 and return
+    /// the value it would be set to.
+    fn frame(ctx: &egui::Context, events: Vec<Event>) -> Option<f32> {
+        let mut out = None;
+        let raw = RawInput { screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(400.0, 100.0))), events, ..Default::default() };
+        let _ = ctx.run(raw, |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                let hit = Rect::from_min_max(pos2(94.0, 30.0), pos2(206.0, 54.0));
+                let resp = ui.interact(hit, ui.id().with("f"), Sense::click_and_drag());
+                out = slider_pos(ui, &resp, hit).map(|p| ((p.x - 100.0) / 100.0).clamp(0.0, 1.0));
+            });
+        });
+        out
+    }
+    fn button(x: f32, pressed: bool) -> Event {
+        Event::PointerButton { pos: pos2(x, 42.0), button: PointerButton::Primary, pressed, modifiers: Default::default() }
+    }
+    fn moved(x: f32) -> Event {
+        Event::PointerMoved(pos2(x, 42.0))
+    }
+
+    #[test]
+    fn a_fader_follows_slow_and_fast_gestures() {
+        let ctx = egui::Context::default();
+        frame(&ctx, vec![]);
+        // A slow drag: press, move and release in frames of their own.
+        frame(&ctx, vec![moved(150.0)]);
+        assert_eq!(frame(&ctx, vec![button(150.0, true)]), Some(0.5));
+        assert_eq!(frame(&ctx, vec![moved(180.0)]), Some(0.8));
+        assert_eq!(frame(&ctx, vec![button(180.0, false)]), Some(0.8));
+        assert_eq!(frame(&ctx, vec![]), None);
+        // A click whose press and release arrive together.
+        assert_eq!(frame(&ctx, vec![moved(125.0), button(125.0, true), button(125.0, false)]), Some(0.25));
+        frame(&ctx, vec![]);
+        // A drag whose last move arrives with the release.
+        assert_eq!(frame(&ctx, vec![moved(150.0), button(150.0, true)]), Some(0.5));
+        assert_eq!(frame(&ctx, vec![moved(110.0), button(110.0, false)]), Some(0.1));
+        frame(&ctx, vec![]);
+        // A whole drag in one frame.
+        assert_eq!(frame(&ctx, vec![moved(150.0), button(150.0, true), moved(190.0), button(190.0, false)]), Some(0.9));
+        frame(&ctx, vec![]);
+        // A press outside the fader does nothing, wherever it is released.
+        assert_eq!(frame(&ctx, vec![moved(300.0), button(300.0, true), moved(150.0), button(150.0, false)]), None);
     }
 }

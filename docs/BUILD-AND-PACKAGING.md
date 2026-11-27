@@ -62,6 +62,33 @@ You can also start `recordbox` from the terminal. The build downloads its compil
 
 After publishing a new stable release, update the `tag` and full commit `revision` together in the tap’s formula. Use the commit identified in the release notes, and check that the release tag resolves to it. The Homebrew workflow installs the formula by its tap name and tests the installed bundle. Once the formula change reaches the tap’s default branch, users can run `brew update` and `brew upgrade fantuz/recordbox/recordbox`. [Homebrew formula](../Formula/recordbox.rb) · [Native installation check](../.github/workflows/homebrew.yml)
 
+## Distributing a macOS app to DJs
+
+The release ZIP already contains a standalone `Recordbox.app` for the chosen
+architecture. The packager checks the linked libraries so someone downloading
+the app can run it without installing Homebrew, Xcode or Rust. The Homebrew
+formula is an alternative for users who already use Terminal and prefer
+Homebrew-managed upgrades. It builds from source. Cargo is useful for testing
+a branch or changing the code.
+
+For a Finder-first installation, the next step is to sign the finished bundle
+with a **Developer ID Application** certificate using the hardened runtime
+and a secure timestamp, then submit it to Apple using `notarytool`. After
+Apple accepts it, staple the ticket to the app, validate it, and package that
+exact app for download. Generate the release hashes from the final archive
+and test a fresh browser download on a Mac with Gatekeeper enabled. This
+route distributes directly from GitHub. A Homebrew **cask** could then
+install the same prebuilt app. [Apple’s notarization guide](https://developer.apple.com/documentation/security/notarizing-macos-software-before-distribution) · [Homebrew cask documentation](https://docs.brew.sh/Cask-Cookbook)
+
+This release process currently produces archives without Developer ID
+signing or notarization. Enabling the signed path requires Apple Developer
+Program access, a Developer ID signing identity with its private key, and
+notary-service credentials. The current release validator requires unsigned
+artifacts. For a signed release, update it to check the expected Developer ID
+and notarization, and store hashes of the final signed executable outside
+the sealed app bundle. This avoids changing a sealed resource after signing.
+[Developer ID](https://developer.apple.com/developer-id/) · [Customizing the notarization workflow](https://developer.apple.com/documentation/security/customizing-the-notarization-workflow)
+
 ## Fork release process
 
 The first packaged release of `fantuz/recordbox` is **0.5.0**. Each release goes
@@ -280,10 +307,9 @@ python packaging/smoke_app.py \
 ```
 
 Use the corresponding ZIP/TAR.GZ on Windows/Linux. This extracts the archive,
-checks its manifest hashes, and runs the extracted entrypoint. **Do not use the
-app's `--help`: it is not implemented and starts the normal application.**
-
-The helper instead uses the existing `--screenshot` mode, removes inherited
+checks its manifest hashes, and runs the extracted entrypoint. `--help` lists
+supported launch options and exits. To exercise the graphical app, the
+helper uses `--screenshot` mode, removes inherited
 `PREPDECK_*` research flags, and assigns a fresh temporary `PREPDECK_DATA` directory.
 The app generates synthetic demos there; screenshot mode skips rekordbox library
 sync and automatic stem downloads. Temporary demo audio/database files are removed

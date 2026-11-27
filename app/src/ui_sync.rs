@@ -3,7 +3,7 @@
 use crate::app::App;
 use crate::db::Db;
 use crate::rbimport::writeback::{self, Plan, Receipt};
-use crate::theme::CAUTION_TX;
+use crate::theme::hex;
 use crate::ui_kit::{self as kit, btn};
 use crossbeam_channel::Receiver;
 use eframe::egui::{self, Context, RichText, Ui};
@@ -133,6 +133,40 @@ impl Review {
     }
 }
 
+/// Native radios and checkboxes paint their text, dot and checkmark with the widget
+/// foreground. Use the window's actual fill because system theme changes can give the
+/// review a light background while other controls still use the dark preferences kit.
+fn review_style(ui: &mut Ui) {
+    kit::apply_style(ui);
+    let visuals = ui.visuals_mut();
+    let surface = visuals.window_fill();
+    let light = egui::Rgba::from(surface).intensity() > 0.179;
+    let (ink, hover, active, disabled_tint, warning) = if light {
+        (hex(0x17212B), hex(0xE2EEFA), hex(0xCEE2F5), hex(0xA0A8AD), hex(0xA32929))
+    } else {
+        (hex(0xF2F5FA), hex(0x2D3E50), hex(0x364F66), hex(0x505960), hex(0xFF9999))
+    };
+    // egui mixes disabled widgets halfway towards this color. Keep locked choices legible.
+    visuals.widgets.noninteractive.weak_bg_fill = disabled_tint;
+    visuals.error_fg_color = warning;
+    let w = &mut visuals.widgets;
+    for (v, fill) in [(&mut w.inactive, surface), (&mut w.hovered, hover), (&mut w.active, active), (&mut w.open, active)] {
+        v.fg_stroke.color = ink;
+        v.bg_fill = fill;
+        v.bg_stroke = egui::Stroke::new(1.5_f32, ink);
+    }
+}
+
+fn direction_choices(ui: &mut Ui, direction: &mut Option<Direction>, enabled: bool) {
+    ui.add_enabled_ui(enabled, |ui| {
+        ui.vertical(|ui| {
+            ui.radio_value(direction, Some(Direction::Import), "Import · AlphaTheta Rekordbox → recordbox");
+            ui.add_space(2.0);
+            ui.radio_value(direction, Some(Direction::WriteBack), "Write back · recordbox → AlphaTheta Rekordbox");
+        });
+    });
+}
+
 pub fn show(app: &mut App, ctx: &Context) {
     let Some(review) = &mut app.dialogs.library_sync_review else {
         return;
@@ -154,16 +188,13 @@ pub fn show(app: &mut App, ctx: &Context) {
         window = window.open(&mut open);
     }
     window.show(ctx, |ui| {
-        kit::apply_style(ui);
+        review_style(ui);
         ui.heading("Sync direction");
+        if app.prefs.rb.library_protection {
+            ui.label("Library Protection is enabled. You can preview changes and review interrupted write-back recovery.");
+        }
         let previous = review.direction;
-        ui.add_enabled_ui(!working, |ui| {
-            ui.vertical(|ui| {
-                ui.radio_value(&mut review.direction, Some(Direction::Import), "Import · AlphaTheta Rekordbox → recordbox");
-                ui.add_space(2.0);
-                ui.radio_value(&mut review.direction, Some(Direction::WriteBack), "Write back · recordbox → AlphaTheta Rekordbox");
-            });
-        });
+        direction_choices(ui, &mut review.direction, !working);
         ui.separator();
         if review.direction != previous {
             review.outbound = Outbound::Ready;
@@ -187,10 +218,10 @@ pub fn show(app: &mut App, ctx: &Context) {
             }
         }
         if !review.found {
-            ui.colored_label(CAUTION_TX, "Desktop master.db could not be found at the default location.");
+            ui.colored_label(ui.visuals().error_fg_color, "Desktop master.db could not be found at the default location.");
         }
         if let Err(error) = &review.recovery {
-            ui.colored_label(CAUTION_TX, error);
+            ui.colored_label(ui.visuals().error_fg_color, error);
             if ui.add(btn("Recheck recovery status")).clicked() {
                 review.recovery = Review::check_recovery(review.desktop.as_deref());
             }
@@ -204,11 +235,11 @@ pub fn show(app: &mut App, ctx: &Context) {
                     ui.label("Auto Analysis is enabled. Adding tracks can queue analysis in recordbox.");
                 }
                 if matches!(review.recovery, Ok(true)) {
-                    ui.colored_label(CAUTION_TX, "An interrupted write-back needs review. Choose Write back to inspect recovery before importing.");
+                    ui.colored_label(ui.visuals().error_fg_color, "An interrupted write-back needs review. Choose Write back to inspect recovery before importing.");
                 }
-                import = ui.add_enabled(review.found && matches!(review.recovery, Ok(false)), btn("Import into recordbox")).clicked();
+                import = ui.add_enabled(!app.prefs.rb.library_protection && review.found && matches!(review.recovery, Ok(false)), btn("Import into recordbox")).clicked();
             }
-            Some(Direction::WriteBack) => writeback_view(review, ui),
+            Some(Direction::WriteBack) => writeback_view(review, ui, app.prefs.rb.library_protection),
             None => {}
         }
         if !working {
@@ -239,7 +270,7 @@ fn changes(n: usize) -> String {
     format!("{n} change{}", if n == 1 { "" } else { "s" })
 }
 
-fn writeback_view(review: &mut Review, ui: &mut Ui) {
+fn writeback_view(review: &mut Review, ui: &mut Ui, library_protected: bool) {
     if let Some(status) = review.status() {
         ui.horizontal(|ui| {
             ui.spinner();
@@ -248,7 +279,7 @@ fn writeback_view(review: &mut Review, ui: &mut Ui) {
         return;
     }
     if let Outbound::Failed(message) = &review.outbound {
-        ui.colored_label(CAUTION_TX, message);
+        ui.colored_label(ui.visuals().error_fg_color, message);
     }
     if review.recovery.is_err() {
         return;
@@ -298,7 +329,7 @@ fn writeback_view(review: &mut Review, ui: &mut Ui) {
                 ui.label("recordbox rechecks the selected fields and creates a verified recovery copy of the database and affected analysis files before writing. Close AlphaTheta Rekordbox and its agents. Use a local library with Cloud Library Sync turned off on every linked computer.");
                 ui.horizontal_wrapped(|ui| {
                     apply = ui
-                        .add_enabled(count > 0, btn(format!("Back up and apply {}", changes(count))))
+                        .add_enabled(!library_protected && count > 0, btn(format!("Back up and apply {}", changes(count))))
                         .clicked();
                     if ui.add(btn("Back to selection")).clicked() {
                         *confirm = false;
@@ -310,7 +341,7 @@ fn writeback_view(review: &mut Review, ui: &mut Ui) {
             } else {
                 preview_rows(ui, plan, selected, links, page);
                 ui.horizontal_wrapped(|ui| {
-                    if ui.add_enabled(!selected.is_empty(), btn("Review selected changes")).clicked() {
+                    if ui.add_enabled(!library_protected && !selected.is_empty(), btn("Review selected changes")).clicked() {
                         *confirm = true;
                     }
                 });
@@ -481,4 +512,80 @@ fn preview_rows(ui: &mut Ui, plan: &Plan, selected: &mut BTreeSet<usize>, links:
             }
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use egui::{Color32, Shape};
+
+    fn contrast(a: Color32, b: Color32) -> f32 {
+        let luminance = |c| {
+            let [r, g, b, _] = egui::Rgba::from(c).to_array();
+            0.2126 * r + 0.7152 * g + 0.0722 * b
+        };
+        let (a, b) = (luminance(a), luminance(b));
+        (a.max(b) + 0.05) / (a.min(b) + 0.05)
+    }
+
+    #[test]
+    fn painted_sync_directions_remain_legible_in_both_window_themes() {
+        for palette in [egui::Visuals::light(), egui::Visuals::dark()] {
+            let ctx = Context::default();
+            crate::theme::apply(&ctx);
+            ctx.set_visuals(palette);
+            for selected in [None, Some(Direction::Import), Some(Direction::WriteBack)] {
+                for enabled in [true, false] {
+                    let mut direction = selected;
+                    // Use the real review styles and radio widgets. Render one layout pass
+                    // first, then hover the Import row to cover both hovered and idle labels.
+                    let mut pointer = egui::Pos2::ZERO;
+                    let mut frame = || {
+                        let input = egui::RawInput { events: vec![egui::Event::PointerMoved(pointer)], ..Default::default() };
+                        ctx.run(input, |ctx| {
+                            egui::CentralPanel::default().frame(egui::Frame::window(&ctx.style()).shadow(Default::default())).show(ctx, |ui| {
+                                review_style(ui);
+                                pointer = ui.cursor().min + egui::vec2(15.0, 10.0);
+                                direction_choices(ui, &mut direction, enabled);
+                            });
+                        })
+                    };
+                    frame();
+                    let output = frame();
+                    let mut surface = None;
+                    let mut labels = Vec::new();
+                    let mut rings = Vec::new();
+                    let mut dot = None;
+                    for clipped in &output.shapes {
+                        match &clipped.shape {
+                            Shape::Rect(r) if r.rect.width() > 400.0 && r.fill.a() == 255 => surface = Some(r.fill),
+                            Shape::Text(_) => labels.push(clipped),
+                            Shape::Circle(c) if c.stroke.width > 0.0 => rings.push(c),
+                            Shape::Circle(c) => dot = Some(c),
+                            _ => {}
+                        }
+                    }
+                    let surface = surface.expect("the window surface was painted");
+                    assert_eq!(labels.len(), 2);
+                    assert_eq!(rings.len(), 2);
+                    for clipped in labels {
+                        // Tessellation resolves both the fallback text color and any disabled tint.
+                        let mesh = ctx.tessellate(vec![clipped.clone()], output.pixels_per_point);
+                        let egui::epaint::Primitive::Mesh(triangles) = &mesh[0].primitive else { panic!("text mesh") };
+                        assert!(triangles.vertices.iter().all(|v| contrast(v.color, surface) >= 4.5));
+                    }
+                    for ring in &rings {
+                        assert!(contrast(ring.stroke.color, surface) >= 3.0);
+                        assert!(contrast(ring.stroke.color, ring.fill) >= 3.0);
+                    }
+                    assert_eq!(dot.is_some(), selected.is_some());
+                    if let (Some(dot), Some(which)) = (dot, selected) {
+                        let ring = rings[usize::from(which == Direction::WriteBack)];
+                        assert_eq!(dot.center, ring.center);
+                        assert!(contrast(dot.fill, ring.fill) >= 3.0);
+                    }
+                }
+            }
+        }
+    }
 }

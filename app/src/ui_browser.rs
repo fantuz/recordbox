@@ -12,6 +12,29 @@ pub const ROW_H: f32 = 15.0;
 /// Text size of the track list's title bar and column headers.
 pub const TITLE_FONT: f32 = 10.5;
 
+pub(crate) const REVEAL_FILE: &str = if cfg!(target_os = "macos") { "Show in Finder" } else { "Open containing folder" };
+
+pub(crate) fn open_directory(dir: &std::path::Path) -> std::io::Result<()> {
+    let opener = if cfg!(windows) { "explorer.exe" } else if cfg!(target_os = "macos") { "/usr/bin/open" } else { "xdg-open" };
+    std::process::Command::new(opener).arg(dir).spawn().map(|_| ())
+}
+
+/// Reveal a file, or open a directory directly. Only called for an explicit user action.
+pub(crate) fn reveal_path(path: &std::path::Path) -> std::io::Result<()> {
+    if path.is_dir() {
+        return open_directory(path);
+    }
+    #[cfg(target_os = "macos")]
+    {
+        std::process::Command::new("/usr/bin/open").arg("-R").arg(path).spawn().map(|_| ())
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let parent = path.parent().filter(|dir| !dir.as_os_str().is_empty()).unwrap_or(std::path::Path::new("."));
+        open_directory(parent)
+    }
+}
+
 /// An unboxed icon button.
 pub fn icon_button_ui(ui: &mut Ui, rect: Rect, id: &str, draw: fn(&egui::Painter, Rect, Color32)) -> egui::Response {
     crate::ui_player::icon_button(ui, rect, id, None, draw)
@@ -53,81 +76,62 @@ pub fn artwork_texture(app: &mut App, path: &str) -> Option<egui::TextureHandle>
 /// clock.
 fn performance_header(app: &mut App, ui: &mut Ui, r: Rect) {
     let p = ui.painter().clone();
-    // Layout selector: 2Deck Horizontal is the layout that exists so far.
-    let lay_r = Rect::from_min_max(pos2(r.min.x + 130.0, r.min.y + 3.0), pos2(r.min.x + 180.0, r.max.y - 3.0));
-    let lay = ui.interact(lay_r, ui.id().with("perflayout"), Sense::click());
-    let lc = pos2(r.min.x + 145.0, r.min.y + 14.0);
-    p.rect_filled(Rect::from_center_size(lc - vec2(0.0, 3.0), vec2(18.0, 2.0)), 0.0, WHITE);
-    p.rect_filled(Rect::from_center_size(lc + vec2(0.0, 3.0), vec2(18.0, 2.0)), 0.0, WHITE);
-    crate::icons_player::chevron_down(&p, pos2(r.min.x + 170.75, r.min.y + 14.5), 1.0, WHITE);
-    dropdown(ui, &lay, "perflayoutpop", |ui| {
-        // rekordbox's order: 2Deck Horizontal, 2Deck Vertical, 4Deck Horizontal, 4Deck Vertical, Browse.
-        let four = app.prefs.perf_four;
-        if ui.selectable_label(!four, "2Deck Horizontal").clicked() {
-            app.prefs.perf_four = false;
-            app.poll_decks();
-            app.save_prefs();
-            ui.memory_mut(|m| m.close_popup());
-        }
-        ui.add_enabled(false, egui::SelectableLabel::new(false, "2Deck Vertical")).on_disabled_hover_text("Not built in recordbox yet.");
-        if ui.selectable_label(four, "4Deck Horizontal").clicked() {
-            app.prefs.perf_four = true;
-            app.poll_decks();
-            app.save_prefs();
-            ui.memory_mut(|m| m.close_popup());
-        }
-        for name in ["4Deck Vertical", "Browse"] {
-            ui.add_enabled(false, egui::SelectableLabel::new(false, name)).on_disabled_hover_text("Not built in recordbox yet.");
-        }
-    });
-    // Panel buttons. Only the mixer exists; the others are shown unlit with the reason.
-    for (i, (name, built)) in [("FX", true), ("Sampler", true), ("Groove Circuit", false), ("Mixer", true), ("Rec", false)].iter().enumerate() {
+    // Layout selector: rekordbox's five layouts with their marks (ui_perf_layouts.rs).
+    crate::ui_perf_layouts::layout_selector(app, ui, r);
+    // Panel buttons, in the order rekordbox's `MainComponent::resized` places them: FX,
+    // GROOVE CIRCUIT (only while its function is enabled), Mix Point Link, Sampler, Mixer, Rec;
+    // each 20 pt, 17 pt after the one before. `kind`: 0 FX, 1 Mix Point Link, 2 Sampler,
+    // 3 Mixer, 4 Rec (the numbers `ui_perf_layouts::panel_tile` knows), 5 GROOVE CIRCUIT.
+    let mut tiles: Vec<(u8, &str, bool)> = vec![(0, "FX", true)];
+    if app.prefs.groove.enable {
+        tiles.push((5, "GROOVE CIRCUIT", true));
+    }
+    tiles.extend([(1, "Mix Point Link", crate::app_hooks::mpl_available(app)), (2, "Sampler", true), (3, "Mixer", true), (4, "Rec", true)]);
+    let mut last_right = r.min.x + 195.0;
+    for (i, (kind, name, built)) in tiles.iter().enumerate() {
         let tr = Rect::from_min_size(pos2(r.min.x + 195.0 + 37.0 * i as f32, r.min.y + 4.0), vec2(20.0, 20.0));
-        let resp = ui.interact(tr, ui.id().with(("panel", i)), Sense::click());
-        // The FX button shows and hides the FX panel; the mixer is always shown so far.
-        let lit = match i {
-            0 => app.prefs.perf_fx,
-            1 => app.prefs.perf_sampler,
-            _ => *built,
-        };
-        if i == 1 && resp.clicked() {
-            app.prefs.perf_sampler = !app.prefs.perf_sampler;
-            app.save_prefs();
+        last_right = tr.max.x;
+        let resp = ui.interact(tr, ui.id().with(("panel", *kind)), Sense::click());
+        if *kind == 1 {
+            // (Where the scripted Mix Point Link run finds the panel button.)
+            app.mixx.mpl.ui.rects.retain(|x| x.0 != "panel");
+            app.mixx.mpl.ui.rects.push(("panel".into(), tr));
         }
-        if i == 0 && resp.clicked() {
-            app.prefs.perf_fx = !app.prefs.perf_fx;
-            app.save_prefs();
+        let lit = match kind {
+            0 => app.prefs.perf_fx,
+            1 => crate::app_hooks::mpl_shown(app),
+            2 => app.prefs.perf_sampler,
+            3 => crate::ui_perf_layouts::mixer_shown(app),
+            4 => app.prefs.rec.panel,
+            _ => app.groove_visible(),
+        };
+        if resp.clicked() {
+            match kind {
+                0 => {
+                    app.prefs.perf_fx = !app.prefs.perf_fx;
+                    app.save_prefs();
+                }
+                1 => crate::app_hooks::toggle_mpl(app),
+                2 => {
+                    app.prefs.perf_sampler = !app.prefs.perf_sampler;
+                    app.save_prefs();
+                }
+                3 => crate::ui_perf_layouts::toggle_mixer(app),
+                4 => app.rec_toggle_panel(),
+                _ => crate::ui_groove::toggle_panel(app),
+            }
         }
         p.rect_filled(tr, 2.0, if lit { BLUE } else { BTN });
-        let c = tr.center();
-        let col = if lit { WHITE } else if *built { hex(0xC8C8C8) } else { hex(0x8C8C8C) };
-        match i {
-            0 => {
-                p.text(c, Align2::CENTER_CENTER, "FX", caps(8.5), col);
-            }
-            1 => {
-                for (k, h) in [4.0, 9.0, 6.0, 11.0, 5.0].iter().enumerate() {
-                    p.rect_filled(Rect::from_center_size(pos2(c.x - 6.0 + 3.0 * k as f32, c.y), vec2(1.5, *h)), 0.0, col);
-                }
-            }
-            2 => {
-                for gx in 0..3 {
-                    for gy in 0..3 {
-                        p.rect_filled(Rect::from_center_size(c + vec2((gx as f32 - 1.0) * 4.5, (gy as f32 - 1.0) * 4.5), vec2(3.5, 3.5)), 0.0, col);
-                    }
-                }
-            }
-            3 => {
-                for (k, y) in [2.5, -3.0, 1.0].iter().enumerate() {
-                    let x = c.x - 5.0 + 5.0 * k as f32;
-                    p.rect_filled(Rect::from_center_size(pos2(x, c.y), vec2(1.5, 13.0)), 0.0, col);
-                    p.rect_filled(Rect::from_center_size(pos2(x, c.y + *y), vec2(4.5, 2.5)), 0.0, col);
-                }
-            }
-            _ => crate::icons_player::record(&p, c, col),
+        if *kind == 5 {
+            crate::ui_groove::header_icon(app, ui, tr, lit);
+        } else {
+            // rekordbox's own tile; dimmed where the layout has no such panel.
+            crate::ui_perf_layouts::panel_tile(app, ui, *kind as usize, tr, lit);
         }
         let _ = resp.on_hover_text(if *built { format!("Show/Hide {name} panel") } else { format!("{name} panel: not built in recordbox yet.") });
     }
+    crate::ui_perf_layouts::link_button(ui, r, last_right);
+    crate::ui_perf_layouts::performance_tools(app, ui, r);
 }
 
 fn master_volume_control(ui: &mut Ui, center: egui::Pos2, volume: f32, tooltips: bool) -> Option<f32> {
@@ -182,6 +186,9 @@ fn header_output(app: &mut App, ui: &mut Ui, r: Rect) {
             if let Some(percent) = load {
                 ui.label(format!("Audio buffer load · {percent:.1}%"));
                 ui.label("100% means the output callback used its entire buffer period.");
+                let contended = crate::audio::AUDIO_CONTENDED.load(std::sync::atomic::Ordering::Relaxed);
+                let dropped = crate::audio::AUDIO_DROPPED.load(std::sync::atomic::Ordering::Relaxed);
+                ui.label(format!("Since launch: {contended} contended blocks, {dropped} dropped."));
             } else {
                 ui.label("Audio buffer load · output idle");
             }
@@ -201,20 +208,24 @@ pub fn header_bar(app: &mut App, ui: &mut Ui) -> bool {
     // 9.5–17), pull-down chevrons (8 × 4, 1 pt) centred at 115.75 and 170.75, y 14.5.
     let ip = crate::icons_player::chevron_down;
     let perf = app.performance();
-    p.text(pos2(r.min.x + 16.0, r.min.y + 14.0), Align2::LEFT_CENTER, if perf { "PERFORMANCE" } else { "EXPORT" }, caps(10.3), WHITE);
+    p.text(pos2(r.min.x + 16.0, r.min.y + 14.0), Align2::LEFT_CENTER, if perf { "PERFORMANCE" } else if crate::ui_edit::is_edit(app) { "EDIT" } else { "EXPORT" }, caps(10.3), WHITE);
     let mode_r = Rect::from_min_max(pos2(r.min.x + 8.0, r.min.y), pos2(r.min.x + 124.0, r.max.y));
     ip(&p, pos2(r.min.x + 115.75, r.min.y + 14.5), 1.0, WHITE);
     // The mode list: EXPORT and PERFORMANCE (rekordbox also has LIGHTING and EDIT).
     let mode = ui.interact(mode_r, ui.id().with("mode"), Sense::click());
     dropdown(ui, &mode, "modepop", |ui| {
         for (i, name) in ["EXPORT", "PERFORMANCE"].iter().enumerate() {
-            if ui.selectable_label(perf == (i == 1), *name).clicked() {
-                app.set_app_mode(i as u8);
+            if ui.selectable_label(app.prefs.app_mode == i as u8, *name).clicked() {
+                crate::prefs_shell::request_mode(app, i as u8);
                 ui.memory_mut(|m| m.close_popup());
             }
         }
-        for name in ["LIGHTING", "EDIT"] {
+        for name in ["LIGHTING"] {
             ui.add_enabled(false, egui::SelectableLabel::new(false, name)).on_disabled_hover_text("Not built in recordbox yet.");
+        }
+        if ui.selectable_label(crate::ui_edit::is_edit(app), "EDIT").clicked() {
+            app.set_app_mode(crate::ui_edit::MODE_EDIT);
+            ui.memory_mut(|m| m.close_popup());
         }
     });
     let window_button = Rect::from_min_max(pos2(r.right() - 28.0, r.top()), r.max);
@@ -230,6 +241,10 @@ pub fn header_bar(app: &mut App, ui: &mut Ui) -> bool {
     }
     let toggle_library = tipf(response, label).clicked();
     header_output(app, ui, r);
+    if crate::ui_edit::is_edit(app) {
+        crate::ui_edit_view::header(app, ui, r);
+        return toggle_library;
+    }
     if perf {
         performance_header(app, ui, r);
         return toggle_library;
@@ -261,10 +276,14 @@ pub fn header_bar(app: &mut App, ui: &mut Ui) -> bool {
     let rec_r = Rect::from_min_size(pos2(r.min.x + 310.0, r.min.y + 4.0), vec2(20.0, 20.0));
     let rec = ui.interact(rec_r, ui.id().with("autoan"), Sense::click());
     p.rect_filled(rec_r, 2.0, if rec.hovered() { hex(0x323232) } else { BTN });
-    crate::icons_player::record(&p, rec_r.center(), if app.prefs.auto_analysis { WHITE } else { OFF });
-    if tipf(rec, if app.prefs.auto_analysis { "Auto Analysis On (click to turn off)" } else { "Auto Analysis Off (click to turn on)" }).clicked() {
-        app.prefs.auto_analysis = !app.prefs.auto_analysis;
-        app.save_prefs();
+    // (rekordbox's circle mark here is the recording panel's button; Auto Analysis has its
+    // switch in Preferences > Analysis.)
+    if app.prefs.rec.panel_export {
+        p.rect_filled(rec_r, 2.0, BLUE);
+    }
+    crate::icons_player::record(&p, rec_r.center(), WHITE);
+    if tipf(rec, "Show/Hide Rec panel").clicked() {
+        app.rec_toggle_panel();
     }
     toggle_library
 }
@@ -318,13 +337,7 @@ fn menus(app: &mut App, ui: &mut Ui) {
         }
         if ui.button("Backup Library…").clicked() {
             ui.close_menu();
-            if let Some(f) = rfd::FileDialog::new().set_file_name("recordbox-library-backup.db").save_file() {
-                let _ = app.db.conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);");
-                match std::fs::copy(crate::db::data_dir().join("library.db"), &f) {
-                    Ok(_) => app.toast("Library backed up."),
-                    Err(e) => app.toast_err(format!("Backup failed: {e}")),
-                }
-            }
+            crate::menus::handle(app, "backup");
         }
     });
     ui.menu_button(small("View"), |ui| {
@@ -635,6 +648,7 @@ pub fn browser(app: &mut App, panel: &mut Ui) {
             }
         }
     }
+    let list = crate::ui_automix::pane(app, ui, list);
     let mut lui = ui.new_child(egui::UiBuilder::new().max_rect(list));
     lui.set_clip_rect(list.intersect(ui.clip_rect()));
     list_for_view(app, &mut lui);
@@ -692,8 +706,10 @@ pub(crate) fn list_for_view(app: &mut App, lui: &mut Ui) {
     match app.view.clone() {
         View::Device { root, node } => device_list(app, lui, &root, node, None),
         View::DeviceHistory { root, id } => device_list(app, lui, &root, None, Some(id)),
+        View::Explorer(dir) if crate::ui_rec::owns(app, &dir) => crate::ui_rec::list(app, lui, &dir),
         View::Explorer(dir) => explorer_list(app, lui, &dir),
         View::Source { kind, node } => crate::ui_library_ext::source_list(app, lui, kind, &node),
+        View::Sampler(id) => crate::ui_sampler_lib::list(app, lui, id),
         _ => track_list(app, lui),
     }
 }
@@ -715,11 +731,12 @@ enum Tile {
 /// the selection colour, a 21 pt band behind it and a 2 pt bar at the window edge.
 fn icon_strip(app: &mut App, ui: &mut Ui, r: Rect) {
     use crate::icons_src as src;
-    let items: [(src::SrcIcon, Tile, &str); 12] = [
+    let items: [(src::SrcIcon, Tile, &str); 13] = [
         (src::collection, Tile::Side(SideMode::Collection), "Collection"),
         (src::playlist, Tile::Side(SideMode::Playlists), "Playlists"),
         (src::related, Tile::Side(SideMode::Related), "Related Tracks"),
         (src::matching, Tile::Suggest, "Track Suggestion"),
+        (crate::ui_sampler_lib::tile_icon, Tile::Side(SideMode::Sampler), "Sampler"),
         (src::tag_list, Tile::TagList, "Tag List"),
         (src::hot_cue_bank, Tile::HotCueBank, "Hot Cue Bank List"),
         (src::itunes, Tile::Side(SideMode::Itunes), "iTunes"),
@@ -727,12 +744,12 @@ fn icon_strip(app: &mut App, ui: &mut Ui, r: Rect) {
         (src::explorer, Tile::Side(SideMode::Explorer), "Explorer"),
         (src::device, Tile::Side(SideMode::Devices), "Devices"),
         (src::history, Tile::Side(SideMode::History), "Histories"),
-        (src::recording, Tile::Off, "Recordings (not available in this app)"),
+        (src::recording, Tile::Side(SideMode::Recordings), "Recordings"),
     ];
     // The highlight is bright while the tree side was clicked last (reference 04) and muted
     // while the track list was, or nothing yet (references 01 and 02).
     let hi = if app.ext.tree_focus { TILE_ON } else { ROW_SEL };
-    for (i, (draw, tile, name)) in items.iter().filter(|it| app.prefs.tree_item(it.2)).collect::<Vec<_>>().into_iter().enumerate() {
+    for (i, (draw, tile, name)) in items.iter().filter(|it| app.prefs.tree_item(it.2) && crate::ui_sampler_lib::tile_shown(app, it.2)).collect::<Vec<_>>().into_iter().enumerate() {
         let c = pos2(r.min.x + 16.0, r.min.y + 34.0 + i as f32 * 20.0);
         let rr = Rect::from_center_size(c, vec2(18.0, 18.0));
         let on = match tile {
@@ -790,7 +807,9 @@ fn icon_strip(app: &mut App, ui: &mut Ui, r: Rect) {
                         }
                         SideMode::Itunes => app.set_view(View::Source { kind: crate::library_ext::SRC_ITUNES, node: String::new() }),
                         SideMode::RekordboxXml => app.set_view(View::Source { kind: crate::library_ext::SRC_RBXML, node: String::new() }),
+                        SideMode::Recordings => app.set_view(View::Explorer(crate::ui_rec::rec_dir(&app.prefs.rec).to_string_lossy().to_string())),
                         SideMode::Playlists | SideMode::Suggest => {}
+                        SideMode::Sampler => crate::ui_sampler_lib::open(app),
                     }
                 }
             }
@@ -824,7 +843,8 @@ fn right_icons(app: &mut App, ui: &mut Ui, r: Rect) {
         (src::info, "Display information window."),
         (src::sub_browser, "Display sub-browser window."),
     ];
-    let y0 = (50.0 + (r.height() - 298.0) * 0.4548).round().max(30.0);
+    // rekordbox's own rule (`LowerContainer::resized`): half the height (164 at least) less 114.
+    let y0 = (r.height() / 2.0).max(164.0).floor() - 114.0;
     let now = crate::ui_browser_ext::right_panel(app);
     for (i, (draw, tipt)) in items.iter().enumerate() {
         let rr = Rect::from_center_size(pos2(r.min.x + 12.0, r.min.y + y0 + 34.0 * i as f32), vec2(18.0, 18.0));
@@ -850,6 +870,7 @@ fn right_icons(app: &mut App, ui: &mut Ui, r: Rect) {
             crate::ui_browser_ext::set_right_panel(app, if on { 0 } else { i as u8 + 1 });
         }
     }
+    crate::ui_automix::strip_tile(app, ui, r, y0);
 }
 
 /// Kind of glyph drawn before a tree row's text.
@@ -1097,6 +1118,8 @@ pub(crate) fn tree_pane(app: &mut App, ui: &mut Ui, drop: &mut Vec<(Rect, i64)>)
         SideMode::Itunes => crate::ui_library_ext::source_tree(app, ui, crate::library_ext::SRC_ITUNES),
         SideMode::RekordboxXml => crate::ui_library_ext::source_tree(app, ui, crate::library_ext::SRC_RBXML),
         SideMode::Explorer => explorer_tree(app, ui),
+        SideMode::Recordings => crate::ui_rec::tree(app, ui),
+        SideMode::Sampler => crate::ui_sampler_lib::tree(app, ui, drop),
     }
 }
 
@@ -1197,70 +1220,7 @@ fn node_rows(app: &mut App, ui: &mut Ui, parent: i64, depth: usize, drop: &mut V
             }
         }
         let nn = n.clone();
-        resp.context_menu(|ui| {
-            let parent_for_new = if nn.kind == NodeKind::Folder { nn.id } else { nn.parent };
-            if ui.button("Create New Playlist").clicked() {
-                app.create_node(parent_for_new, NodeKind::Playlist);
-                ui.close_menu();
-            }
-            if ui.button("Create New Intelligent Playlist").clicked() {
-                app.create_node(parent_for_new, NodeKind::Smart);
-                ui.close_menu();
-            }
-            if ui.button("Create New Folder").clicked() {
-                app.create_node(parent_for_new, NodeKind::Folder);
-                ui.close_menu();
-            }
-            ui.separator();
-            if nn.kind == NodeKind::Smart && ui.button("Edit the Intelligent Playlist").clicked() {
-                app.dialogs.smart_edit = Some((Some(nn.id), nn.parent, nn.name.clone(), nn.smart.clone().unwrap_or_default()));
-                ui.close_menu();
-            }
-            if nn.kind == NodeKind::Smart && ui.button("Convert to a normal playlist").clicked() {
-                let tracks = nn.smart.as_ref().map(|r| app.smart_tracks(r)).unwrap_or_default();
-                let id = app.db.create_node(nn.parent, &format!("{} (copy)", nn.name), NodeKind::Playlist, None).unwrap_or(0);
-                let _ = app.db.set_playlist_tracks(id, &tracks);
-                app.reload_playlists();
-                ui.close_menu();
-            }
-            let what = if nn.kind == NodeKind::Folder { "Folder" } else { "Playlist" };
-            if ui.button(format!("Rename {what}")).clicked() {
-                app.dialogs.rename = Some((nn.id, nn.name.clone()));
-                ui.close_menu();
-            }
-            if nn.kind == NodeKind::Playlist && ui.button("Sort Items by Track Title").clicked() {
-                let mut v = app.db.playlist_tracks(nn.id).unwrap_or_default();
-                v.sort_by_key(|t| app.track(*t).map(|t| crate::smart::fold(&t.display_title())).unwrap_or_default());
-                let _ = app.db.set_playlist_tracks(nn.id, &v);
-                app.reload_playlists();
-                ui.close_menu();
-            }
-            if ui.button(format!("Export {what}")).clicked() {
-                open_export(app, vec![nn.id], vec![]);
-                ui.close_menu();
-            }
-            crate::ui_library_ext::node_menu_extra(app, ui, &nn);
-            if ui.button("Move to top level").clicked() {
-                let _ = app.db.move_node(nn.id, 0, 0);
-                app.reload_playlists();
-                ui.close_menu();
-            }
-            ui.menu_button("Move into folder", |ui| {
-                let folders: Vec<PlaylistNode> = app.nodes.iter().filter(|f| f.kind == NodeKind::Folder && f.id != nn.id).cloned().collect();
-                for f in folders {
-                    if ui.button(&f.name).clicked() {
-                        let _ = app.db.move_node(nn.id, f.id, 0);
-                        app.reload_playlists();
-                        ui.close_menu();
-                    }
-                }
-            });
-            ui.separator();
-            if ui.button(format!("Delete {what}")).clicked() {
-                app.dialogs.confirm_delete_node = Some((nn.id, nn.name.clone(), nn.kind == NodeKind::Folder));
-                ui.close_menu();
-            }
-        });
+        resp.context_menu(|ui| crate::ui_library_ext::node_menu(app, ui, &nn));
         if n.kind == NodeKind::Folder && open {
             node_rows(app, ui, n.id, depth + 1, drop);
         }
@@ -1388,8 +1348,10 @@ fn devices_tree(app: &mut App, ui: &mut Ui) {
                 app.check_player_cue_edits(&r2, true);
                 ui.close_menu();
             }
-            if ui.button("Show in Finder").clicked() {
-                let _ = std::process::Command::new("/usr/bin/open").arg(&r2).spawn();
+            if ui.button("Open device folder").clicked() {
+                if let Err(err) = open_directory(std::path::Path::new(&r2)) {
+                    app.toast_err(format!("Could not open the device folder: {err}"));
+                }
                 ui.close_menu();
             }
             if fs != "folder" && ui.button("Disconnect USB Device").clicked() {
@@ -1593,8 +1555,10 @@ fn explorer_list(app: &mut App, ui: &mut Ui, dir: &str) {
                     app.import_paths(vec![f.clone()], None);
                     ui.close_menu();
                 }
-                if ui.button("Show in Finder").clicked() {
-                    let _ = std::process::Command::new("/usr/bin/open").arg("-R").arg(f).spawn();
+                if ui.button(crate::ui_browser::REVEAL_FILE).clicked() {
+                    if let Err(err) = crate::ui_browser::reveal_path(std::path::Path::new(f)) {
+                        app.toast_err(format!("Could not open the file location: {err}"));
+                    }
                     ui.close_menu();
                 }
             });
@@ -1668,9 +1632,11 @@ fn device_list(app: &mut App, ui: &mut Ui, root: &str, node: Option<u32>, histor
         body.add_space(30.0);
         let catalog = dev.catalog_label();
         let blocker = dev.write_blocker.clone();
+        let inspect_one = matches!(dev.layout, Some(crate::export::usb::DeviceLayout::OneLibrary | crate::export::usb::DeviceLayout::Mixed));
         body.vertical_centered(|ui| {
             ui.strong(catalog);
             ui.label(RichText::new(root).size(11.0).color(DIM));
+            if inspect_one { app.device_ui.one_inspector.button(ui, root); }
             if let Some(reason) = blocker {
                 ui.label(RichText::new(reason).color(CAUTION_TX));
                 return;
@@ -1756,13 +1722,14 @@ pub fn col_width(app: &App, c: Col) -> f32 {
     app.prefs.widths.get(&c.key()).copied().unwrap_or(c.width())
 }
 
-fn view_title(app: &App) -> String {
+pub fn view_title(app: &App) -> String {
     match &app.view {
         View::Collection => "Collection".into(),
         View::Playlist(id) => app.node(*id).map(|n| n.name.clone()).unwrap_or_default(),
         View::Device { .. } | View::DeviceHistory { .. } | View::Explorer(_) | View::Source { .. } => String::new(),
         View::History(id) => app.ext.histories.iter().find(|h| h.id == *id).map(|h| h.name.clone()).unwrap_or_else(|| "Histories".into()),
         View::TagList => "Tag List".into(),
+        View::Sampler(_) => String::new(),
         View::Matching => format!("Matching — {}", app.related_source().and_then(|id| app.track(id)).map(|t| t.display_title()).unwrap_or_else(|| "load or select a track".into())),
         View::Suggest(k) => format!("{} — {}", if *k == 0 { "Track Suggestion" } else { crate::browser_ext::SUGGEST_KINDS[(*k as usize).min(3)] }, app.related_source().and_then(|id| app.track(id)).map(|t| t.display_title()).unwrap_or_else(|| "load or select a track".into())),
         View::Related => format!("Related Tracks — {}", app.related_source().and_then(|id| app.track(id)).map(|t| t.display_title()).unwrap_or_else(|| "load or select a track".into())),
@@ -1808,38 +1775,35 @@ pub(crate) fn track_list(app: &mut App, ui: &mut Ui) {
     }
     let two = app.two_players();
     if !in_sub {
-        // PLAYER A (load target): a 16 pt high #282828 box 80 pt wide, its last 16 pt a
-        // separate chevron part.
+        // Traffic Light (traffic.rs): a 16 pt high #282828 box 80 pt wide. Its first 63.5 pt
+        // switch the feature on and off and name the target; the last 16 pt are a separate
+        // pull-down part that picks the target.
         let pa = Rect::from_min_max(pos2(gx, bar.min.y + 5.0), pos2(gx + 80.0, bar.min.y + 21.0));
-        p.rect_filled(Rect::from_min_max(pa.min, pos2(pa.max.x - 16.5, pa.max.y)), egui::CornerRadius { nw: 2, sw: 2, ne: 0, se: 0 }, BTN);
-        p.rect_filled(Rect::from_min_max(pos2(pa.max.x - 16.0, pa.min.y), pa.max), egui::CornerRadius { nw: 0, sw: 0, ne: 2, se: 2 }, BTN);
-        p.text(pos2(pa.min.x + 7.0, pa.center().y), Align2::LEFT_CENTER, if app.performance() { format!("DECK {}", app.px.active + 1) } else if two && app.load_target == 1 { "PLAYER B".to_string() } else { "PLAYER A".to_string() }, rb_bold(9.75), WHITE);
+        let on = app.prefs.traffic.on;
+        let target = app.traffic_target();
+        let (label, tip_target) = crate::traffic::target_label(target);
+        let left = Rect::from_min_max(pa.min, pos2(pa.max.x - 16.5, pa.max.y));
+        let right = Rect::from_min_max(pos2(pa.max.x - 16.0, pa.min.y), pa.max);
+        crate::traffic::paint_button(&p, left, right, on);
+        p.text(pos2(pa.min.x + 7.0, pa.center().y), Align2::LEFT_CENTER, label, rb_bold(9.75), WHITE);
         {
             let c = pos2(pa.max.x - 8.0, pa.center().y + 0.5);
             p.add(egui::Shape::line(vec![c + vec2(-3.6, -1.8), c + vec2(0.0, 1.8), c + vec2(3.6, -1.8)], Stroke::new(1.0, WHITE)));
         }
-        let par = ui.interact(pa.intersect(bar), ui.id().with("playera"), Sense::click());
-        let par = if app.prefs.tooltips { par.on_hover_text("Player that double-click or Return loads tracks into.") } else { par };
+        let tl = ui.interact(left.intersect(bar), ui.id().with("traffic_on"), Sense::click());
+        let tl = if app.prefs.tooltips { tl.on_hover_text(format!("{tip_target}\n{}", crate::traffic::TIP_ENABLE)) } else { tl };
+        if tl.clicked() {
+            app.prefs.traffic.on = !on;
+            app.save_prefs();
+        }
+        let par = ui.interact(right.intersect(bar), ui.id().with("playera"), Sense::click());
+        let par = if app.prefs.tooltips { par.on_hover_text(crate::traffic::TIP_TARGET) } else { par };
         dropdown(ui, &par, "playera_menu", |ui| {
-            // Performance: the decks of the layout; the one chosen becomes the active deck.
-            if app.performance() {
-                for n in 0..app.deck_count() {
-                    if ui.selectable_label(app.px.active == n, format!("DECK {}", n + 1)).clicked() {
-                        app.activate_deck(n);
-                        ui.memory_mut(|m| m.close_popup());
-                    }
+            for t in app.traffic_targets() {
+                if ui.selectable_label(t == target, crate::traffic::target_label(t).0).clicked() {
+                    app.set_traffic_target(t);
+                    ui.memory_mut(|m| m.close_popup());
                 }
-                return;
-            }
-            // Load target: deck B exists in the 2 Players layout.
-            if ui.selectable_label(app.load_target == 0 || !two, "PLAYER A").clicked() {
-                app.load_target = 0;
-            }
-            if ui.add_enabled(two, egui::SelectableLabel::new(two && app.load_target == 1, "PLAYER B")).clicked() {
-                app.load_target = 1;
-            }
-            if !two {
-                ui.label(RichText::new("PLAYER B is available in the 2 Players layout.").size(11.0).color(DIM));
             }
         });
     }
@@ -1908,7 +1872,7 @@ pub(crate) fn track_list(app: &mut App, ui: &mut Ui) {
         app.search = s;
         app.list_dirty = true;
     }
-    if app.ext.sub_focus == in_sub && ui.input(|i| i.modifiers.command && i.key_pressed(egui::Key::F)) {
+    if app.ext.sub_focus == in_sub && (ui.input(|i| i.modifiers.command && i.key_pressed(egui::Key::F)) || ui.ctx().data_mut(|d| d.remove_temp::<bool>(egui::Id::new("kc_search_focus"))).unwrap_or(false)) {
         te.request_focus();
     }
     // The tile above the right icon strip (skin brows_tagListPalette / playListPalette: 18 pt,
@@ -2044,6 +2008,10 @@ pub(crate) fn track_list(app: &mut App, ui: &mut Ui) {
                 x += cw;
                 continue;
             }
+            if *c == Col::Status && crate::ui_edit::attribute_header(app, ui, &resp, Rect::from_min_max(pos2(cr.min.x + 60.0, cr.min.y), cr.max)) {
+                x += cw;
+                continue;
+            }
             if *c == Col::Status && resp.clicked() {
                 app.filter_open = !app.filter_open;
                 app.list_dirty = true;
@@ -2109,6 +2077,7 @@ pub(crate) fn track_list(app: &mut App, ui: &mut Ui) {
             app.scroll_to_selected = false;
         }
         let mut drop_line: Option<usize> = None;
+        app.traffic_now = if app.ext.in_sub { Vec::new() } else { app.traffic_matches() };
         let vout = sa.show_rows(ui, rh, n, |ui, range| {
             for i in range {
                 let id = app.list[i];
@@ -2212,7 +2181,9 @@ pub(crate) fn track_list(app: &mut App, ui: &mut Ui) {
                             Col::Color => app.ext.color_pick = Some((id, pos2(cr.min.x, rr.max.y), now)),
                             // A click on a cell of the row already selected edits it in place
                             // (after the double-click time, so a double-click still loads).
-                            c if crate::library_ext::editable(c) && was_sole && !cmd && !shift => {
+                            // (Preferences > Advanced > Browse > Library Edit "Double-click":
+                            // then a double-click edits instead.)
+                            c if crate::library_ext::editable(c) && was_sole && !cmd && !shift && !app.prefs.rb.inline_edit_dblclick => {
                                 app.ext.edit_pending = Some((id, c, now));
                                 ui.ctx().request_repaint_after(std::time::Duration::from_millis(360));
                             }
@@ -2237,9 +2208,19 @@ pub(crate) fn track_list(app: &mut App, ui: &mut Ui) {
                         app.set_anchor(i);
                     }
                 }
-                if resp.double_clicked() {
+                let dbl_edit = resp.double_clicked() && app.prefs.rb.inline_edit_dblclick && hit.map(|h| crate::library_ext::editable(h.0)).unwrap_or(false);
+                if dbl_edit {
+                    // Library Edit "Double-click" (`ListViewer::cellClickedWithLeftButton`
+                    // 0x100408b50): the cell double-clicked is edited.
+                    if let Some((c, _, _)) = hit {
+                        app.ext.edit_pending = Some((id, c, ui.input(|inp| inp.time) - 1.0));
+                    }
+                } else if resp.double_clicked() {
                     app.ext.edit_pending = None;
-                    if !matches!(hit.map(|h| h.0), Some(Col::Preview | Col::Rating | Col::Color)) {
+                    // rekordbox loads on a double click in EXPORT mode only (traced:
+                    // `ListViewer::loadTrackWhenRowDoubleClicked`); in PERFORMANCE a track goes
+                    // to a deck by dragging, the right-click menu or a Load key.
+                    if !app.performance() && !matches!(hit.map(|h| h.0), Some(Col::Preview | Col::Rating | Col::Color)) {
                         app.preview_stop();
                         app.load_track(id);
                     }
@@ -2269,6 +2250,9 @@ pub(crate) fn track_list(app: &mut App, ui: &mut Ui) {
                     app.selected.insert(id);
                     app.set_anchor(i);
                 }
+                // "Display the menu when long-pressing a track for 1 second."
+                // (`CustomTableListBox::RowComp::mouseDown` 0x101a2a764 starts a 1000 ms timer.)
+                crate::app_hooks::long_press_menu(app, ui, &resp, id, i);
                 resp.context_menu(|ui| {
                     let sel: Vec<i64> = app.list.iter().copied().filter(|t| app.selected.contains(t)).collect();
                     track_menu_items(app, ui, &sel);
@@ -2447,7 +2431,7 @@ thread_local! {
     static PREVIEW_MESHES: std::cell::RefCell<HashMap<(i64, usize, u32, u8), (u64, egui::Mesh)>> = std::cell::RefCell::new(HashMap::new());
 }
 
-fn draw_cell(app: &mut App, ui: &mut Ui, c: Col, t: &Track, r: Rect, row: usize) {
+pub(crate) fn draw_cell(app: &mut App, ui: &mut Ui, c: Col, t: &Track, r: Rect, row: usize) {
     let p = ui.painter().with_clip_rect(r.shrink2(vec2(3.0, 0.0)));
     let text_pos = |right: bool| if right { pos2(r.max.x - 4.5, r.center().y) } else { pos2(r.min.x + 5.0, r.center().y) };
     let font = list_font(app);
@@ -2606,7 +2590,16 @@ fn draw_cell(app: &mut App, ui: &mut Ui, c: Col, t: &Track, r: Rect, row: usize)
             }
         }
         Col::Time => txt(if t.duration > 0.0 { fmt_time(t.duration, false) } else { String::new() }),
-        Col::Key => txt(t.key_label(app.prefs.key_alnum)),
+        Col::Key => {
+            // Traffic Light: a matching key stands black on a green cell that leaves 1 pt of
+            // the row above and below it.
+            if !app.ext.in_sub && !app.traffic_now.is_empty() && app.traffic_now.contains(&t.key) {
+                ui.painter().with_clip_rect(r).rect_filled(Rect::from_min_max(pos2(r.min.x, r.min.y + 1.0), pos2(r.max.x - 1.0, r.max.y - 1.0)), 0.0, Color32::from_rgb(0x00, 0xFF, 0x00));
+                p.text(text_pos(false), Align2::LEFT_CENTER, t.key_label(app.prefs.key_alnum), font.clone(), Color32::BLACK);
+            } else {
+                txt(t.key_label(app.prefs.key_alnum))
+            }
+        }
         Col::DateAdded => txt(t.date_added.get(..10).unwrap_or(&t.date_added).to_string()),
         Col::Color => {
             if t.color > 0 {

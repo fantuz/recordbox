@@ -5,10 +5,14 @@
 //!
 //! FILTER follows rekordbox's traced rules exactly in its blend zones, cutoff curves and
 //! resonance law (the filters themselves are ordinary second-order sections; rekordbox's own
-//! filter shape was not traced). NOISE, CRUSH and DUB ECHO follow the traced outlines; JET,
-//! SPACE, SWEEP, PITCH and GATE COMP are recordbox's own takes on the effects of those names
-//! (GATE COMP with the thresholds and time constants of rekordbox's `GateCore` / `CompCore`
-//! parameter lists).
+//! filter shape was not traced). JET (delay, feedback and mix for every knob position), DUB
+//! ECHO (its two short tape echoes: time, feedback and input level for every knob position)
+//! and SWEEP (the notch and band-pass edges) follow rekordbox's parameter code; the comb,
+//! echo and filter bodies are plain ones. PITCH (`ColorFxPitch`: range and COLOR law, through
+//! rekordbox's pitch shifter in `fx_core`) and NOISE (`ColorFxNoise`: level, band-pass centre,
+//! Q and gain) are traced. CRUSH's hold, bit mask and mix are traced (`ColorFxCrush`); its high-pass cutoffs are
+//! a log line through the ends of rekordbox's table. SPACE and GATE COMP are ported from rekordbox's code in `cfx_space`. LPF and HPF (`InstFxLPF` / `InstFxHPF`) exist
+//! for the PAD FX pads and MERGE FX.
 
 /// The USER menu's nine types in rekordbox's order (the effect if recordbox has it).
 pub const LIST: [(&str, Option<u8>); 9] = [("FILTER", Some(0)), ("JET", Some(1)), ("CRUSH", Some(2)), ("NOISE", Some(3)), ("PITCH", Some(4)), ("SPACE", Some(5)), ("DUB ECHO", Some(6)), ("SWEEP", Some(7)), ("GATE COMP", Some(8))];
@@ -19,7 +23,100 @@ pub const LIST: [(&str, Option<u8>); 9] = [("FILTER", Some(0)), ("JET", Some(1))
 pub const DEFAULT_LIST: [u8; 1] = [0];
 
 pub fn name(kind: u8) -> &'static str {
-    LIST.iter().find(|x| x.1 == Some(kind)).map(|x| x.0).unwrap_or("FILTER")
+    match kind {
+        LPF => "LPF",
+        HPF => "HPF",
+        _ => LIST.iter().find(|x| x.1 == Some(kind)).map(|x| x.0).unwrap_or("FILTER"),
+    }
+}
+
+/// PAD FX's LPF and HPF (rekordbox's `InstFxLPF` / `InstFxHPF`), beside the nine types.
+pub const LPF: u8 = 12;
+pub const HPF: u8 = 13;
+
+/// Cutoff of rekordbox's CFX-style low-pass (12 kHz down to 93 Hz) or high-pass (61 Hz up to
+/// 8.95 kHz) for how far the knob is turned (0..1): its 124-step tables, every 15th step.
+pub fn inst_fc(hp: bool, x: f32) -> f32 {
+    const LP: [f32; 9] = [12000.0, 6634.1, 3685.5, 1949.0, 990.7, 509.1, 249.7, 132.7, 93.0];
+    const HP: [f32; 9] = [61.0, 154.0, 292.0, 523.0, 994.0, 1750.0, 3136.0, 5418.0, 8951.0];
+    crate::fx::knots(if hp { &HP } else { &LP }, x)
+}
+
+/// `InstFxLPF` / `InstFxHPF::updateParameter` for the knob `a` and PARAM `p` in 8-bit steps:
+/// (share of the filtered sound, cutoff, resonance).
+pub fn inst_law(hp: bool, a: f32, p: f32) -> (f32, f32, f32) {
+    if a < 4.0 {
+        return (0.0, if hp { 61.0 } else { 12000.0 }, 1.44);
+    }
+    let wet = if a > 37.0 { 1.0 } else { ((a - 4.0) * 0.029412).min(1.0) };
+    let u = if hp { (a - 3.0) * 0.0039683 } else { (255.0 - a) * 0.0039683 };
+    let v7 = (1.0 - u) - u * (1.0 - u);
+    let k = (255.0 - p) * 0.0039216;
+    let v8 = 1.44 - k * k * (255.0 - p) * if hp { 0.0050974 } else { 0.0056471 };
+    (wet, inst_fc(hp, (a / 2.0).floor() / 123.0), (v8 - v7.powi(8) * v8).max(0.0))
+}
+
+/// rekordbox's CFX JET for COLOR `c` and PARAM `p` in 8-bit steps (`ColorFxJetRZX::
+/// updateAndSetParameter`): (dry, wet, comb delay in ms, feedback). Left the comb grows from
+/// 2.67 ms to 20 ms, right it shrinks to 0.167 ms.
+pub fn jet_law(c: f32, p: f32) -> (f32, f32, f32, f32) {
+    let (dry, wet, delay, mut fb);
+    if (124.0..=131.0).contains(&c) {
+        return (1.0, 0.0, 2.6667, 0.6);
+    } else if c < 124.0 {
+        let n = 124.0 - c;
+        delay = 2.6667 + 0.13978 * n;
+        (dry, wet) = if c >= 105.0 { (1.0 - 0.015 * n, 0.035 * n) } else { (0.7, 0.7) };
+        fb = if c >= 25.0 { 0.55 } else if c < 7.0 { 0.3 } else { 1.8526 - 0.013158 * n };
+    } else {
+        let m = c - 131.0;
+        delay = if c <= 140.0 { 2.6667 } else { (2.8623 - 0.021739 * m).max(0.16667) };
+        (dry, wet) = if c <= 150.0 { (1.0 - 0.015 * m, 0.035 * m) } else { (0.7, 0.7) };
+        fb = if c <= 193.0 { 0.6 } else if c <= 217.0 { 1.344 - 0.012 * m } else { 0.3 };
+    }
+    if p <= 123.0 {
+        fb *= p * 0.0080645;
+    } else if p >= 132.0 {
+        fb *= 0.0026882 * p + 0.64785;
+    }
+    (dry, wet, delay, fb.min(0.97))
+}
+
+/// rekordbox's CFX DUB ECHO for COLOR `c` and PARAM `p` in 8-bit steps (`ColorFxDubEcho::
+/// onCfxKnobValueChanged`): (input level, echo time in ms, feedback). The time does not
+/// follow the tempo: 55 ms near the centre, up to 189 ms fully left and 150 ms fully right.
+pub fn dub_law(c: f32, p: f32) -> (f32, f32, f32) {
+    if c <= 115.0 {
+        let n = 116.0 - c;
+        let x = n * 0.0086207;
+        let fbp = if p <= 115.0 { 0.0075 * p } else if p < 140.0 { 0.87 } else { 0.87 + 0.0010345 * (p - 139.0) };
+        let k = if p < 140.0 { 1.0 } else { (255.0 - p) * 0.0086207 };
+        if x >= 0.2 { ((n * 0.028736).min(1.0), 55.0 + 167.5 * (x - 0.2), (fbp + 0.1 * (x - 0.2) * k).min(0.993)) } else { ((n * 0.028736).min(1.0), 55.0, 0.87) }
+    } else if c > 138.0 {
+        let m = c - 139.0;
+        let fbp = if p <= 115.0 { 0.0075862 * p } else if p < 140.0 { 0.88 } else { 0.88 + 0.00094828 * (p - 139.0) };
+        let k = if p < 140.0 { 1.0 } else { (255.0 - p) * 0.0086207 };
+        if m * 0.0086207 >= 0.2 { ((m * 0.028736).min(1.0), 31.25 + 1.0237 * m, (fbp + 0.00086207 * m * k).min(0.993)) } else { ((m * 0.028736).min(1.0), 55.0, fbp.min(0.993)) }
+    } else {
+        (0.0, 55.0, 0.87)
+    }
+}
+
+/// rekordbox's CFX SWEEP (`ColorFxSweep::updateFilterCoef`) for COLOR `c` and PARAM `p` in
+/// 8-bit steps: PARAM picks a frequency (60 Hz .. 1 kHz .. 20 kHz). Left of the centre the
+/// sound loses a band around it that widens with the knob (what is kept: below the first
+/// frequency and above the second); right of it only a band around it is kept, narrowing
+/// with the knob (high-pass at the first, low-pass at the second, with the resonance).
+pub fn sweep_law(c: f32, p: f32) -> (f32, f32, f32) {
+    let f = if p < 128.0 { 60.0 + 7.4015748 * p } else { 1000.0 + 149.606299 * (p - 128.0) };
+    if c < 125.0 {
+        let t = c.min(123.0) / 123.0;
+        (60.0 * (f / 60.0).powf(t), 20000.0 * (f / 20000.0).powf(t), 1.0)
+    } else {
+        let k = if c > 130.0 { (256.0 - c) * (256.0 - c) * 0.00100781053 + 1.4 } else { 17.4 };
+        let q = if c > 130.0 && c <= 161.0 { (162.0 - c) * 0.009375 + 0.707945784 } else if c > 161.0 { 0.707945784 } else { 1.00794578 };
+        (f / k, (f * k).min(20000.0), q)
+    }
 }
 
 #[derive(Clone, Copy, Default)]
@@ -92,6 +189,67 @@ pub fn filter_law(c: f32, p: f32) -> (f32, f32, f32, f32, f32, f32) {
 
 const ECHO_LEN: usize = 24000;
 
+/// CFX CRUSH for COLOR `c` and PARAM `p` (8-bit): (hold ms, float bit mask, high-pass Hz).
+/// PARAM sets the longest hold (0.104 .. 0.5 ms left of its centre, 0.5 .. 0.75 above, never
+/// over 0.5 in use); COLOR shortens it toward the centre from either side. Above 144 PARAM also
+/// keeps fewer mantissa bits.
+pub fn crush_law(c: i32, p: i32) -> (f32, u32, f32) {
+    let top = if p < 128 { 0.10417 + 0.0030924 * p as f32 } else { 0.5 + 0.0019531 * (p - 128) as f32 };
+    let hold = if c <= 127 { top - c as f32 * 0.0078431 * top } else { top * (c as f32 * 0.0078431 - 1.0) }.clamp(0.0, 0.5);
+    let mask = if hold <= 0.10417 || p <= 144 { u32::MAX } else { (0xFFFF_0000u32).wrapping_shl(((8 * p - 1024) >> 7) as u32) };
+    let hp = if c > 127 { 20.0 * (4129.0f32 / 20.0).powf(((c - 128) as f32 / 127.0).clamp(0.0, 1.0)) } else { 20.0 };
+    (hold, mask, hp)
+}
+
+/// CFX NOISE's noise level for COLOR in 8-bit steps (`ColorFxNoise::calcColorGain`).
+pub fn noise_color_gain(c: i32) -> f32 {
+    if c <= 123 {
+        let w = if c >= 41 { let v = (c - 40) as f32 * 0.0014; let a = (1.0 - v) * (1.0 - v); a * a } else { 1.0 };
+        return w * (1.3913 - 0.01122 * c as f32);
+    }
+    if c < 132 {
+        0.0
+    } else if c <= 156 {
+        0.8 - 0.00128 * ((157 - c) * (157 - c)) as f32
+    } else if c <= 181 {
+        0.53662 + 0.010535 * (182 - c) as f32
+    } else {
+        let u = (c - 180) as f32 * 0.004;
+        let a = (1.0 - u) * (1.0 - u);
+        a * a * a * a * (c - 131) as f32 * 0.01122
+    }
+}
+
+/// CFX NOISE's band-pass (`updateFilterCoef`): (centre Hz, Q, its gain).
+pub fn noise_filter(c: i32) -> (f32, f32, f32) {
+    let x = |n: i32| { let t = (n as f32 * 0.0081301).powi(2); t.powi(8) * 0.1 + 0.7 };
+    let (q, g, v) = if c <= 123 {
+        (if c >= 117 { 2.0 * 2f32.powf(-(c - 116) as f32 * 0.090909) } else { 2.0 }, x(123 - c), c)
+    } else if c >= 132 {
+        (if c >= 245 { 2.0 * 2f32.powf(-(c - 244) as f32 * 0.090909) } else { 2.0 }, x(c - 132), c - 128)
+    } else {
+        (2.0, 0.7, c.max(128) - 128)
+    };
+    let a = 2f32.powf(v as f32 * 0.0569192) * 100.0;
+    let fc = ((a * (-0.5 - q) / (0.5 - q) - a) * q).max(5.0);
+    (fc, q, g.min(1.0))
+}
+
+/// CFX PITCH's law for COLOR `c` and PARAM `p` in 8-bit steps: the shifter's setting (ratio -
+/// 1), or `None` in the centre where the sound stays dry.
+pub fn pitch_law(c: i32, p: i32) -> Option<f32> {
+    let semis = if p <= 126 { 2.0 + 0.07874 * p as f32 } else if p < 129 { 12.0 } else { 12.0 + 0.094488 * (p - 128) as f32 };
+    if (124..=131).contains(&c) {
+        // (rekordbox mixes it dry from 124 to 131; the shift is 0 up to 130.)
+        return None;
+    }
+    if c < 124 {
+        Some((c as f32 * 0.0040323 - 0.5) * (2.0 - 2.0 * 2f32.powf(-semis / 12.0)))
+    } else {
+        Some((2f32.powf(semis / 12.0) - 1.0) * 0.0080645 * (c - 131) as f32)
+    }
+}
+
 /// One channel's Sound Color FX.
 pub struct Cfx {
     kind: u8,
@@ -106,36 +264,19 @@ pub struct Cfx {
     delay: Vec<f32>,
     w: usize,
     fb_lp: [f32; 2],
-    combs: Vec<Vec<f32>>,
-    comb_pos: [usize; 8],
-    comb_lp: [f32; 8],
     made: (f32, f32, u32),
-    /// PITCH: the shifter's line, write position and window phase.
-    ps: Vec<f32>,
-    ps_w: usize,
-    ps_ph: f32,
-    /// GATE COMP: the level follower and the gain in use.
-    env: f32,
-    gain: f32,
-    /// GATE COMP coefficients depend on the side, PARAM and device rate, not on
-    /// the sample or the gliding COLOR value. Decks call process one frame at a time.
-    gate_made: (bool, f32, u32),
-    gate_coeff: (f32, f32, f32),
+    /// PITCH: rekordbox's pitch shifter (`fx_core`) and the rate it is set up for.
+    ps: crate::fx_core::PitchShifter,
+    ps_rate: u32,
+    /// SPACE and GATE COMP (`cfx_space`), made with the rest so nothing is allocated later.
+    space: crate::cfx_space::Space,
+    gc: crate::cfx_space::GateComp,
 }
 
-const PS_LEN: usize = 4096;
-const PS_WIN: f32 = 2048.0;
 
 impl Cfx {
     pub fn new() -> Cfx {
-        let lens = [1117usize, 1291, 1433, 1559];
-        let mut combs = Vec::new();
-        for ch in 0..2 {
-            for l in lens {
-                combs.push(vec![0.0; l + ch * 31]);
-            }
-        }
-        Cfx { kind: 0, color: 0.5, lp: Bq::default(), hp: Bq::default(), band: Bq::default(), seed: 0x1234_5678, hold: [0.0; 2], hold_n: 0.0, delay: vec![0.0; ECHO_LEN * 2], w: 0, fb_lp: [0.0; 2], combs, comb_pos: [0; 8], comb_lp: [0.0; 8], made: (-1.0, -1.0, 0), ps: vec![0.0; PS_LEN * 2], ps_w: 0, ps_ph: 0.0, env: 0.0, gain: 1.0, gate_made: (false, -1.0, 0), gate_coeff: (0.0, 0.0, 0.0) }
+        Cfx { kind: 0, color: 0.5, lp: Bq::default(), hp: Bq::default(), band: Bq::default(), seed: 0x1234_5678, hold: [0.0; 2], hold_n: 0.0, delay: vec![0.0; ECHO_LEN * 2], w: 0, fb_lp: [0.0; 2], made: (-1.0, -1.0, 0), ps: crate::fx_core::PitchShifter::new(48000.0), ps_rate: 48000, space: crate::cfx_space::Space::new(), gc: crate::cfx_space::GateComp::new() }
     }
 
     fn reset(&mut self) {
@@ -143,14 +284,10 @@ impl Cfx {
         self.hp.z = [[0.0; 2]; 2];
         self.band.z = [[0.0; 2]; 2];
         self.delay.iter_mut().for_each(|v| *v = 0.0);
-        self.combs.iter_mut().for_each(|c| c.iter_mut().for_each(|v| *v = 0.0));
-        self.comb_lp = [0.0; 8];
         self.fb_lp = [0.0; 2];
         self.hold = [0.0; 2];
         self.made = (-1.0, -1.0, 0);
-        self.ps.iter_mut().for_each(|v| *v = 0.0);
-        self.env = 0.0;
-        self.gain = 1.0;
+        self.ps.reset();
     }
 
     #[inline]
@@ -163,9 +300,30 @@ impl Cfx {
 
     /// Process `buf` (stereo interleaved) in place. `color` and `param`: the knobs, 0..1.
     pub fn process(&mut self, kind: u8, color: f32, param: f32, buf: &mut [f32], rate: u32) {
+        if rate == 0 || buf.len() < 2 { return; }
+        let ci = (color.clamp(0.0, 1.0) * 255.0).round() as i32;
+        let pi = (param.clamp(0.0, 1.0) * 255.0).round() as i32;
         if kind != self.kind {
             self.kind = kind;
             self.reset();
+            if kind == 5 { self.space.reset(ci); }
+            if kind == 8 { self.gc.reset(ci); }
+        }
+        if kind == 5 || kind == 8 {
+            // SPACE / GATE COMP glide COLOR themselves (0.66667 ms a step). At the centre with
+            // nothing left ringing the sound passes untouched.
+            let now = if kind == 5 { self.space.color() } else { self.gc.color() };
+            if (124..=131).contains(&ci) && now == ci && (if kind == 5 { !self.space.ringing() } else { self.gc.dry() }) {
+                self.color = color;
+                return;
+            }
+            self.color = color;
+            if kind == 5 {
+                self.space.process(buf, ci, pi, rate);
+            } else {
+                self.gc.process(buf, ci, pi, rate);
+            }
+            return;
         }
         // The effect is out of the path while the knob rests in the centre and nothing rings.
         let centred = (color - 0.5).abs() < 0.012;
@@ -206,11 +364,10 @@ impl Cfx {
                     }
                 }
                 1 => {
-                    // JET: a short feedback comb whose delay the knob sets (left: with the
-                    // comb's phase turned over); PARAM is the feedback.
-                    let d = (0.0003 + 0.006 * (1.0 - depth)) * r;
-                    let fbk = 0.3 + 0.6 * p;
-                    let sign = if right { 1.0 } else { -1.0 };
+                    // JET: a feedback comb at rekordbox's delay, feedback and mix for the
+                    // knob position; PARAM scales the feedback.
+                    let (dry, wet, ms, fbk) = jet_law((c * 255.0).round(), (p * 255.0).round());
+                    let d = (ms * 0.001 * r).max(1.0);
                     for f in buf[n * 2..end * 2].chunks_exact_mut(2) {
                         for (ch, v) in f.iter_mut().enumerate() {
                             let i = d as usize;
@@ -218,171 +375,133 @@ impl Cfx {
                             let a = self.delay[((self.w + ECHO_LEN - i) % ECHO_LEN) * 2 + ch];
                             let b = self.delay[((self.w + ECHO_LEN - i - 1) % ECHO_LEN) * 2 + ch];
                             let e = a + (b - a) * t;
-                            self.delay[self.w * 2 + ch] = *v + e * fbk * sign;
-                            *v += e * depth.min(0.9) * sign;
+                            self.delay[self.w * 2 + ch] = (*v + e * fbk).clamp(-4.0, 4.0);
+                            *v = *v * dry + e * wet;
                         }
                         self.w = (self.w + 1) % ECHO_LEN;
                     }
                 }
                 2 => {
-                    // CRUSH: sample and hold, up to 10 ms at the knob's ends (rekordbox's
-                    // range); to the right the result is high-passed too. PARAM mixes it in.
-                    let hold = (depth * depth * 0.010 * r).max(1.0);
-                    let wet = 0.4 + 0.6 * p;
+                    // CRUSH (`ColorFxCrush::processEffectConcrete`): the sound alone, its
+                    // samples held (`CrushCore`) for at most 0.5 ms and, with PARAM above 144
+                    // and a hold over 0.104 ms, its floats' mantissas cut (fewer bits as PARAM
+                    // rises); to the right a high-pass rises from 20 Hz to 4.1 kHz.
+                    let (ci, pi) = ((c * 255.0).round() as i32, (p * 255.0).round() as i32);
+                    let (hold_ms, mask, hp) = crush_law(ci, pi);
+                    let hold = (hold_ms * 0.001 * r).max(1.0);
                     if right && self.made != (c, p, rate) {
                         self.made = (c, p, rate);
-                        self.hp.set(r, 20.0 + 4000.0 * depth * depth, 0.7, true);
+                        self.hp.set(r, hp, 0.7071, true);
                     }
                     for f in buf[n * 2..end * 2].chunks_exact_mut(2) {
+                        let x = [f32::from_bits(f[0].to_bits() & mask), f32::from_bits(f[1].to_bits() & mask)];
                         self.hold_n += 1.0;
                         if self.hold_n >= hold {
                             self.hold_n -= hold;
-                            self.hold = [f[0], f[1]];
+                            self.hold = x;
                         }
                         for (ch, v) in f.iter_mut().enumerate() {
-                            let mut y = self.hold[ch];
-                            if right {
-                                y = self.hp.run(ch, y);
-                            }
-                            *v = *v * (1.0 - wet * depth.min(1.0).sqrt()) + y * wet * depth.min(1.0).sqrt();
+                            let y = self.hold[ch];
+                            *v = if right { self.hp.run(ch, y) } else { y };
                         }
                     }
                 }
                 3 => {
-                    // NOISE: white noise through a filter the knob sweeps (left: darker,
-                    // right: brighter), added to the sound; PARAM is its level.
-                    if self.made != (c, p, rate) {
-                        self.made = (c, p, rate);
-                        let fc = if right { 800.0 * (0.45 * r / 800.0).powf(depth) } else { 8000.0 * (120.0f32 / 8000.0).powf(depth) };
-                        self.band.band(r, fc, 1.2);
-                    }
-                    let level = depth.min(1.0) * (0.15 + 0.6 * p);
+                    // NOISE (`ColorFxNoise`): white noise at COLOR's gain x PARAM (x 1.0593,
+                    // `GAIN_5dB_UP_COEF`, set by its static initialiser) through a band-pass (Q 2) whose centre COLOR moves (left: 133 Hz
+                    // at the end up to 13 kHz near the centre; right: 155 Hz up to 20 kHz),
+                    // added to the sound.
+                    let (ci, pi) = ((c * 255.0) as i32, (p * 255.0) as i32);
+                    let (fc, q, fg) = noise_filter(ci);
+                    let level = noise_color_gain(ci) * pi as f32 * 0.0039216 * 1.0592537 * fg;
+                    let co = crate::fx_core::iir_bpf2(fc.min(0.45 * r) as f64, q as f64, r as f64);
                     for f in buf[n * 2..end * 2].chunks_exact_mut(2) {
                         let x = self.noise();
-                        let y = self.band.run(0, x) * level;
+                        let y = crate::fx_core::bq(&co, &mut self.band.z[0], x) * level;
                         f[0] += y;
                         f[1] += y;
                     }
                 }
-                5 => {
-                    // SPACE: a reverb whose amount the knob sets; left keeps the lows of the
-                    // reverb, right the highs. PARAM is the decay.
-                    let fbk = 0.80 + 0.17 * p;
-                    let k = 1.0 - (-std::f32::consts::TAU * 600.0 / r).exp();
-                    for f in buf[n * 2..end * 2].chunks_exact_mut(2) {
-                        for (ch, v) in f.iter_mut().enumerate() {
-                            let x = *v * 0.25;
-                            let mut acc = 0.0;
-                            for j in 0..4 {
-                                let i = ch * 4 + j;
-                                let line = &mut self.combs[i];
-                                let len = line.len();
-                                let y = line[self.comb_pos[i]];
-                                self.comb_lp[i] = y * 0.7 + self.comb_lp[i] * 0.3;
-                                line[self.comb_pos[i]] = x + self.comb_lp[i] * fbk;
-                                self.comb_pos[i] = (self.comb_pos[i] + 1) % len;
-                                acc += y;
-                            }
-                            self.fb_lp[ch] += (acc - self.fb_lp[ch]) * k;
-                            let wet = if right { acc - self.fb_lp[ch] } else { self.fb_lp[ch] * 1.5 };
-                            *v += wet * depth;
-                        }
-                    }
-                }
                 6 => {
-                    // DUB ECHO: a filtered feedback echo; left low-passes the repeats, right
-                    // high-passes them. PARAM is the feedback.
-                    let d = ((0.375 * r) as usize).min(ECHO_LEN - 1);
-                    let fbk = 0.35 + 0.5 * p;
-                    let k = 1.0 - (-std::f32::consts::TAU * if right { 900.0 } else { 1800.0 } / r).exp();
+                    // DUB ECHO: a short echo at rekordbox's time, feedback and input level
+                    // for the knob position; left low-passes the repeats, right high-passes
+                    // them (around its pre-filter's 1375 Hz).
+                    let (inp, ms, fbk) = dub_law((c * 255.0).round(), (p * 255.0).round());
+                    let d = ((ms * 0.001 * r) as usize).clamp(1, ECHO_LEN - 1);
+                    let k = 1.0 - (-std::f32::consts::TAU * 1375.0 / r).exp();
                     for f in buf[n * 2..end * 2].chunks_exact_mut(2) {
                         for (ch, v) in f.iter_mut().enumerate() {
                             let e = self.delay[((self.w + ECHO_LEN - d) % ECHO_LEN) * 2 + ch];
                             self.fb_lp[ch] += (e - self.fb_lp[ch]) * k;
                             let coloured = if right { e - self.fb_lp[ch] } else { self.fb_lp[ch] };
-                            self.delay[self.w * 2 + ch] = *v * depth + coloured * fbk;
-                            *v += coloured * depth.min(1.0);
+                            self.delay[self.w * 2 + ch] = (*v * inp + coloured * fbk).clamp(-4.0, 4.0);
+                            *v += coloured;
                         }
                         self.w = (self.w + 1) % ECHO_LEN;
                     }
                 }
                 4 => {
-                    // PITCH: left lowers the pitch, right raises it, an octave at the ends;
-                    // PARAM mixes the shifted sound in (all of it from the centre up).
-                    let ratio = 2f32.powf(if right { depth } else { -depth });
-                    let wet = (p * 2.0).min(1.0) * (depth * 8.0).min(1.0);
-                    for f in buf[n * 2..end * 2].chunks_exact_mut(2) {
-                        self.ps[self.ps_w * 2] = f[0];
-                        self.ps[self.ps_w * 2 + 1] = f[1];
-                        self.ps_ph += (1.0 - ratio) / PS_WIN;
-                        self.ps_ph -= self.ps_ph.floor();
-                        let mut o = [0.0f32; 2];
-                        for k in 0..2 {
-                            let ph = (self.ps_ph + k as f32 * 0.5).fract();
-                            let d = 1.0 + ph * PS_WIN;
-                            let i = d as usize;
-                            let t = d - i as f32;
-                            let g = 0.5 - 0.5 * (std::f32::consts::TAU * ph).cos();
-                            let (a, b) = ((self.ps_w + PS_LEN - i) % PS_LEN, (self.ps_w + PS_LEN - i - 1) % PS_LEN);
-                            for ch in 0..2 {
-                                o[ch] += (self.ps[a * 2 + ch] + (self.ps[b * 2 + ch] - self.ps[a * 2 + ch]) * t) * g;
-                            }
+                    // PITCH (`ColorFxPitch::processEffectConcrete`): the whole sound through
+                    // rekordbox's shifter. PARAM sets the range (2 .. 12 semitones in its left
+                    // half, 12 .. 24 in its right), COLOR moves the pitch down (left) or up
+                    // (right) within it; the centre (124 .. 131) leaves the sound dry.
+                    if rate != self.ps_rate {
+                        self.ps_rate = rate;
+                        self.ps.prepare(r);
+                    }
+                    let shift = pitch_law((c * 255.0) as i32, (p * 255.0) as i32);
+                    if let Some(sh) = shift {
+                        self.ps.set_shift(sh);
+                    }
+                    let wet = shift.is_some();
+                    for i in n..end {
+                        if self.ps.block_left() == 0 {
+                            // (A block of up to 512 frames, as rekordbox's buffer: the
+                            // shifter's crossing search sees it first.)
+                            let len = (frames - i).min(crate::fx_core::PitchShifter::BLOCK);
+                            let bb = &*buf;
+                            self.ps.begin_block((i..i + len).map(|k| (bb[k * 2], bb[k * 2 + 1])));
                         }
-                        self.ps_w = (self.ps_w + 1) % PS_LEN;
-                        f[0] += (o[0] - f[0]) * wet;
-                        f[1] += (o[1] - f[1]) * wet;
+                        let (l, rr) = self.ps.process(buf[i * 2], buf[i * 2 + 1]);
+                        if wet {
+                            buf[i * 2] = l;
+                            buf[i * 2 + 1] = rr;
+                        }
                     }
                 }
-                8 => {
-                    // GATE COMP: left a gate whose threshold rises with the knob, right a
-                    // compressor that squeezes harder with it and makes the level up. The
-                    // follower's release (0.99964 / 0.99919 a sample at 44.1 kHz), the gate's
-                    // opening and closing (0.0026571, 0.99982), the compressor's threshold
-                    // (0.24) and its make-up limit (3.6) are rekordbox's defaults; PARAM is
-                    // the gate's closing time or the compressor's make-up.
-                    let per = 44100.0 / r;
-                    if self.gate_made != (right, p, rate) {
-                        self.gate_made = (right, p, rate);
-                        self.gate_coeff = (if right { 0.99919f32 } else { 0.99964f32 }.powf(per),
-                            0.99982f32.powf(per * (0.25 + 3.0 * (1.0 - p))),
-                            (0.0026571 * per * 4.0).min(1.0));
+                LPF | HPF => {
+                    // rekordbox's CFX-style low-pass / high-pass: the knob's distance from
+                    // the centre is how far the filter is turned.
+                    let hp = self.kind == HPF;
+                    let (wet, fc, reso) = inst_law(hp, (depth * 255.0).round(), (p * 255.0).round());
+                    if self.made != (c, p, rate) {
+                        self.made = (c, p, rate);
+                        self.lp.set(r, fc.min(0.45 * r), 0.5 + reso, hp);
                     }
-                    let (rel, close, attack) = self.gate_coeff;
                     for f in buf[n * 2..end * 2].chunks_exact_mut(2) {
-                        let a = f[0].abs().max(f[1].abs());
-                        self.env = if a > self.env { a } else { self.env * rel };
-                        let want = if right {
-                            let th = 0.24 * (1.0 - 0.75 * depth);
-                            let ratio = 1.0 - 0.85 * depth;
-                            let g = if self.env > th { (th + (self.env - th) * ratio) / self.env } else { 1.0 };
-                            g * (1.0 + (3.6 - 1.0) * depth * p)
-                        } else if self.env >= 0.5 * depth * depth {
-                            1.0
-                        } else {
-                            0.0
-                        };
-                        if want > self.gain {
-                            self.gain += (want - self.gain) * attack;
-                        } else {
-                            self.gain = want + (self.gain - want) * close;
+                        for (ch, v) in f.iter_mut().enumerate() {
+                            let y = self.lp.run(ch, *v);
+                            *v += (y - *v) * wet;
                         }
-                        f[0] *= self.gain;
-                        f[1] *= self.gain;
                     }
                 }
                 _ => {
-                    // SWEEP: left takes a band out of the sound (a notch moving down), right
-                    // leaves only a band (moving up). PARAM is the band's width.
+                    // SWEEP: left a widening gap around PARAM's frequency, right a narrowing
+                    // band around it (rekordbox's edges).
+                    let (f1, f2, q) = sweep_law((c * 255.0).round(), (p * 255.0).round());
                     if self.made != (c, p, rate) {
                         self.made = (c, p, rate);
-                        let fc = if right { 150.0 * (9000.0f32 / 150.0).powf(depth) } else { 9000.0 * (150.0f32 / 9000.0).powf(depth) };
-                        self.band.band(r, fc, 0.6 + 4.0 * (1.0 - p));
+                        if right {
+                            self.hp.set(r, f1.max(20.0), q, true);
+                            self.lp.set(r, f2.min(0.45 * r), q, false);
+                        } else {
+                            self.lp.set(r, f1.max(20.0), 0.7071, false);
+                            self.hp.set(r, f2.min(0.45 * r), 1.0, true);
+                        }
                     }
-                    let amount = (depth * 4.0).min(1.0);
                     for f in buf[n * 2..end * 2].chunks_exact_mut(2) {
                         for (ch, v) in f.iter_mut().enumerate() {
-                            let b = self.band.run(ch, *v);
-                            *v = if right { *v * (1.0 - amount) + b * amount } else { *v - b * amount };
+                            *v = if right { let h = self.hp.run(ch, *v); self.lp.run(ch, h) } else { self.lp.run(ch, *v) + self.hp.run(ch, *v) };
                         }
                     }
                 }
@@ -396,40 +515,32 @@ impl Cfx {
 mod tests {
     use super::*;
 
-    #[test]
-    fn gate_comp_cached_coefficients_preserve_parameter_and_rate_changes() {
-        let mut cached = Cfx::new();
-        let mut recalculated = Cfx::new();
-        let changes = [(8, 0.17, 0.63, 48000), (8, 0.83, 0.63, 48000),
-            (8, 0.83, 0.05, 48000), (8, 0.17, 1.0, 44100),
-            (8, 0.83, 0.6, 96000), (8, 0.5, 0.6, 96000),
-            (0, 0.17, 0.2, 48000), (8, 0.83, 0.63, 48000)];
-        // One-frame calls are the deck path; larger and uneven buffers cover the rack.
-        for frames in [1, 33, 512] {
-            for &(kind, color, param, rate) in &changes {
-                for repeat in 0..9 {
-                    let mut a: Vec<f32> = (0..frames * 2).map(|i| {
-                        if repeat % 3 == 0 { 0.0 } else { (i as f32 * 0.117).sin() * 0.8 }
-                    }).collect();
-                    let mut b = a.clone();
-                    // A forced miss recomputes the original formulas without changing
-                    // the envelope or gain state. Parameter transitions must agree exactly.
-                    recalculated.gate_made = (false, -1.0, 0);
-                    cached.process(kind, color, param, &mut a, rate);
-                    recalculated.process(kind, color, param, &mut b, rate);
-                    assert!(a.iter().zip(&b).all(|(x, y)| x.to_bits() == y.to_bits()),
-                            "kind {kind}, color {color}, param {param}, rate {rate}, frames {frames}");
-                }
-            }
-        }
-    }
-
     fn level(kind: u8, color: f32, param: f32, freq: f32) -> f32 {
         let mut fx = Cfx::new();
         let mut x: Vec<f32> = (0..48000).flat_map(|i| { let v = (i as f32 * freq * std::f32::consts::TAU / 48000.0).sin() * 0.5; [v, v] }).collect();
         fx.process(kind, color, param, &mut x, 48000);
         let tail = &x[48000..];
         20.0 * ((tail.iter().map(|v| v * v).sum::<f32>() / tail.len() as f32).sqrt() / (0.5 * std::f32::consts::FRAC_1_SQRT_2)).log10()
+    }
+
+    #[test]
+    fn traced_pitch_and_noise_laws() {
+        // PITCH: PARAM's range (12 semitones at the centre), COLOR's ends an octave down / up.
+        assert_eq!(pitch_law(127, 127), None);
+        assert!((pitch_law(0, 127).unwrap() + 0.5).abs() < 1e-3);
+        assert!((pitch_law(255, 127).unwrap() - 1.0).abs() < 1e-3);
+        assert!((pitch_law(255, 255).unwrap() - 3.0).abs() < 0.01);
+        assert!((pitch_law(0, 0).unwrap() + (1.0 - 2f32.powf(-2.0 / 12.0))).abs() < 1e-3);
+        // CRUSH: the hold (at most 0.5 ms) and the bit mask.
+        let (h, m, _) = crush_law(0, 0);
+        assert!((h - 0.10417).abs() < 1e-5 && m == u32::MAX);
+        let (h, m, hp) = crush_law(255, 255);
+        assert!((h - 0.5).abs() < 1e-5 && m == 0xFF80_0000 && (hp - 4129.0).abs() < 1.0);
+        // NOISE: its level and band.
+        assert!((noise_color_gain(0) - 1.3913).abs() < 1e-4 && noise_color_gain(128) == 0.0);
+        assert!((noise_color_gain(157) - 0.8).abs() < 1e-4);
+        let (fc, q, _) = noise_filter(0);
+        assert!((fc - 133.33).abs() < 0.1 && q == 2.0);
     }
 
     #[test]
@@ -495,25 +606,66 @@ mod tests {
             let got = hz(&x[96000..]);
             assert!((got - want).abs() < want * 0.06, "{color}: {got}");
         }
-        // GATE: fully left the threshold is 0.5, so a 0.1 sound is shut out and a 0.7 one passes.
+        // GATE COMP (rekordbox's thresholds follow each band's recent peak): a steady tone
+        // keeps the gate open at the left end, and the compressor at the right end turns any
+        // steady tone down by the same share whatever its level.
         let mut fx = Cfx::new();
         let mut x = tone(0.1);
         fx.process(8, 0.0, 0.5, &mut x, 48000);
-        assert!(rms(&x[96000..]) < 0.001);
-        let mut fx = Cfx::new();
-        let mut x = tone(0.7);
-        fx.process(8, 0.0, 0.5, &mut x, 48000);
-        assert!((rms(&x[96000..]) - 0.7 * std::f32::consts::FRAC_1_SQRT_2).abs() < 0.01);
-        // COMP: fully right a loud sound comes down and a quiet one comes up (make-up), so
-        // the two end up closer than the 20 dB they started apart.
+        assert!((rms(&x[96000..]) / (0.1 * std::f32::consts::FRAC_1_SQRT_2) - 1.0).abs() < 0.1, "{}", rms(&x[96000..]));
         let level = |amp: f32| {
             let mut fx = Cfx::new();
             let mut x = tone(amp);
             fx.process(8, 1.0, 0.5, &mut x, 48000);
-            rms(&x[96000..])
+            rms(&x[96000..]) / (amp * std::f32::consts::FRAC_1_SQRT_2)
         };
         let (loud, quiet) = (level(0.8), level(0.08));
-        assert!(loud < 0.8 * std::f32::consts::FRAC_1_SQRT_2 && quiet > 0.08 * std::f32::consts::FRAC_1_SQRT_2, "{loud} {quiet}");
-        assert!(20.0 * (loud / quiet).log10() < 12.0, "{}", 20.0 * (loud / quiet).log10());
+        assert!(loud > 0.3 && loud < 0.6 && (loud - quiet).abs() < 0.02, "{loud} {quiet}");
+    }
+
+    #[test]
+    fn traced_laws_of_jet_dub_echo_sweep_and_the_filters() {
+        let near = |a: f32, b: f32| (a - b).abs() < 2e-3;
+        // JET: out of the path at the centre; left the comb grows to 20 ms, right it shrinks
+        // to 0.167 ms; feedback 0.55 / 0.6 over the middle of each side, 0.3 at the ends.
+        assert_eq!(jet_law(128.0, 128.0), (1.0, 0.0, 2.6667, 0.6));
+        let (d, w, ms, fb) = jet_law(0.0, 128.0);
+        assert!(d == 0.7 && w == 0.7 && near(ms, 20.0) && near(fb, 0.3));
+        let (d, w, ms, fb) = jet_law(114.0, 128.0);
+        assert!(near(d, 0.85) && near(w, 0.35) && near(ms, 4.0645) && near(fb, 0.55));
+        let (_, _, ms, fb) = jet_law(255.0, 128.0);
+        assert!(near(ms, 0.16667) && near(fb, 0.3));
+        assert!(near(jet_law(180.0, 128.0).3, 0.6) && near(jet_law(180.0, 62.0).3, 0.3) && near(jet_law(180.0, 255.0).3, 0.8));
+        // DUB ECHO: 55 ms and 0.87 near the centre, 189 ms fully left, 150 ms fully right;
+        // the input comes in over the first 30 % of the travel.
+        assert_eq!(dub_law(128.0, 128.0), (0.0, 55.0, 0.87));
+        let (inp, ms, fb) = dub_law(0.0, 128.0);
+        assert!(inp == 1.0 && near(ms, 189.0) && near(fb, 0.95));
+        let (inp, ms, fb) = dub_law(255.0, 128.0);
+        assert!(inp == 1.0 && near(ms, 150.0) && near(fb, 0.98));
+        assert!(near(dub_law(110.0, 128.0).0, 0.1724) && dub_law(110.0, 128.0).1 == 55.0);
+        assert!(near(dub_law(0.0, 60.0).2, 0.45 + 0.08) && near(dub_law(0.0, 255.0).2, 0.99));
+        // SWEEP: PARAM picks 60 Hz .. 1 kHz .. 20 kHz; left the gap around it widens to
+        // 60 Hz .. 20 kHz, right the band narrows to within a factor 1.4 of it.
+        assert!(near(sweep_law(0.0, 0.0).0, 60.0) && near(sweep_law(123.0, 128.0).0, 1000.0) && near(sweep_law(123.0, 128.0).1, 1000.0));
+        let (lo, hi, _) = sweep_law(0.0, 128.0);
+        assert!(near(lo, 60.0) && near(hi, 20000.0));
+        let (hp, lp, q) = sweep_law(255.0, 128.0);
+        assert!((hp - 1000.0 / 1.401).abs() < 1.0 && (lp - 1401.0).abs() < 1.5 && near(q, 0.7079));
+        assert!(sweep_law(131.0, 128.0).0 < 60.0 && near(sweep_law(140.0, 128.0).2, 0.9142));
+        // LPF / HPF: the cutoffs' ends, the blend over the first steps, the resonance law.
+        assert!(near(inst_fc(false, 0.0), 12000.0) && near(inst_fc(false, 1.0), 93.0) && near(inst_fc(true, 0.0), 61.0) && near(inst_fc(true, 1.0), 8951.0));
+        assert_eq!(inst_law(false, 0.0, 128.0).0, 0.0);
+        assert!(near(inst_law(false, 21.0, 128.0).0, 0.5) && inst_law(false, 100.0, 128.0).0 == 1.0);
+        assert!(inst_law(false, 255.0, 128.0).2 < 1e-4 && near(inst_law(false, 10.0, 255.0).2, 1.44) && near(inst_law(true, 255.0, 255.0).2, 1.44));
+    }
+
+    #[test]
+    fn lpf_and_hpf_for_the_pads() {
+        // Fully turned: the LPF (93 Hz) removes 5 kHz, the HPF (8.95 kHz) removes 200 Hz.
+        assert!(level(LPF, 1.0, 0.5, 5000.0) < -50.0);
+        assert!(level(LPF, 1.0, 0.5, 40.0).abs() < 6.0);
+        assert!(level(HPF, 1.0, 0.5, 200.0) < -50.0);
+        assert_eq!((name(LPF), name(HPF)), ("LPF", "HPF"));
     }
 }

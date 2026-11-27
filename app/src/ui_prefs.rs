@@ -29,160 +29,248 @@ const STEM_SOLO_WIRED: bool = true;
 /// The waveforms show only the parts that sound when `prefs.stem_waveform`.
 const STEM_WAVEFORM_WIRED: bool = true;
 
-/// Categories the original has and Recordbox does not (no subscription, no cloud): shown
-/// dimmed at their places so the list reads the same.
-const ABSENT: [(u8, &str, &str); 2] = [(100, "PLAN", "recordbox has no subscription plans."), (101, "CLOUD", "recordbox has no cloud service.")];
-// Extensions is where rekordbox keeps its STEMS page (in Performance mode).
-// Controller holds the Performance mixer's settings, as in rekordbox.
-const PAGES: [(u8, &str); 8] = [(0, "View"), (5, "Audio"), (1, "Analysis"), (7, "Controller"), (2, "DJ System"), (3, "Keyboard"), (4, "Advanced"), (6, "Extensions")];
-const SHORTCUT_WAIT_ID: &str = "key_wait";
+use crate::prefs_rb::{self as rb, Mode};
 
-fn tabs_of(page: u8) -> &'static [&'static str] {
-    match page {
-        0 => &["Display Type", "Layout", "Color", "recordbox"],
-        1 => &["Track Analysis", "CUE Analysis"],
-        2 => &["General", "Category", "Sort", "Column", "My Settings", "Device", "Others"],
-        3 => &ACTION_CATEGORIES,
-        5 => &["Configuration", "Input/Output"],
-        6 => &["STEMS"],
-        7 => &["Deck", "Mixer", "Effect", "Sampler", "Others"],
-        _ => &["Database", "Browse", "Others"],
+/// Why rekordbox's PLAN and CLOUD categories are dimmed.
+fn absent_reason(c: u8) -> Option<&'static str> {
+    match c {
+        rb::PLAN => Some("recordbox has no subscription plans."),
+        rb::CLOUD => Some("recordbox has no cloud service."),
+        _ => None,
     }
 }
 
+/// The mode the window is laid out for: the application's (PREPDECK_PREFS_MODE=export|
+/// performance|lighting|edit overrides it for screenshots of modes recordbox cannot enter yet).
+pub fn prefs_mode(app: &App) -> Mode {
+    static FORCED: std::sync::OnceLock<Option<Mode>> = std::sync::OnceLock::new();
+    let forced = FORCED.get_or_init(|| match std::env::var("PREPDECK_PREFS_MODE").ok().as_deref() {
+        Some("export") => Some(Mode::Export),
+        Some("performance") => Some(Mode::Performance),
+        Some("lighting") => Some(Mode::Lighting),
+        Some("edit") => Some(Mode::Edit),
+        _ => None,
+    });
+    forced.unwrap_or(Mode::of(app.prefs.app_mode))
+}
+
+fn tabs_of(page: u8, mode: Mode) -> &'static [&'static str] {
+    rb::tabs(page, mode)
+}
+
 /// Every setting by name, for the search field: (page, tab, name).
-const SETTINGS: [(u8, usize, &str); 118] = [
-    (7, 2, "Apply CFX to Sampler using MIC COLOR control knob."),
-    (7, 3, "SLOT"),
-    (7, 3, "Do not overwrite the loaded Slot."),
-    (7, 3, "Capture the loop in an empty slot"),
-    (7, 3, "Auto Panel Mode"),
-    (7, 3, "Sequence Load"),
-    (7, 3, "Velocity Curve"),
-    (7, 4, "SEQUENCER"),
-    (0, 0, "Language"),
-    (0, 0, "Show Tooltips"),
-    (0, 0, "Font Size"),
-    (0, 0, "Bold"),
-    (0, 0, "Line Space"),
-    (0, 0, "Show the selected track to the center"),
-    (0, 0, "Key display format"),
-    (0, 0, "Full/Preview Waveform"),
-    (0, 0, "Full Waveform"),
-    (0, 0, "Half Waveform"),
-    (0, 0, "Beat Count Display"),
-    (0, 1, "Media Browser"),
-    (0, 1, "Browser panel"),
-    (0, 1, "CUE Analysis Playlist"),
-    (0, 1, "Playlist Palette"),
-    (0, 1, "Display Cue Markers on Preview"),
-    (0, 1, "Playlist search filter"),
-    (0, 1, "Display All Tracks in the Playlists"),
-    (0, 1, "Display the number of tracks in a playlist on the Tree View"),
-    (0, 1, "Display SYNC RATE"),
-    (0, 1, "Phrase (Enlarged Waveform)"),
-    (0, 1, "Phrase (Full Waveform)"),
-    (0, 1, "Always show types of phrases"),
-    (0, 1, "Vocal (Enlarged Waveform)"),
-    (0, 1, "Vocal (Full Waveform)"),
-    (0, 2, "Appearance"),
-    (0, 2, "Waveform color"),
-    (0, 2, "HOT CUE color"),
-    (0, 3, "Time Mode"),
-    (0, 3, "Quantize"),
-    (0, 3, "Tree View"),
-    (0, 3, "My Tag Configuration Window"),
-    (0, 3, "Column browser"),
-    (0, 3, "Sub-Browser Window"),
-    (5, 0, "Audio"),
-    (5, 0, "Driver"),
-    (5, 0, "Sample Rate"),
-    (5, 0, "Buffer size"),
-    (5, 0, "Metronome"),
-    (5, 0, "Click Sound"),
-    (5, 0, "Metronome Volume"),
-    (5, 0, "Preview Volume"),
-    (5, 1, "Output channels"),
-    (5, 1, "Master Output"),
-    (1, 0, "Use high precision BeatGrid analysis"),
-    (1, 0, "Analysis Mode"),
-    (1, 0, "BPM Range"),
-    (1, 0, "BPM / Grid"),
-    (1, 0, "KEY"),
-    (1, 0, "Phrase"),
-    (1, 0, "Vocal"),
-    (1, 0, "Auto Analysis"),
-    (1, 0, "Auto Gain"),
-    (1, 1, "Set Memory Cue at the first beat of track when analyzing"),
-    (1, 1, "Set Hot Cue A on the first downbeat"),
-    (2, 0, "Background Color"),
-    (2, 0, "Waveform color displayed on CDJ/XDJ"),
-    (2, 0, "Waveform Current Position"),
-    (2, 0, "Waveform Divisions"),
-    (2, 0, "Type of the Overview Waveform"),
-    (2, 1, "Category"),
-    (2, 2, "Sort"),
-    (2, 3, "Column"),
-    (2, 4, "My Settings"),
-    (2, 4, "QUANTIZE"),
-    (2, 4, "AUTO CUE"),
-    (2, 4, "TIME MODE"),
-    (2, 4, "JOG MODE"),
-    (2, 4, "TEMPO RANGE"),
-    (2, 4, "MASTER TEMPO"),
-    (2, 4, "HOT CUE AUTO LOAD"),
-    (2, 4, "DJM mixer settings"),
-    (2, 5, "Delete playlist tracks from device if playlist is deleted"),
-    (2, 5, "Import the play history automatically"),
-    (2, 5, "Delete from the device after importing the play history"),
-    (2, 6, "Prepare Hot Cue Auto Load setting for CDJ/XDJ use (on import)"),
-    (3, 0, "Keyboard shortcuts"),
-    (4, 0, "Database"),
-    (4, 0, "Backup Library"),
-    (4, 0, "Restore Library"),
-    (4, 1, "iTunes Library File"),
-    (4, 1, "Imported Library"),
-    (4, 1, "rekordbox xml"),
-    (4, 1, "Auto Relocate Search Folders"),
-    (4, 1, "Add \"My Tag\" to the \"Comments\""),
-    (4, 1, "Color comments"),
-    (4, 1, "Customize Color Comments"),
-    (4, 2, "rekordbox Library"),
-    (7, 0, "Eject/Load Lock"),
-    (7, 0, "Instant Doubles"),
-    (7, 1, "EQ"),
-    (7, 1, "EQ/ISOLATOR"),
-    (7, 1, "Channel Fader Curve"),
-    (6, 0, "Enable the STEMS Function"),
-    (6, 0, "STEMS mode"),
-    (6, 0, "STEMS Analysis Process"),
-    (6, 0, "Prioritize sound quality"),
-    (6, 0, "Prioritize speed"),
-    (6, 0, "STEM Waveform Display"),
-    (6, 0, "ACTIVE STEM Setting"),
-    (6, 0, "MUTE / SOLO"),
-    (6, 0, "Reset the MUTE/SOLO state while loading"),
-    (6, 0, "Stem separation model"),
-    (6, 0, "Allow automatic separation on CPU"),
-    (6, 0, "Keep all saved stems"),
-    (6, 0, "STEMS storage budget"),
-    (0, 0, "Playback animation"),
-    (1, 0, "Analysis workers"),
-    (2, 6, "Supported devices"),
-    (0, 0, "Tooltips"),
+const SETTINGS: [(u8, &str, &str); 188] = [
+    (7, "Effect", "Apply CFX to Sampler using MIC COLOR control knob."),
+    (7, "Sampler", "SLOT"),
+    (7, "Sampler", "Do not overwrite the loaded Slot."),
+    (7, "Sampler", "Capture the loop in an empty slot"),
+    (7, "Sampler", "Auto Panel Mode"),
+    (7, "Sampler", "Sequence Load"),
+    (7, "Others", "SEQUENCER"),
+    (0, "Display Type", "Language"),
+    (0, "Display Type", "Show Tooltips"),
+    (0, "Display Type", "Font Size"),
+    (0, "Display Type", "Bold"),
+    (0, "Display Type", "Line Space"),
+    (0, "Display Type", "Show the selected track to the center"),
+    (0, "Display Type", "Key display format"),
+    (0, "Display Type", "Full/Preview Waveform"),
+    (0, "Display Type", "Full Waveform"),
+    (0, "Display Type", "Half Waveform"),
+    (0, "Display Type", "Beat Count Display"),
+    (0, "Layout", "Media Browser"),
+    (0, "Layout", "Browser panel"),
+    (0, "Layout", "CUE Analysis Playlist"),
+    (0, "Layout", "Playlist Palette"),
+    (0, "Layout", "Display Cue Markers on Preview"),
+    (0, "Layout", "Playlist search filter"),
+    (0, "Layout", "Display All Tracks in the Playlists"),
+    (0, "Layout", "Display the number of tracks in a playlist on the Tree View"),
+    (0, "Layout", "Display SYNC RATE"),
+    (0, "Layout", "Phrase (Enlarged Waveform)"),
+    (0, "Layout", "Phrase (Full Waveform)"),
+    (0, "Layout", "Always show types of phrases"),
+    (0, "Layout", "Vocal (Enlarged Waveform)"),
+    (0, "Layout", "Vocal (Full Waveform)"),
+    (0, "Color", "Appearance"),
+    (0, "Color", "Waveform color"),
+    (0, "Color", "HOT CUE color"),
+    (7, "Others", "Quantize"),
+    (4, "Others", "Tree View"),
+    (4, "Others", "My Tag Configuration Window"),
+    (4, "Others", "Column browser"),
+    (4, "Others", "Sub-Browser Window"),
+    (5, "Configuration", "Audio"),
+    (5, "Configuration", "Driver"),
+    (5, "Configuration", "Sample Rate"),
+    (5, "Configuration", "Buffer size"),
+    (5, "Configuration", "Metronome"),
+    (5, "Configuration", "Click Sound"),
+    (5, "Configuration", "Metronome Volume"),
+    (5, "Configuration", "Preview Volume"),
+    (5, "Input/Output", "Output channels"),
+    (5, "Input/Output", "Master Output"),
+    (1, "Track Analysis", "Beat grid estimator"),
+    (1, "Track Analysis", "MP3 cue timing"),
+    (1, "Track Analysis", "High precision: refine beat timing"),
+    (1, "Track Analysis", "Analysis Mode"),
+    (1, "Track Analysis", "BPM Range"),
+    (1, "Track Analysis", "BPM / Grid"),
+    (1, "Track Analysis", "KEY"),
+    (1, "Track Analysis", "Phrase"),
+    (1, "Track Analysis", "Phrase estimator"),
+    (1, "Track Analysis", "Vocal"),
+    (1, "Track Analysis", "Auto Analysis"),
+    (1, "Track Analysis", "Auto Gain"),
+    (1, "CUE Analysis", "Set Memory Cue at the first beat of track when analyzing"),
+    (1, "CUE Analysis", "Set Hot Cue A on the first downbeat"),
+    (2, "General", "Background Color"),
+    (2, "General", "Waveform color displayed on CDJ/XDJ"),
+    (2, "General", "Waveform Current Position"),
+    (2, "General", "Waveform Divisions"),
+    (2, "General", "Type of the Overview Waveform"),
+    (2, "Category", "Category"),
+    (2, "Sort", "Sort"),
+    (2, "Column", "Column"),
+    (2, "My Settings", "My Settings"),
+    (2, "My Settings", "QUANTIZE"),
+    (2, "My Settings", "AUTO CUE"),
+    (2, "My Settings", "TIME MODE"),
+    (2, "My Settings", "JOG MODE"),
+    (2, "My Settings", "TEMPO RANGE"),
+    (2, "My Settings", "MASTER TEMPO"),
+    (2, "My Settings", "HOT CUE AUTO LOAD"),
+    (2, "My Settings", "DJM mixer settings"),
+    (2, "Device", "Delete playlist tracks from device if playlist is deleted"),
+    (2, "Device", "Import the play history automatically"),
+    (2, "Device", "Delete from the device after importing the play history"),
+    (2, "Others", "Prepare Hot Cue Auto Load setting for CDJ/XDJ use (on import)"),
+    (3, "Keyboard", "Keyboard shortcuts"),
+    (4, "Database", "Database"),
+    (4, "Others", "Backup Library"),
+    (4, "Others", "Restore Library"),
+    (4, "Database", "iTunes Library File"),
+    (4, "Database", "Imported Library"),
+    (4, "Database", "rekordbox xml"),
+    (4, "Database", "Auto Relocate Search Folders"),
+    (4, "Browse", "Add \"My Tag\" to the \"Comments\""),
+    (4, "Browse", "Color comments"),
+    (4, "Browse", "Customize Color Comments"),
+    (4, "Others", "rekordbox Library"),
+    (7, "Deck", "Eject/Load Lock"),
+    (7, "Deck", "Instant Doubles"),
+    (7, "Mixer", "EQ"),
+    (7, "Mixer", "EQ/ISOLATOR"),
+    (7, "Mixer", "Channel Fader Curve"),
+    (6, "STEMS", "Enable the STEMS Function"),
+    (6, "STEMS", "STEMS mode"),
+    (6, "STEMS", "STEMS Analysis Process"),
+    (6, "STEMS", "Prioritize sound quality"),
+    (6, "STEMS", "Prioritize speed"),
+    (6, "STEMS", "STEM Waveform Display"),
+    (6, "STEMS", "ACTIVE STEM Setting"),
+    (6, "STEMS", "MUTE / SOLO"),
+    (6, "STEMS", "Reset the MUTE/SOLO state while loading"),
+    (6, "STEMS", "Stem separation model"),
+    (6, "STEMS", "Allow automatic separation on CPU"),
+    (6, "STEMS", "Keep all saved stems"),
+    (6, "STEMS", "STEMS storage budget"),
+    (0, "Display Type", "Playback animation"),
+    (1, "Track Analysis", "Analysis workers"),
+    (1, "Track Analysis", "Use installed beat grid model"),
+    (2, "Others", "Supported devices"),
+    (0, "Display Type", "Tooltips"),
+    (0, "Display Type", "Waveform Drawing Rate"),
+    (0, "Display Type", "Display key information on the database"),
+    (0, "Display Type", "Deck track information display"),
+    (0, "Display Type", "Click on the waveform for PLAY and CUE"),
+    (0, "Display Type", "Switch JOG Display"),
+    (0, "Display Type", "Traffic Light"),
+    (0, "Layout", "Effect Panel"),
+    (0, "Layout", "Enlarged Waveform"),
+    (0, "Layout", "PAD Mode"),
+    (0, "Color", "PAD FX color"),
+    (0, "Color", "SAMPLER color"),
+    (5, "Configuration", "Control Device Information"),
+    (5, "Input/Output", "Mixer Mode"),
+    (5, "Input/Output", "Input channels"),
+    (5, "Input/Output", "Headphones Output"),
+    (5, "Input/Output", "Booth Output"),
+    (1, "CUE Analysis", "Intelligent Cue Creation"),
+    (2, "General", "Image On-Jog Display"),
+    (2, "General", "Key display format"),
+    (2, "Others", "LINK MONITOR"),
+    (7, "Deck", "Needle Lock"),
+    (7, "Deck", "Memory Cue Call Lock"),
+    (7, "Deck", "Load"),
+    (7, "Deck", "Auto Cue"),
+    (7, "Deck", "Vinyl Speed Adjust"),
+    (7, "Deck", "JOG"),
+    (7, "Deck", "Continuous Playing"),
+    (7, "Deck", "BEAT/BPM SYNC"),
+    (7, "Deck", "HOT CUE"),
+    (7, "Deck", "AUTO BEAT LOOP"),
+    (7, "Mixer", "Auto Gain"),
+    (7, "Mixer", "EQ Type"),
+    (7, "Mixer", "CROSSFADER Curve"),
+    (7, "Mixer", "Output Level"),
+    (7, "Mixer", "Headroom"),
+    (7, "Sampler", "Capture"),
+    (7, "Others", "Mode"),
+    (7, "Others", "SNAP"),
+    (7, "Others", "Setting"),
+    (7, "Others", "Ableton Link"),
+    (8, "DVS", "Enable DVS Function"),
+    (8, "DVS", "Control Signal Setting"),
+    (8, "DVS", "Waveform display"),
+    (8, "DVS", "Control Vinyl"),
+    (8, "DVS", "Routing Setting"),
+    (4, "Database", "Auto Export"),
+    (4, "Database", "Database management"),
+    (4, "Browse", "Display speed"),
+    (4, "Browse", "Drop-down menu"),
+    (4, "Browse", "Tag List"),
+    (4, "Browse", "Library Protection"),
+    (4, "Browse", "Library Edit"),
+    (4, "Browse", "Playback time setting"),
+    (4, "Others", "Computer Name"),
+    (4, "Others", "QUANTIZE BEAT VALUE"),
+    (4, "Others", "BEAT/BPM SYNC"),
+    (4, "Others", "HOT CUE"),
+    (4, "Others", "Export Loop As WAV"),
+    (4, "Others", "Track information"),
+    (4, "Others", "Time Mode"),
+    (6, "STEMS", "Layout"),
+    (6, "STEMS", "STEM Instant Doubles"),
+    (6, "STEMS", "Memory"),
+    (6, "STEMS", "Multi-thread"),
+    (6, "STEMS", "Enable the GROOVE CIRCUIT Function"),
+    (6, "STEMS", "DRUM SWAP"),
+    (6, "STEMS", "DRUM CAPTURE"),
+    (6, "STEMS", "Drum Loop Audio"),
 ];
 
-/// Settings (and keyboard actions) whose name contains the search text: (page, tab, name).
-pub fn search_settings(q: &str) -> Vec<(u8, usize, String)> {
+/// Settings (and keyboard commands) of `mode`'s pages whose name contains the search text:
+/// (category, tab, name).
+pub fn search_settings(q: &str, mode: Mode) -> Vec<(u8, usize, String)> {
     let q = q.trim().to_lowercase();
     if q.is_empty() {
         return vec![];
     }
-    let mut v: Vec<(u8, usize, String)> = SETTINGS.iter().filter(|s| s.2.to_lowercase().contains(&q)).map(|s| (s.0, s.1, s.2.to_string())).collect();
-    for (_, label, _, cat) in ACTIONS {
-        if label.to_lowercase().contains(&q) {
-            let tab = ACTION_CATEGORIES.iter().position(|c| *c == cat).unwrap_or(0);
-            v.push((3, tab, label.to_string()));
+    let mut v = vec![];
+    for (page, tab, name) in SETTINGS {
+        if !name.to_lowercase().contains(&q) || !rb::categories(mode).contains(&page) {
+            continue;
+        }
+        if let Some(i) = tabs_of(page, mode).iter().position(|t| *t == tab) {
+            if rb::tab_out_of_scope(page, tab).is_none() {
+                v.push((page, i, name.to_string()));
+            }
+        }
+    }
+    if rb::categories(mode).contains(&rb::KEYBOARD) {
+        for name in crate::ui_prefs_keys::search(&q, mode) {
+            v.push((rb::KEYBOARD, 0, name));
         }
     }
     v
@@ -214,7 +302,7 @@ fn path_row(ui: &mut Ui, value: &Option<String>, empty: &str) {
 }
 
 /// The category icons of the sidebar, in a 30 pt box at `o` (shapes as the original's).
-fn side_icon(p: &egui::Painter, o: egui::Pos2, page: u8, c: Color32, bg: Color32) {
+pub(crate) fn side_icon_drawn(p: &egui::Painter, o: egui::Pos2, page: u8, c: Color32, bg: Color32) {
     let at = |x: f32, y: f32| pos2(o.x + x, o.y + y);
     let bar = |x: f32, y: f32, w: f32, h: f32, col: Color32| p.rect_filled(Rect::from_min_size(at(x, y), vec2(w, h)), 0.0, col);
     match page {
@@ -334,7 +422,7 @@ pub fn prefs_window(app: &mut App, ctx: &Context) {
         }
         crate::menus::apply_edit_commands(app, vctx);
         let assigning_key = app.dialogs.prefs_tab == 3 && app.dialogs.ext.prefs_search.trim().is_empty()
-            && vctx.data(|d| d.get_temp::<Option<String>>(egui::Id::new(SHORTCUT_WAIT_ID))).flatten().is_some();
+            && crate::ui_prefs_keys::assigning_key(vctx);
         if !assigning_key {
             crate::window_fullscreen(&app.prefs, vctx, None);
         }
@@ -367,7 +455,53 @@ fn prefs_embedded(app: &mut App, ctx: &Context) {
     app.dialogs.prefs_open &= open;
 }
 
+/// Screenshots only: PREPDECK_PREFS_JSON='{"stem_solo":true,"rb":{"needle_lock":false}}' is
+/// laid over the settings once, so a page can be pictured in the state a reference shows.
+fn shot_overrides(app: &mut App) {
+    static DONE: std::sync::Once = std::sync::Once::new();
+    if app.screenshot.is_none() {
+        return;
+    }
+    DONE.call_once(|| {
+        let Ok(text) = std::env::var("PREPDECK_PREFS_JSON") else { return };
+        let (Ok(over), Ok(mut cur)) = (serde_json::from_str::<serde_json::Value>(&text), serde_json::to_value(&app.prefs)) else { return };
+        fn merge(a: &mut serde_json::Value, b: &serde_json::Value) {
+            match (a, b) {
+                (serde_json::Value::Object(a), serde_json::Value::Object(b)) => {
+                    for (k, v) in b {
+                        merge(a.entry(k.clone()).or_insert(serde_json::Value::Null), v);
+                    }
+                }
+                (a, b) => *a = b.clone(),
+            }
+        }
+        merge(&mut cur, &over);
+        match serde_json::from_value::<Prefs>(cur) {
+            Ok(p) => app.prefs = p,
+            Err(e) => eprintln!("PREPDECK_PREFS_JSON: {e}"),
+        }
+    });
+}
+
+/// PREPDECK_SHOT_SCROLL=<points>: how far down the page a screenshot starts.
+fn shot_scroll() -> Option<f32> {
+    static V: std::sync::OnceLock<Option<f32>> = std::sync::OnceLock::new();
+    *V.get_or_init(|| std::env::var("PREPDECK_SHOT_SCROLL").ok().and_then(|v| v.parse().ok()))
+}
+
+/// The context the window was last drawn in (the scripted run reads the open tab from it).
+pub fn last_ctx() -> Option<Context> {
+    LAST_CTX.lock().clone()
+}
+
+static LAST_CTX: parking_lot::Mutex<Option<Context>> = parking_lot::Mutex::new(None);
+
 fn prefs_body(app: &mut App, ui: &mut Ui, height: f32) {
+    crate::ui_prefs_item::begin_window();
+    shot_overrides(app);
+    if crate::ui_prefs_item::TRACE.lock().on {
+        *LAST_CTX.lock() = Some(ui.ctx().clone());
+    }
     kit::apply_style(ui);
     ui.spacing_mut().item_spacing = vec2(0.0, 0.0);
     let o = ui.cursor().min;
@@ -383,68 +517,92 @@ fn prefs_body(app: &mut App, ui: &mut Ui, height: f32) {
     ui.painter().line_segment([at(12.0 + 10.64, 20.0 + 11.075), at(12.0 + 14.07, 20.0 + 14.5)], lens);
     let field = Rect::from_min_max(pos2(sr.min.x + 24.0, sr.min.y + 3.0), pos2(sr.max.x - 2.0, sr.max.y));
     ui.put(field, egui::TextEdit::singleline(&mut app.dialogs.ext.prefs_search).frame(false).font(inter(13.0)).text_color(WHITE));
-    for (n, (i, name, why)) in ABSENT.iter().enumerate() {
-        let r = Rect::from_min_size(at(8.0, 56.0 + n as f32 * 33.0), vec2(144.0, 30.0));
-        side_icon(ui.painter(), r.min, *i, OFF, BG2);
-        ui.painter().text(pos2(r.min.x + 40.0, r.center().y), egui::Align2::LEFT_CENTER, *name, inter(13.0), OFF);
-        ui.interact(r, ui.id().with(("prefs_absent", *i)), egui::Sense::hover()).on_hover_text(*why);
+    let mode = prefs_mode(app);
+    let cats = rb::categories(mode);
+    // A category the mode does not have (the mode was changed since): the first real one.
+    if !cats.contains(&app.dialogs.prefs_tab) || app.dialogs.prefs_tab >= 100 {
+        app.dialogs.prefs_tab = rb::VIEW;
     }
-    for (n, (i, name)) in PAGES.iter().enumerate() {
+    for (n, i) in cats.iter().enumerate() {
+        let name = rb::category_name(*i);
+        let r = Rect::from_min_size(at(8.0, 56.0 + n as f32 * 33.0), vec2(144.0, 30.0));
+        if let Some(why) = absent_reason(*i) {
+            crate::ui_prefs_keys::side_icon(ui, r.min, *i, false, true);
+            crate::prefs_font::draw(ui, Rect::from_min_size(pos2(r.min.x + 40.0, r.min.y), vec2(104.0, 30.0)), name, 15.0, false, OFF, kit::Just::Left);
+            ui.interact(r, ui.id().with(("prefs_absent", *i)), egui::Sense::hover()).on_hover_text(why);
+            continue;
+        }
         let sel = app.dialogs.prefs_tab == *i && app.dialogs.ext.prefs_search.trim().is_empty();
-        let r = Rect::from_min_size(at(8.0, 56.0 + (n + ABSENT.len()) as f32 * 33.0), vec2(144.0, 30.0));
         let resp = ui.interact(r, ui.id().with(("prefs_page", *i)), egui::Sense::click());
         let bg = if sel { PBLUE } else if resp.hovered() { hex(0x2A2A2A) } else { BG2 };
         if bg != BG2 {
             ui.painter().rect_filled(r, 0.0, bg);
         }
-        let c = if sel { WHITE } else { DIM2 };
-        side_icon(ui.painter(), r.min, *i, c, bg);
-        kit::paint_text(ui, pos2(r.min.x + 40.0, r.center().y), egui::Align2::LEFT_CENTER, name, inter(13.0), c, 0.13);
+        crate::ui_prefs_keys::side_icon(ui, r.min, *i, sel, false);
+        crate::prefs_font::draw(ui, Rect::from_min_size(pos2(r.min.x + 40.0, r.min.y), vec2(104.0, 30.0)), name, 15.0, false, if sel { WHITE } else { DIM2 }, kit::Just::Left);
+        crate::ui_prefs_item::tab_seen(name, r);
         if resp.clicked() {
             app.dialogs.prefs_tab = *i;
             app.dialogs.ext.prefs_search.clear();
         }
     }
     let page = app.dialogs.prefs_tab;
-    let tabs = tabs_of(page);
+    let tabs = tabs_of(page, mode);
     let key = format!("prefs_subtab_{page}");
     let mut sub_tab: usize = ui.ctx().data_mut(|d| *d.get_temp_mut_or(egui::Id::new(&key), 0usize)).min(tabs.len() - 1);
+    if rb::tab_out_of_scope(page, tabs[sub_tab]).is_some() {
+        sub_tab = tabs.iter().position(|t| rb::tab_out_of_scope(page, t).is_none()).unwrap_or(0);
+    }
     let searching = !app.dialogs.ext.prefs_search.trim().is_empty();
-    if page != 6 || searching {
+    if page != rb::EXTENSIONS || tabs[sub_tab] != "STEMS" || searching {
         app.dialogs.confirm_clear_stems = false;
         app.stem.cache_usage = None;
     }
-    // Tab strip on black, 30 pt tall: the active tab blue, the others #1E1E1E with #AAAAAA text.
+    // Tab strip on black, 30 pt tall: the active tab blue, the others #1E1E1E with #AAAAAA
+    // text; a tab is its text and 4 pt wide more, 4 pt apart. (Measured on the captures: the
+    // tab captions fit Font(14), the category names Font(15).)
     let mut x = 164.0;
     let names: Vec<&str> = if searching { vec!["Search results"] } else { tabs.to_vec() };
     for (i, t) in names.iter().enumerate() {
         let sel = searching || sub_tab == i;
-        let g = kit::galley(ui, t, inter(12.0), if sel { WHITE } else { DIM2 }, 0.0);
-        let w = (g.size().x + 4.45).round();
+        let out = if searching { None } else { rb::tab_out_of_scope(page, t) };
+        let w = crate::prefs_font::width(ui, t, 14.0, false).round() + 4.0;
         if x + w > WIN.x - 2.0 {
             break;
         }
         let r = Rect::from_min_size(at(x, 4.0), vec2(w, 30.0));
         let resp = ui.interact(r, ui.id().with(("prefs_tab", page, i)), egui::Sense::click());
-        ui.painter().rect_filled(r, 0.0, if sel { PBLUE } else if resp.hovered() { hex(0x2A2A2A) } else { BG2 });
-        ui.painter().galley(pos2(r.center().x - g.size().x / 2.0, r.center().y - g.size().y / 2.0), g, WHITE);
-        if resp.clicked() && !searching {
+        ui.painter().rect_filled(r, 0.0, if sel { PBLUE } else if resp.hovered() && out.is_none() { hex(0x2A2A2A) } else { BG2 });
+        crate::prefs_font::draw(ui, r, t, 14.0, false, if sel { WHITE } else if out.is_some() { OFF } else { DIM2 }, kit::Just::Centre);
+        crate::ui_prefs_item::tab_seen(t, r);
+        if let Some(why) = out {
+            resp.on_hover_text(why);
+        } else if resp.clicked() && !searching {
             sub_tab = i;
         }
         x += w + 4.0;
     }
     ui.ctx().data_mut(|d| d.insert_temp(egui::Id::new(&key), sub_tab));
+    app.prefs.rb.last_page[mode.index()] = (page, sub_tab as u8);
+    crate::ui_prefs_item::begin_frame();
     let before = format!("{:?}", app.prefs);
     // The cards, from 38 pt down to 40 pt above the bottom edge. DJ System > General has no
     // "Reset to defaults" in the original: its cards run to 4 pt above the bottom edge.
-    let no_reset = page == 2 && sub_tab == 0 && !searching;
+    let no_reset = false;
     let area = Rect::from_min_max(at(164.0, 38.0), at(WIN.x, height - if no_reset { 4.0 } else { 40.0 }));
     let mut content = ui.new_child(egui::UiBuilder::new().max_rect(area).layout(egui::Layout::top_down(egui::Align::Min)));
-    egui::ScrollArea::vertical().id_salt(("prefs_scroll", page, sub_tab, searching)).max_height(area.height()).auto_shrink([false, false]).show(&mut content, |ui| {
+    let mut scroll = egui::ScrollArea::vertical().id_salt(("prefs_scroll", page, sub_tab, searching)).max_height(area.height()).auto_shrink([false, false]);
+    if let Some(y) = shot_scroll().filter(|_| app.screenshot.is_some()) {
+        scroll = scroll.vertical_scroll_offset(y);
+    }
+    scroll.show(&mut content, |ui| {
         ui.spacing_mut().item_spacing = vec2(0.0, 0.0);
         if searching {
             search_results(app, ui);
         } else {
+            // (Controller's tabs: 0 Deck, 1 Mixer, 2 Effect, 3 Sampler, 4 Recordings,
+            // 5 MIX POINT LINK, 6 Others. Advanced's tabs depend on the mode and are told
+            // apart by name inside `page_advanced`.)
             match page {
                 0 => page_view(app, ui, sub_tab),
                 1 => page_analysis(app, ui, sub_tab),
@@ -453,10 +611,19 @@ fn prefs_body(app: &mut App, ui: &mut Ui, height: f32) {
                 5 => page_audio(app, ui, sub_tab),
                 6 => page_stems(app, ui),
                 7 if sub_tab == 0 => page_deck(app, ui),
-                7 if sub_tab == 1 => page_mixer(app, ui),
-                7 if sub_tab == 2 => page_effect(app, ui),
+                7 if sub_tab == 1 => {
+                    page_mixer(app, ui);
+                    // TakeOver, Needle Lock and JOG cards while a controller is connected.
+                    if crate::ui_midi::prefs_rows_shown(app) {
+                        crate::ui_midi::prefs_rows(app, ui);
+                    }
+                }
+                7 if sub_tab == 2 => crate::ui_fx::prefs_effect_page(app, ui),
                 7 if sub_tab == 3 => page_sampler(app, ui),
+                7 if sub_tab == 4 => crate::ui_rec::prefs_page(app, ui),
+                7 if sub_tab == 5 => crate::ui_mpl::prefs_page(app, ui),
                 7 => page_controller_others(app, ui),
+                8 => crate::ui_prefs_perf::page_dvs(app, ui),
                 _ => page_advanced(app, ui, sub_tab),
             }
         }
@@ -472,14 +639,15 @@ fn prefs_body(app: &mut App, ui: &mut Ui, height: f32) {
 }
 
 fn search_results(app: &mut App, ui: &mut Ui) {
-    let hits = search_settings(&app.dialogs.ext.prefs_search);
+    let mode = prefs_mode(app);
+    let hits = search_settings(&app.dialogs.ext.prefs_search, mode);
     card(ui, "Search results", |ui| {
         if hits.is_empty() {
             kit::line(ui, "No setting has that in its name.");
         }
         kit::block(ui, |ui| {
             for (page, tab, name) in hits {
-                let place = format!("{} > {}", PAGES.iter().find(|p| p.0 == page).map(|p| p.1).unwrap_or(""), tabs_of(page).get(tab).copied().unwrap_or(""));
+                let place = format!("{} > {}", rb::category_name(page), tabs_of(page, mode).get(tab).copied().unwrap_or(""));
                 ui.horizontal(|ui| {
                     if ui.add(btn(name.as_str()).min_size(vec2(300.0, 22.0))).clicked() {
                         app.dialogs.prefs_tab = page;
@@ -508,7 +676,8 @@ fn reset_row(app: &mut App, ui: &mut Ui) {
             ui.label(kit::text(text, 13.0).color(WHITE)).on_hover_text("Keyboard shortcuts, columns and this computer's devices and folders are kept.");
             if ui.add(btn("OK").exact(vec2(80.0, 29.0))).clicked() {
                 if scope == Some(3) {
-                    app.prefs.keymap.clear();
+                    let mode = prefs_mode(app);
+                    crate::ui_prefs_keys::reset_current(&mut app.prefs, mode);
                 } else {
                     app.prefs = reset_prefs(&app.prefs);
                     crate::prefs_ext::set_stream_opts(&app.prefs);
@@ -544,6 +713,7 @@ pub fn reset_prefs(old: &Prefs) -> Prefs {
         itunes_xml: old.itunes_xml.clone(),
         rekordbox_xml_path: old.rekordbox_xml_path.clone(),
         other: old.other.clone(),
+        rb: crate::prefs_rb::RbPrefs { key_mapping: old.rb.key_mapping.clone(), key_mappings: old.rb.key_mappings.clone(), shell: old.rb.shell.clone(), last_page: old.rb.last_page, ..Default::default() },
         ..Prefs::default()
     }
 }
@@ -551,222 +721,8 @@ pub fn reset_prefs(old: &Prefs) -> Prefs {
 // ------------------------------------------------------------------ View
 
 fn page_view(app: &mut App, ui: &mut Ui, tab: usize) {
-    match tab {
-        0 => {
-            card(ui, "Language", |ui| {
-                kit::combo_row(ui, 22.0, |ui| {
-                    kit::combo("lang", 520.0, "English", 14.0).show_ui(ui, |ui| {
-                        let _ = ui.selectable_label(true, "English");
-                    });
-                });
-            });
-            card(ui, "Tooltips", |ui| {
-                toggle(ui, &mut app.prefs.tooltips, "Show Tooltips");
-            });
-            card(ui, "Browse", |ui| {
-                sub(ui, "Font Size");
-                let mut f = app.prefs.browse_font as u32;
-                if kit::step_slider(ui, &mut f, 4, "Small", "Large") {
-                    app.prefs.browse_font = f as u8;
-                }
-                kit::indent(ui, 84.0);
-                ui.add_space(-0.5);
-                toggle(ui, &mut app.prefs.browse_bold, "Bold");
-                separator(ui);
-                sub(ui, "Line Space");
-                let mut l = app.prefs.browse_line as u32;
-                if kit::step_slider(ui, &mut l, 4, "Small", "Large") {
-                    app.prefs.browse_line = l as u8;
-                }
-                separator(ui);
-                ui.add_space(-1.0);
-                toggle(ui, &mut app.prefs.center_selected, "Show the selected track to the center");
-                ui.add_space(0.5);
-                separator(ui);
-                // LINK EXPORT is not part of Recordbox: the section is shown switched off.
-                let why = "recordbox has no LINK EXPORT, so no tracks are coloured as played.";
-                sub(ui, "Coloring of played tracks  (LINK EXPORT)");
-                let mut refused = kit::toggle_off(ui, "Reset color when exiting rekordbox", why);
-                ui.add_space(6.0);
-                refused |= kit::row(ui, 22.0, |ui| ui.add(btn("RESET").exact(vec2(264.0, 22.0)).font_size(12.0)).on_hover_text(why).clicked());
-                if refused {
-                    app.toast(why);
-                }
-            });
-            card(ui, "Key display format", |ui| {
-                if radio(ui, !app.prefs.key_alnum, "Classic") {
-                    app.prefs.key_alnum = false;
-                    app.list_dirty = true;
-                }
-                if radio(ui, app.prefs.key_alnum, "Alphanumeric") {
-                    app.prefs.key_alnum = true;
-                    app.list_dirty = true;
-                }
-            });
-            card(ui, "Waveform", |ui| {
-                kit::labeled(ui, "Playback animation", |ui| {
-                    let choices = [(15, "15 frames/s"), (30, "30 frames/s"), (0, "Display rate")];
-                    let current = choices.iter().find(|(n, _)| *n == app.prefs.playback_fps).map_or("Display rate", |v| v.1);
-                    kit::combo("playback_fps", 170.0, current, 14.0).show_ui(ui, |ui| {
-                        for (fps, name) in choices {
-                            ui.selectable_value(&mut app.prefs.playback_fps, fps, name);
-                        }
-                    });
-                });
-                sub(ui, "Full/Preview Waveform");
-                kit::indent(ui, 88.0);
-                if radio(ui, !app.prefs.wave_half, "Full Waveform") {
-                    app.prefs.wave_half = false;
-                }
-                if radio(ui, app.prefs.wave_half, "Half Waveform") {
-                    app.prefs.wave_half = true;
-                }
-            });
-            card(ui, "Beat Count Display", |ui| {
-                for (i, n) in ["Current Position (Bars)", "Count to the next MEMORY CUE (Bars)", "Count to the next MEMORY CUE (Beats)"].iter().enumerate() {
-                    if radio(ui, app.prefs.beat_count_mode == i as u8, n) {
-                        app.prefs.beat_count_mode = i as u8;
-                    }
-                }
-            });
-        }
-        1 => page_layout(app, ui),
-        2 => {
-            card(ui, "Appearance", |ui| {
-                radio(ui, true, "Dark");
-                kit::radio_off(ui, false, "Light", "recordbox has the dark appearance only.");
-            });
-            card(ui, "Waveform color", |ui| {
-                for (i, n) in ["BLUE", "RGB", "3Band"].iter().enumerate() {
-                    if radio(ui, app.prefs.wave_color == i as u8, n) {
-                        app.prefs.wave_color = i as u8;
-                    }
-                }
-            });
-            card(ui, "HOT CUE color", |ui| {
-                // Recordbox gives new hot cues rekordbox's COLORFUL colours; the other three
-                // colour sets are listed as rekordbox lists them, and cannot be chosen.
-                let why = "recordbox colours hot cues as rekordbox's COLORFUL setting does; it has no other colour set yet.";
-                kit::combo_row(ui, 22.0, |ui| {
-                    kit::combo("hotcue_color", 520.0, "COLORFUL", 14.0).show_ui(ui, |ui| {
-                        for n in ["CDJ", "COLD1", "COLD2"] {
-                            ui.add_enabled(false, egui::SelectableLabel::new(false, n)).on_disabled_hover_text(why);
-                        }
-                        let _ = ui.selectable_label(true, "COLORFUL");
-                    });
-                });
-            });
-        }
-        _ => {
-            card(ui, "recordbox", |ui| {
-                kit::line(ui, "Settings of recordbox that rekordbox keeps elsewhere or does not have.");
-            });
-            card(ui, "Time Mode", |ui| {
-                if radio(ui, !app.prefs.time_remain, "Elapsed") {
-                    app.prefs.time_remain = false;
-                }
-                if radio(ui, app.prefs.time_remain, "Remaining") {
-                    app.prefs.time_remain = true;
-                }
-            });
-            card(ui, "Quantize", |ui| {
-                toggle(ui, &mut app.prefs.quantize, "Cues and loops snap to the beat grid");
-                kit::row(ui, 16.0, |ui| {
-                    ui.label(kit::text("Resolution", 14.0).color(WHITE));
-                    for (d, n) in [(1u8, "1 beat"), (2, "1/2"), (4, "1/4"), (8, "1/8")] {
-                        ui.add_space(16.0);
-                        if kit::radio_raw(ui, app.prefs.quantize_div.max(1) == d, n).clicked() {
-                            app.prefs.quantize_div = d;
-                        }
-                    }
-                });
-            });
-            card(ui, "Tree View", |ui| {
-                note(ui, "Sources rekordbox always shows. The others are in Layout > Media Browser.");
-                for name in crate::prefs_ext::TREE_ITEMS_OWN {
-                    let mut on = app.prefs.tree_item(name);
-                    if kit::checkbox(ui, &mut on, name).changed() {
-                        app.prefs.tree_items.insert(name.to_string(), on);
-                    }
-                }
-            });
-            card(ui, "Browser", |ui| {
-                toggle(ui, &mut app.prefs.show_mytag, "My Tag Configuration Window");
-                if toggle(ui, &mut app.prefs.column_browser, "Column browser (Genre / Artist / Album)") {
-                    app.list_dirty = true;
-                }
-                toggle(ui, &mut app.prefs.sub_browser, "Sub-Browser Window");
-            });
-        }
-    }
-}
-
-/// View > Layout, as rekordbox 7.2.19 lays it out: one card with the sections Media Browser,
-/// Browser panel, Deck, Phrases and Vocal.
-fn page_layout(app: &mut App, ui: &mut Ui) {
-    card(ui, "Layout", |ui| {
-        sub(ui, "Media Browser");
-        ui.add_space(2.0);
-        let [left, right] = crate::prefs_ext::MEDIA_BROWSER;
-        for i in 0..left.len() {
-            kit::row(ui, 16.0, |ui| {
-                let x0 = ui.cursor().min.x;
-                for (col, name) in [left[i], right[i]].into_iter().enumerate() {
-                    if col == 1 {
-                        // The right column starts 287 pt after the left one.
-                        ui.add_space((x0 + 287.0 - ui.cursor().min.x).max(8.0));
-                    }
-                    if crate::prefs_ext::tree_item_available(name) {
-                        let mut on = app.prefs.tree_item(name);
-                        if kit::checkbox_raw(ui, &mut on, name).changed() {
-                            app.prefs.tree_items.insert(name.to_string(), on);
-                        }
-                    } else {
-                        kit::checkbox_off_raw(ui, name, &crate::prefs_ext::media_absent_reason(name));
-                    }
-                }
-            });
-        }
-        separator(ui);
-        sub(ui, "Browser panel");
-        // Shows or hides the CUE Analysis Playlist row (and its [Start] button) in the tree.
-        let mut cue_pl = app.prefs.tree_item("CUE Analysis Playlist");
-        if kit::checkbox(ui, &mut cue_pl, "CUE Analysis Playlist").changed() {
-            app.prefs.tree_items.insert("CUE Analysis Playlist".to_string(), cue_pl);
-            app.save_prefs();
-        }
-        kit::checkbox(ui, &mut app.prefs.palette_enabled, "Playlist Palette");
-        kit::checkbox(ui, &mut app.prefs.cue_markers_on_preview, "Display Cue Markers on Preview");
-        kit::checkbox(ui, &mut app.prefs.playlist_search_filter, "Playlist search filter");
-        kit::checkbox(ui, &mut app.prefs.all_tracks_in_playlists, "Display All Tracks in the Playlists");
-        kit::checkbox(ui, &mut app.prefs.playlist_track_counts, "Display the number of tracks in a playlist on the Tree View");
-        ui.add_space(3.0);
-        separator(ui);
-        sub(ui, "Deck");
-        kit::checkbox_off(ui, "Display SYNC RATE", "recordbox does not show a sync rate next to BEAT SYNC yet.");
-        ui.add_space(3.0);
-        separator(ui);
-        sub(ui, "Phrases");
-        ui.add_space(-4.0);
-        if PHRASE_ENLARGED_WIRED {
-            kit::checkbox(ui, &mut app.prefs.phrase_enlarged, "Phrase (Enlarged Waveform)");
-        } else {
-            kit::checkbox_off(ui, "Phrase (Enlarged Waveform)", "recordbox shows phrases under the full waveform only, so far.");
-        }
-        kit::checkbox(ui, &mut app.prefs.show_phrase_bar, "Phrase (Full Waveform)");
-        ui.add_space(3.0);
-        toggle_if(app, ui, PHRASE_TYPES_WIRED, |p| &mut p.phrase_types_always, "Always show types of phrases", "recordbox shows phrases as coloured blocks without their type names, so far.");
-        ui.add_space(3.0);
-        separator(ui);
-        sub(ui, "Vocal");
-        ui.add_space(-4.0);
-        if VOCAL_ENLARGED_WIRED {
-            kit::checkbox(ui, &mut app.prefs.vocal_enlarged, "Vocal (Enlarged Waveform)");
-        } else {
-            kit::checkbox_off(ui, "Vocal (Enlarged Waveform)", "recordbox shows vocal positions above the full waveform only, so far.");
-        }
-        kit::checkbox(ui, &mut app.prefs.show_vocal, "Vocal (Full Waveform)");
-    });
+    let mode = prefs_mode(app);
+    crate::ui_prefs_view::page_view(app, ui, tab, mode);
 }
 
 // ------------------------------------------------------------------ Audio
@@ -841,8 +797,13 @@ fn audio_info(app: &App, ui: &Ui) -> AudioInfo {
 
 fn page_audio(app: &mut App, ui: &mut Ui, tab: usize) {
     let info = audio_info(app, ui);
+    let mode = prefs_mode(app);
     if tab == 1 {
-        audio_io(app, ui, &info);
+        let chans = info.caps.as_ref().map(|c| c.channels).unwrap_or(2);
+        let dev = info.caps.as_ref().map(|c| c.name.clone()).unwrap_or_default();
+        if crate::ui_prefs_view::audio_io(app, ui, mode, chans, &dev) {
+            apply_audio(app);
+        }
         return;
     }
     let AudioInfo { state, devices, caps, list_id, caps_id } = info;
@@ -867,6 +828,7 @@ fn page_audio(app: &mut App, ui: &mut Ui, tab: usize) {
             ui.add_space(4.0);
             // rekordbox opens the device driver's own settings here; on a Mac those are in
             // Audio MIDI Setup.
+            #[cfg(target_os = "macos")]
             if ui.add(btn("Driver").exact(vec2(148.0, 22.0)).font_size(11.5)).on_hover_text("Open Audio MIDI Setup, where macOS keeps the settings of audio devices.").clicked() {
                 let _ = std::process::Command::new("/usr/bin/open").args(["-a", "Audio MIDI Setup"]).spawn();
             }
@@ -892,7 +854,7 @@ fn page_audio(app: &mut App, ui: &mut Ui, tab: usize) {
         let dev = caps.as_ref().map(|c| c.name.clone()).unwrap_or_default();
         let (status, warn) = match (&state, &current) {
             (None, _) => ("Looking for audio devices…".to_string(), false),
-            (Some(None), _) => ("macOS did not answer with the list of audio devices; the system's default output is used.".to_string(), true),
+            (Some(None), _) => ("The audio device list timed out. The system's default output is used.".to_string(), true),
             (Some(Some(_)), Some(d)) if !devices.contains(d) => (format!("\"{d}\" is not connected; the system's default output is used."), true),
             _ => (format!("Running at {} Hz{}.", app.player.device_rate, if dev.is_empty() { String::new() } else { format!(" on {dev}") }), false),
         };
@@ -982,6 +944,30 @@ fn page_audio(app: &mut App, ui: &mut Ui, tab: usize) {
             }
         }
     });
+    if mode == Mode::Performance {
+        preview_and_device(app, ui);
+    }
+}
+
+/// Audio > Configuration, Performance mode only: Preview Volume and Control Device Information.
+fn preview_and_device(app: &mut App, ui: &mut Ui) {
+    crate::ui_prefs_item::item(ui, "AudioPreviewVolume", 96.0, |it| {
+        it.title("Preview Volume");
+        it.hint("How loud tracks play from the Preview column. In the middle they play at the master volume.");
+        let mut t = app.prefs.preview_volume.clamp(0.0, 1.0);
+        if it.slider(52.0, 56.0, 536.0, &mut t).changed() {
+            app.prefs.preview_volume = t;
+        }
+    });
+    crate::ui_prefs_item::item(ui, "AudioControlDevice", 98.0, |it| {
+        it.title("Control Device Information");
+        it.hint("recordbox is not connected to a controller.");
+        it.text(52.0, 56.0, 550.0, 18.0, "-", 16.0, kit::Just::TopLeft);
+    });
+}
+
+#[allow(dead_code)]
+fn preview_volume_old(app: &mut App, ui: &mut Ui) {
     card(ui, "Preview Volume", |ui| {
         let mut t = app.prefs.preview_volume.clamp(0.0, 1.0);
         if kit::slider(ui, &mut t).on_hover_text("How loud tracks play from the Preview column. In the middle they play at the master volume.").changed() {
@@ -990,83 +976,11 @@ fn page_audio(app: &mut App, ui: &mut Ui, tab: usize) {
     });
 }
 
-/// Audio > Input/Output. rekordbox's EXPORT mode has the output channels here (Mixer Mode
-/// and the input channels belong to PERFORMANCE mode and recording).
-fn audio_io(app: &mut App, ui: &mut Ui, info: &AudioInfo) {
-    let chans = info.caps.as_ref().map(|c| c.channels).unwrap_or(2);
-    let dev = info.caps.as_ref().map(|c| c.name.clone()).unwrap_or_default();
-    let cur = if app.prefs.audio_channel + 1 < chans { app.prefs.audio_channel } else { 0 };
-    let name = |ch: u16| if dev.is_empty() { format!("{}", ch + 1) } else { format!("{dev} : {}", ch + 1) };
-    let mut new_ch = None;
-    let mut new_hp: Option<Option<u16>> = None;
-    card(ui, "Output channels", |ui| {
-        sub(ui, "Master Output");
-        // The pair moves together: the right channel is always the one after the left.
-        for (side, label) in ["L", "R"].iter().enumerate() {
-            kit::row_at(ui, kit::Kind::Ctl, 22.0, 89.5, |ui| {
-                let (r, _) = ui.allocate_exact_size(vec2(40.5, 22.0), egui::Sense::hover());
-                kit::paint_text(ui, pos2(r.min.x, r.center().y), egui::Align2::LEFT_CENTER, label, inter(14.0), WHITE, 0.0);
-                let shown = if chans >= 2 { name(cur + side as u16) } else if side == 0 { name(0) } else { "-".to_string() };
-                kit::combo(("audio_ch", side), 340.0, shown, 14.0).show_ui(ui, |ui| {
-                    let mut first = 0;
-                    while first + 1 < chans {
-                        if ui.selectable_label(cur == first, name(first + side as u16)).clicked() {
-                            new_ch = Some(first);
-                        }
-                        first += 2;
-                    }
-                    if chans <= 2 {
-                        ui.label(kit::text("This device has one stereo output.", 11.0).color(DIM));
-                    }
-                });
-            });
-        }
-        // Headphones Output: another pair of the same device (an interface or controller
-        // with four or more outputs), or none.
-        sub(ui, "Headphones Output");
-        let hp = app.prefs.hp_channel.filter(|h| h + 1 < chans && *h != cur);
-        for (side, label) in ["L", "R"].iter().enumerate() {
-            kit::row_at(ui, kit::Kind::Ctl, 22.0, 89.5, |ui| {
-                let (r, _) = ui.allocate_exact_size(vec2(40.5, 22.0), egui::Sense::hover());
-                kit::paint_text(ui, pos2(r.min.x, r.center().y), egui::Align2::LEFT_CENTER, label, inter(14.0), WHITE, 0.0);
-                let shown = hp.map(|h| name(h + side as u16)).unwrap_or_else(|| "-".to_string());
-                kit::combo(("audio_hp", side), 340.0, shown, 14.0).show_ui(ui, |ui| {
-                    if ui.selectable_label(hp.is_none(), "-").clicked() {
-                        new_hp = Some(None);
-                    }
-                    let mut first = 0;
-                    while first + 1 < chans {
-                        if first != cur && ui.selectable_label(hp == Some(first), name(first + side as u16)).clicked() {
-                            new_hp = Some(Some(first));
-                        }
-                        first += 2;
-                    }
-                    if chans <= 2 {
-                        ui.label(kit::text("This device has one stereo output: choose a device with four or more outputs (an audio interface, a controller, or an Aggregate Device made in Audio MIDI Setup) to hear the CUE in headphones.", 11.0).color(DIM));
-                    }
-                });
-            });
-        }
-    });
-    if let Some(c) = new_ch.filter(|c| *c != app.prefs.audio_channel) {
-        app.prefs.audio_channel = c;
-        // A headphones pair on the same channels gives way.
-        if app.prefs.hp_channel == Some(c) {
-            app.prefs.hp_channel = None;
-        }
-        apply_audio(app);
-    }
-    if let Some(h) = new_hp.filter(|h| *h != app.prefs.hp_channel) {
-        app.prefs.hp_channel = h;
-        apply_audio(app);
-    }
-}
-
 // ------------------------------------------------------------------ Analysis
 
 fn page_analysis(app: &mut App, ui: &mut Ui, tab: usize) {
     if tab == 1 {
-        card(ui, "CUE Analysis", |ui| {
+        card(ui, "Intelligent Cue Creation", |ui| {
             toggle(ui, &mut app.prefs.memory_cue_first_beat, "Set Memory Cue at the first beat of track when analyzing");
             note(ui, "For tracks that have no memory cue yet.");
             separator(ui);
@@ -1077,15 +991,31 @@ fn page_analysis(app: &mut App, ui: &mut Ui, tab: usize) {
     }
     let no_cloud = "recordbox has no cloud service: nothing is collected or uploaded.";
     card(ui, "Track Analysis", |ui| {
-        kit::row(ui, 16.0, |ui| {
-            kit::toggle_raw(ui, &mut app.prefs.refine_beatgrid_transients, "Use high precision BeatGrid analysis");
-            kit::help(ui, 37.5, "Refine beat timing and tempo against repeated attacks in the audio. Works with Normal and Dynamic. Use Analyze Track to update an existing unlocked grid.");
+        kit::labeled(ui, "Beat grid estimator", |ui| {
+            let choices = [(false, "Rekordbox-compatible (default)"), (true, "recordbox classic")];
+            let selected = choices[usize::from(app.prefs.use_recordbox_estimator)].1;
+            kit::combo("beatgrid_estimator", 400.0, selected, 14.0).show_ui(ui, |ui| {
+                for (classic, name) in choices {
+                    ui.selectable_value(&mut app.prefs.use_recordbox_estimator, classic, name);
+                }
+            });
         });
-        separator(ui);
+        note(ui, "Rekordbox-compatible uses the port of the original detector. Classic uses the earlier recordbox detector. Both support Normal and Dynamic.");
+        kit::sub_help(ui, "MP3 cue timing", Some("Some MP3 encoders add a short lead-in. On one track the same cue might land about 25 ms earlier or later on a kick. On another it can land in exactly the same place. Both modes read the original audio file."));
+        match crate::audio::mp3_timeline() {
+            crate::audio::Mp3Timeline::Legacy => {
+                kit::line(ui, "Active timing · Standard recordbox (usual collection)");
+                note(ui, "Listen to a cue imported from AlphaTheta Rekordbox. Restart with --mp3-timeline rekordbox and import the same track and cue into the separate trial collection. Start normally to return.");
+            }
+            crate::audio::Mp3Timeline::Rekordbox => {
+                kit::line(ui, "Active timing · Rekordbox-compatible (separate trial collection)");
+                note(ui, "Import a cue you know from AlphaTheta Rekordbox. Jump to it and listen for the start of the beat before exporting or writing cues back. Restart normally to return to the cues in your usual collection.");
+            }
+        }
         kit::sub_help(ui, "Track Analysis Mode", Some("Normal: optimized for tracks which have a constant BPM.\nDynamic: for tracks whose tempo changes, the beat grid follows the tempo."));
         kit::labeled(ui, "Analysis Mode", |ui| {
             let modes = [("Normal", "Optimized for tracks which have a constant BPM"), ("Dynamic", "For tracks whose tempo changes: the beat grid follows the tempo")];
-            let cur = (app.prefs.analysis_mode as usize).min(1);
+            let cur = usize::from(app.prefs.analysis_mode == 1);
             kit::combo("amode", 400.0, modes[cur].0, 14.0).show_ui(ui, |ui| {
                 for (i, (n, tip)) in modes.iter().enumerate() {
                     if ui.selectable_label(cur == i, *n).on_hover_text(*tip).clicked() {
@@ -1094,6 +1024,14 @@ fn page_analysis(app: &mut App, ui: &mut Ui, tab: usize) {
                 }
             });
         });
+        kit::row(ui, 16.0, |ui| {
+            kit::toggle_raw(ui, &mut app.prefs.refine_beatgrid_transients, "High precision: refine beat timing");
+            kit::help(ui, 37.5, "Align beats and tempo to repeated attacks in the audio. Works with either estimator in Normal and Dynamic mode.");
+        });
+        ui.add_enabled_ui(app.prefs.analysis_mode != 1, |ui| {
+            toggle(ui, &mut app.prefs.use_installed_beatgrid_model, "Use installed beat grid model");
+        });
+        note(ui, "Normal mode can also use a compatible local model on eligible 44.1 or 48 kHz tracks. If the model cannot run, the selected estimator supplies the grid.");
         kit::labeled(ui, "Analysis workers", |ui| {
             let before = app.prefs.analysis_threads;
             let label = if before == 0 { format!("Automatic ({})", app.pool.thread_count()) } else { app.pool.thread_count().to_string() };
@@ -1125,7 +1063,15 @@ fn page_analysis(app: &mut App, ui: &mut Ui, tab: usize) {
         });
         kit::checkbox(ui, &mut app.prefs.analyze_key, "KEY");
         kit::checkbox(ui, &mut app.prefs.phrase_analysis, "Phrase").on_hover_text("Phrases (Intro, Up, Down, Chorus, Outro) are shown under the overview and written to USB exports. rekordbox's own phrases are used for tracks it analysed.");
-        kit::checkbox(ui, &mut app.prefs.vocal_analysis, "Vocal").on_hover_text("Vocal positions for loaded tracks rekordbox never analysed, found with the stem separation model once it is downloaded (about a minute per track on this Mac's GPU, in the background). rekordbox's own vocal detection is used for tracks it analysed.");
+        kit::labeled(ui, "Phrase estimator", |ui| {
+            let label = if app.prefs.classic_phrase_estimator { "recordbox classic" } else { "Rekordbox-compatible" };
+            kit::combo("phrase_estimator", 220.0, label, 14.0).show_ui(ui, |ui| {
+                ui.selectable_value(&mut app.prefs.classic_phrase_estimator, false, "Rekordbox-compatible");
+                ui.selectable_value(&mut app.prefs.classic_phrase_estimator, true, "recordbox classic");
+            });
+        });
+        note(ui, "Used for missing phrases on deck load and USB export. Rekordbox-compatible can fall back to classic. Existing phrase data takes priority.");
+        kit::checkbox(ui, &mut app.prefs.vocal_analysis, "Vocal").on_hover_text("Use imported vocal positions when available. For other tracks, recordbox can use an explicitly configured local vocal model or its downloaded STEMS model.");
         separator(ui);
         sub(ui, "Auto Analysis");
         toggle(ui, &mut app.prefs.auto_analysis, "Enable");
@@ -1383,6 +1329,7 @@ pub(crate) fn page_dj_system(app: &mut App, ui: &mut Ui, tab: usize) {
                     }
                 }
             });
+            crate::ui_prefs_adv::dj_general_more(app, ui);
         }
         1 => dual_list(app, ui, true),
         2 => dual_list(app, ui, false),
@@ -1429,10 +1376,11 @@ pub(crate) fn page_dj_system(app: &mut App, ui: &mut Ui, tab: usize) {
             });
         }
         _ => {
-            card(ui, "Hot Cue Auto Load", |ui| {
+            card(ui, "HOT CUE AUTO LOAD", |ui| {
                 toggle(ui, &mut app.prefs.hot_cue_auto_load_on_import, "Prepare Hot Cue Auto Load setting for CDJ/XDJ use (on import)");
                 note(ui, "Tracks get Hot Cue Auto Load switched on as they are imported, so players set to \"rekordbox SETTING\" load their hot cues.");
             });
+            crate::ui_prefs_adv::dj_link_monitor(app, ui);
             card(ui, "Waveform data written to the device", |ui| {
                 kit::line(ui, "Exports always include the blue, RGB and 3-band waveforms; DJ System > General chooses which one the players show.");
             });
@@ -1440,7 +1388,7 @@ pub(crate) fn page_dj_system(app: &mut App, ui: &mut Ui, tab: usize) {
                 kit::line(ui, "Drive formats: FAT32, exFAT (some players), HFS+ (USB only).");
                 kit::line(ui, "Files: MP3, AAC/M4A, WAV, AIFF, FLAC.");
                 note(ui, "Classic Device Library uses export.pdb and exportExt.pdb, analysis files (DAT, EXT and 2EX), and music in /Contents.");
-                note(ui, "OneLibrary (Device Library Plus) is detected. On drives with both catalogs, recordbox browses and updates the classic catalog and preserves existing shared files.");
+                note(ui, "On a mixed drive, recordbox updates the classic catalog and preserves existing shared files. Right-click the drive and choose Inspect OneLibrary playlists to view the other catalog with the optional reader.");
             });
         }
     }
@@ -1451,282 +1399,29 @@ pub(crate) fn page_dj_system(app: &mut App, ui: &mut Ui, tab: usize) {
 /// Shortcuts the menus and text fields keep for themselves.
 const RESERVED: [&str; 9] = ["Cmd+N", "Cmd+E", "Cmd+I", "Cmd+Z", "Shift+Cmd+Z", "Cmd+A", "Cmd+F", "Cmd+Q", "Cmd+H"];
 
-fn page_keyboard(app: &mut App, ui: &mut Ui, tab: usize) {
-    let cat = ACTION_CATEGORIES[tab.min(ACTION_CATEGORIES.len() - 1)];
-    card(ui, cat, |ui| {
-        kit::line(ui, "Click a shortcut, then press the new key for that action, with Ctrl, Opt, Shift or ⌘ if you like (Esc cancels, Delete clears).");
-        let wait_id = egui::Id::new(SHORTCUT_WAIT_ID);
-        let waiting: Option<String> = ui.ctx().data(|d| d.get_temp(wait_id)).flatten();
-        if let Some(action) = &waiting {
-            let got = ui.input(|i| {
-                i.events.iter().find_map(|e| match e {
-                    egui::Event::Key { key, pressed: true, modifiers, .. } => Some(Shortcut::from_event(*key, modifiers)),
-                    _ => None,
-                })
-            });
-            if let Some(sc) = got {
-                let plain = !(sc.ctrl || sc.alt || sc.shift || sc.cmd);
-                if sc.key == egui::Key::Escape {
-                } else if plain && matches!(sc.key, egui::Key::Delete | egui::Key::Backspace) && action != "remove" {
-                    app.prefs.keymap.insert(action.clone(), String::new());
-                } else if RESERVED.contains(&sc.name().as_str()) {
-                    app.toast_err(format!("{} is kept by the menus.", key_text(&sc)));
-                } else {
-                    // A shortcut belongs to one action: take it away from any other.
-                    let name = sc.name();
-                    let others: Vec<String> = ACTIONS.iter().map(|a| a.0.to_string()).filter(|a| a != action && app.prefs.shortcut_for(a) == Some(sc)).collect();
-                    for o in others {
-                        app.prefs.keymap.insert(o, String::new());
-                    }
-                    app.prefs.keymap.insert(action.clone(), name);
-                }
-                ui.ctx().data_mut(|d| d.insert_temp::<Option<String>>(wait_id, None));
-            }
-        }
-        kit::block(ui, |ui| egui::Grid::new(("keymap_grid", tab)).num_columns(3).spacing(vec2(16.0, 6.0)).show(ui, |ui| {
-            for (id, label, def, c) in ACTIONS {
-                if c != cat {
-                    continue;
-                }
-                ui.label(kit::text(label, 13.0).color(WHITE));
-                let shown = if waiting.as_deref() == Some(id) { "Press a key…".to_string() } else { app.prefs.shortcut_for(id).map(|k| key_text(&k)).unwrap_or_else(|| "—".into()) };
-                if ui.add(btn(shown).min_size(vec2(140.0, 22.0))).clicked() {
-                    ui.ctx().data_mut(|d| d.insert_temp(wait_id, Some(id.to_string())));
-                }
-                let changed = app.prefs.keymap.contains_key(id);
-                if ui.add_enabled(changed, btn("Default").small()).on_hover_text(if def.is_empty() { "Not assigned".to_string() } else { Shortcut::parse(def).map(|s| key_text(&s)).unwrap_or_default() }).clicked() {
-                    app.prefs.keymap.remove(id);
-                }
-                ui.end_row();
-            }
-        }));
-    });
-    card(ui, "Keyboard shortcuts", |ui| {
-        kit::block(ui, |ui| ui.horizontal(|ui| {
-            if ui.add(btn("Reset to defaults")).clicked() {
-                app.dialogs.ext.reset_ask = Some(Some(3));
-            }
-            if ui.add(btn("Export…")).clicked() {
-                if let Some(f) = rfd::FileDialog::new().set_file_name("recordbox-shortcuts.json").save_file() {
-                    let _ = std::fs::write(f, serde_json::to_vec_pretty(&app.prefs.keymap).unwrap_or_default());
-                }
-            }
-            if ui.add(btn("Import…")).clicked() {
-                if let Some(f) = rfd::FileDialog::new().add_filter("JSON", &["json"]).pick_file() {
-                    match std::fs::read(&f).ok().and_then(|b| serde_json::from_slice::<std::collections::BTreeMap<String, String>>(&b).ok()) {
-                        Some(m) => app.prefs.keymap = m.into_iter().filter(|(k, v)| ACTIONS.iter().any(|a| a.0 == k) && (v.is_empty() || Shortcut::parse(v).is_some())).collect(),
-                        None => app.toast_err("That file is not a recordbox shortcut profile."),
-                    }
-                }
-            }
-            if ui.add(btn("Show all…")).clicked() {
-                app.dialogs.ext.shortcuts_open = true;
-            }
-        }));
-        note(ui, "⌘ and Ctrl shortcuts of Import file, Import directory, Fullscreen mode and Preferences also appear in the menu bar.");
-        note(ui, "F11 toggles full screen for the main window and detached library together unless you assign it to another action.");
-    });
+fn page_keyboard(app: &mut App, ui: &mut Ui, _tab: usize) {
+    let mode = prefs_mode(app);
+    crate::ui_prefs_keys::page(app, ui, mode);
 }
 
 // ------------------------------------------------------------------ Advanced
 
 fn page_advanced(app: &mut App, ui: &mut Ui, tab: usize) {
-    match tab {
-        0 => {
-            card(ui, "Database management", |ui| {
-                sub(ui, "Active recordbox library");
-                ui.add(egui::Label::new(app.db.active_library_path()).selectable(true).wrap());
-                note(ui, "Edits are saved in this recordbox library. Library sync lets you review supported changes for write-back to AlphaTheta Rekordbox.");
-                kit::block(ui, |ui| {
-                    if ui.add(btn("Show library folder")).clicked() {
-                        crate::menus::handle(app, "library_folder");
-                    }
-                });
-                separator(ui);
-                sub(ui, "Library");
-                let busy = app.dialogs.ext.backup_job.is_some();
-                kit::block(ui, |ui| {
-                    ui.horizontal(|ui| {
-                        if ui.add_enabled(!busy, btn("Backup Library").min_size(vec2(150.0, 22.0))).clicked() {
-                            crate::menus::handle(app, "backup");
-                        }
-                        if ui.add_enabled(!busy && app.dialogs.library_sync_review.is_none() && app.rb_job.is_none(), btn("Restore Library").min_size(vec2(150.0, 22.0))).clicked() {
-                            crate::menus::handle(app, "restore");
-                        }
-                    });
-                });
-                note(ui, "A backup is one .zip file with the database, the artwork and, if you choose, the music files. Before a restore replaces the library, the present one is copied into the backups folder here.");
-            });
-        }
-        1 => {
-            card(ui, "iTunes", |ui| {
-                sub(ui, "iTunes Library File");
-                kit::block(ui, |ui| {
-                    path_row(ui, &app.prefs.itunes_xml, "no recently selected files");
-                    ui.horizontal(|ui| {
-                        if ui.add(btn("Browse")).clicked() {
-                            if let Some(f) = rfd::FileDialog::new().add_filter("iTunes Library", &["xml"]).pick_file() {
-                                app.prefs.itunes_xml = Some(f.to_string_lossy().to_string());
-                            }
-                        }
-                        if app.prefs.itunes_xml.is_some() && ui.add(btn("Clear")).clicked() {
-                            app.prefs.itunes_xml = None;
-                        }
-                    });
-                });
-                note(ui, "The library file the iTunes source of the Tree View reads. Without one, the usual places and the Music app are tried.");
-            });
-            card(ui, "rekordbox xml", |ui| {
-                sub(ui, "Imported Library");
-                kit::block(ui, |ui| {
-                    path_row(ui, &app.prefs.rekordbox_xml_path, "no recently selected files");
-                    ui.horizontal(|ui| {
-                        if ui.add(btn("Browse")).clicked() {
-                            if let Some(f) = rfd::FileDialog::new().add_filter("XML", &["xml"]).pick_file() {
-                                app.prefs.rekordbox_xml_path = Some(f.to_string_lossy().to_string());
-                            }
-                        }
-                        let path = app.prefs.rekordbox_xml_path.clone();
-                        let exists = path.as_deref().map(|p| std::path::Path::new(p).is_file()).unwrap_or(false);
-                        if ui.add_enabled(exists, btn("Import now")).on_disabled_hover_text("Choose a rekordbox xml file first.").clicked() {
-                            if let Some(p) = path {
-                                app.import_xml(std::path::Path::new(&p));
-                            }
-                        }
-                        if app.prefs.rekordbox_xml_path.is_some() && ui.add(btn("Clear")).clicked() {
-                            app.prefs.rekordbox_xml_path = None;
-                        }
-                    });
-                });
-                note(ui, "A collection exported from rekordbox (File > Export Collection in xml format).");
-            });
-            card(ui, "My Tag", |ui| {
-                if toggle(ui, &mut app.prefs.mytag_to_comments, "Add \"My Tag\" to the \"Comments\"") && app.prefs.mytag_to_comments {
-                    // Tracks that are tagged already get their tags in the comment now.
-                    let ids: Vec<i64> = app.track_tags.iter().filter(|(_, s)| !s.is_empty()).map(|(id, _)| *id).collect();
-                    crate::prefs_ext::sync_mytag_comments(app, &ids);
-                    app.list_dirty = true;
-                }
-                note(ui, "A track's My Tags are added at the end of its comment as /* Tag / Tag */ whenever its tags change.");
-            });
-            card(ui, "Color", |ui| {
-                sub(ui, "Customize Color Comments");
-                note(ui, "Your own names for the eight track colours. They are shown wherever a colour is chosen.");
-                kit::block(ui, |ui| {
-                    egui::Grid::new("color_comments").num_columns(2).spacing(vec2(12.0, 6.0)).show(ui, |ui| {
-                        for i in 0..8usize {
-                            let (r, _) = ui.allocate_exact_size(vec2(18.0, 18.0), egui::Sense::hover());
-                            ui.painter().rect_filled(r.shrink(2.0), 2.0, label_color(i as u8 + 1));
-                            ui.add(egui::TextEdit::singleline(&mut app.prefs.color_names[i]).desired_width(300.0).hint_text(crate::model::COLOR_NAMES[i + 1]));
-                            ui.end_row();
-                        }
-                    });
-                    ui.add_space(4.0);
-                    if ui.add(btn("RESET").min_size(vec2(120.0, 22.0)).font_size(12.0)).clicked() {
-                        app.prefs.color_names = crate::prefs_ext::default_color_names();
-                    }
-                });
-            });
-            card(ui, "Auto Relocate Search Folders", |ui| {
-                note(ui, "Track > Relocate > Auto Relocate looks in these folders (and the folders inside them) for missing files.");
-                kit::block(ui, |ui| {
-                    let mut remove = None;
-                    for (i, f) in app.prefs.relocate_folders.iter().enumerate() {
-                        ui.horizontal(|ui| {
-                            path_row(ui, &Some(f.clone()), "");
-                            if ui.add(btn("Remove").small()).clicked() {
-                                remove = Some(i);
-                            }
-                        });
-                    }
-                    if let Some(i) = remove {
-                        app.prefs.relocate_folders.remove(i);
-                    }
-                    ui.horizontal(|ui| {
-                        if ui.add(btn("Add")).clicked() {
-                            if let Some(d) = rfd::FileDialog::new().pick_folder() {
-                                let s = d.to_string_lossy().to_string();
-                                if !app.prefs.relocate_folders.contains(&s) {
-                                    app.prefs.relocate_folders.push(s);
-                                }
-                            }
-                        }
-                        let any = !app.prefs.relocate_folders.is_empty() && app.tracks.iter().any(|t| t.missing);
-                        if ui.add_enabled(any, btn("Auto Relocate now")).on_disabled_hover_text("Needs a folder here and at least one missing file.").clicked() {
-                            app.auto_relocate(None);
-                        }
-                    });
-                });
-            });
-        }
-        _ => {
-            card(ui, "rekordbox Library", |ui| {
-                kit::line(ui, "Active recordbox library");
-                ui.label(app.db.active_library_path());
-                toggle(ui, &mut app.prefs.import_rekordbox_at_startup, "Import the installed AlphaTheta Rekordbox library at startup");
-                note(ui, "Startup import reads the AlphaTheta Rekordbox library into recordbox. To write changes back, use the sync arrows, select changes and confirm the backup.");
-                kit::block(ui, |ui| {
-                    if ui.add_enabled(app.can_review_library_sync(), btn("Review library sync…")).clicked() {
-                        app.dialogs.prefs_open = false;
-                        app.review_rekordbox_sync();
-                    }
-                });
-            });
-        }
-    }
+    let mode = prefs_mode(app);
+    let name = tabs_of(rb::ADVANCED, mode).get(tab).copied().unwrap_or("Others");
+    crate::ui_prefs_adv::page_advanced(app, ui, name, mode);
 }
 
 /// Controller > Deck: rekordbox's Eject/Load Lock and the Instant Doubles switch of its Load
 /// card (labels and defaults as in 7.2.19).
 fn page_deck(app: &mut App, ui: &mut Ui) {
-    let mut changed = false;
-    card(ui, "Eject/Load Lock", |ui| {
-        if radio(ui, app.prefs.deck_load_lock, "Lock") {
-            app.prefs.deck_load_lock = true;
-            changed = true;
-        }
-        if radio(ui, !app.prefs.deck_load_lock, "Unlock") {
-            app.prefs.deck_load_lock = false;
-            changed = true;
-        }
-    });
-    card(ui, "Load", |ui| {
-        changed |= toggle(ui, &mut app.prefs.instant_doubles, "Instant Doubles");
-        note(ui, "Loading the track that is already on the other deck takes over its position, tempo and play state.");
-    });
-    if changed {
-        app.save_prefs();
-    }
+    crate::ui_prefs_perf::page_deck(app, ui);
 }
 
 /// Controller > Mixer, as far as the Performance mixer goes: rekordbox's EQ / ISOLATOR choice
 /// and its three channel fader curves (labels and defaults as in 7.2.19).
 fn page_mixer(app: &mut App, ui: &mut Ui) {
-    let mut changed = false;
-    card(ui, "EQ", |ui| {
-        sub(ui, "EQ/ISOLATOR");
-        if radio(ui, !app.prefs.eq_isolator, "EQ") {
-            app.prefs.eq_isolator = false;
-            changed = true;
-        }
-        if radio(ui, app.prefs.eq_isolator, "ISOLATOR") {
-            app.prefs.eq_isolator = true;
-            changed = true;
-        }
-        note(ui, "EQ: HIGH, MID and LOW cut to -26 dB and boost to +6 dB (the DJM-900NXS2 type). ISOLATOR: each band can be removed completely.");
-    });
-    card(ui, "Channel Fader Curve", |ui| {
-        for (i, name) in ["Exponential Curve", "Linear Curve", "Logarithmic Curve"].iter().enumerate() {
-            if radio(ui, app.prefs.ch_fader_curve == i as u8, name) {
-                app.prefs.ch_fader_curve = i as u8;
-                changed = true;
-            }
-        }
-    });
-    if changed {
-        app.poll_decks();
-        app.save_prefs();
-    }
+    crate::ui_prefs_perf::page_mixer(app, ui);
 }
 
 /// A section title over the cards (rekordbox's "SAMPLER", "SEQUENCER", "Quantize").
@@ -1754,188 +1449,23 @@ fn page_effect(app: &mut App, ui: &mut Ui) {
 /// Controller > Sampler, after rekordbox 7.2.19 (reference preferences/10): SLOT, Capture,
 /// Auto Panel Mode and Sequence Load, with rekordbox's labels and defaults.
 fn page_sampler(app: &mut App, ui: &mut Ui) {
-    let mut changed = false;
-    section(ui, "SAMPLER");
-    card(ui, "SLOT", |ui| {
-        if radio(ui, app.prefs.sampler.slots16, "16") {
-            app.prefs.sampler.slots16 = true;
-            changed = true;
-        }
-        if radio(ui, !app.prefs.sampler.slots16, "8") {
-            app.prefs.sampler.slots16 = false;
-            changed = true;
-        }
-        ui.add_space(6.0);
-        changed |= toggle(ui, &mut app.prefs.sampler.load_lock, "Do not overwrite the loaded Slot.");
-    });
-    card(ui, "Capture", |ui| {
-        sub(ui, "Location of Files");
-        let dir = crate::sampler_ext::capture_dir(&app.prefs.sampler.capture_dir).to_string_lossy().to_string();
-        // (A long path shows its end: the box is 410 pt wide, as in rekordbox.)
-        let n = dir.chars().count();
-        let shown = if n > 48 { format!("…{}", dir.chars().skip(n - 47).collect::<String>()) } else { dir.clone() };
-        kit::combo_row(ui, 22.0, |ui| {
-            kit::combo("smp_capdir", 410.0, shown, 14.0).show_ui(ui, |ui| {
-                if ui.selectable_label(app.prefs.sampler.capture_dir.is_empty(), crate::sampler_ext::capture_dir("").to_string_lossy()).clicked() {
-                    app.prefs.sampler.capture_dir.clear();
-                    changed = true;
-                }
-            });
-            ui.add_space(10.0);
-            if ui.add(btn("Browse").min_size(vec2(100.0, 22.0))).clicked() {
-                if let Some(d) = rfd::FileDialog::new().set_title("Location of Files").pick_folder() {
-                    app.prefs.sampler.capture_dir = d.to_string_lossy().to_string();
-                    changed = true;
-                }
-            }
-        });
-        sub(ui, "Location of a Bank for Slicer Capture");
-        kit::combo_row(ui, 22.0, |ui| {
-            let b = app.prefs.sampler.slicer_bank.clamp(1, 4);
-            kit::combo("smp_slicerbank", 520.0, format!("Bank{b}"), 14.0).show_ui(ui, |ui| {
-                for k in 1..=4u8 {
-                    if ui.selectable_label(b == k, format!("Bank{k}")).clicked() {
-                        app.prefs.sampler.slicer_bank = k;
-                        changed = true;
-                    }
-                }
-            });
-        });
-        kit::indent(ui, 52.0);
-        ui.add_space(7.0);
-        changed |= toggle(ui, &mut app.prefs.sampler.capture_empty, "Capture the loop in an empty slot");
-    });
-    card(ui, "Auto Panel Mode", |ui| {
-        changed |= toggle(ui, &mut app.prefs.sampler.auto_panel_disable, "Disable");
-    });
-    section(ui, "SEQUENCER");
-    card(ui, "Sequence Load", |ui| {
-        changed |= toggle(ui, &mut app.prefs.sampler.seq.load_autoplay, "Load the sequence and automatically play.");
-    });
-    // (rekordbox shows this card only with a DDJ-RZX connected; the setting is kept for
-    // velocity pads, which recordbox has no hardware path for yet.)
-    card(ui, "Velocity Curve", |ui| {
-        kit::combo_row(ui, 22.0, |ui| {
-            let c = app.prefs.sampler.velocity_curve.clamp(1, 4);
-            kit::combo("smp_velocity", 500.0, format!("Curve {c}"), 14.0).show_ui(ui, |ui| {
-                for k in 1..=4u8 {
-                    if ui.selectable_label(c == k, format!("Curve {k}")).clicked() {
-                        app.prefs.sampler.velocity_curve = k;
-                        changed = true;
-                    }
-                }
-            });
-        });
-        note(ui, "For velocity pads of a controller. Not used yet: recordbox has no controller pads.");
-    });
-    if changed {
-        app.save_prefs();
-    }
+    crate::ui_prefs_perf::page_sampler(app, ui);
 }
 
 /// Controller > Others, as far as it is built: the SEQUENCER row of Quantize > Type >
 /// QUANTIZE (rekordbox's SequencerQuantizeStatus and SequencerQuantize; reference
 /// preferences/13). It takes effect while the sampler's Q is on.
 fn page_controller_others(app: &mut App, ui: &mut Ui) {
-    let mut changed = false;
-    section(ui, "Quantize");
-    card(ui, "Type", |ui| {
-        sub(ui, "QUANTIZE");
-        kit::combo_row(ui, 22.0, |ui| {
-            // (Label 89 pt in, switch 264, list 385: reference preferences/13.)
-            ui.add_space(5.0);
-            let x0 = ui.cursor().min.x;
-            ui.label(kit::text("SEQUENCER", 14.0).color(WHITE));
-            ui.add_space((175.0 - (ui.cursor().min.x - x0)).max(4.0));
-            let x1 = ui.cursor().min.x;
-            changed |= kit::toggle_raw(ui, &mut app.prefs.sampler.seq.quantize_on, "Enable");
-            ui.add_space((121.0 - (ui.cursor().min.x - x1)).max(4.0));
-            const NAMES: [&str; 6] = ["1/32", "1/16", "1/8", "1/4", "1/2", "1/1"];
-            let q = app.prefs.sampler.seq.quantize.clamp(1, 6);
-            kit::combo("seq_quantize", 200.0, NAMES[q as usize - 1], 14.0).show_ui(ui, |ui| {
-                for k in 1..=6u8 {
-                    if ui.selectable_label(q == k, NAMES[k as usize - 1]).clicked() {
-                        app.prefs.sampler.seq.quantize = k;
-                        changed = true;
-                    }
-                }
-            });
-        });
-        note(ui, "Notes recorded into a sequence go to the nearest line of this grid (1/4 = one beat) while the sampler's Q is on.");
-    });
-    if changed {
-        app.save_prefs();
-    }
+    crate::ui_prefs_perf::page_others(app, ui);
 }
 
-/// The STEMS page, laid out and worded as rekordbox's Extensions > STEMS (7.2.19); the model
-/// download and the stem cache, which rekordbox does not have, are in a card of their own.
+/// Extensions > STEMS (the page is in ui_prefs_adv.rs).
 fn page_stems(app: &mut App, ui: &mut Ui) {
-    // The switch above the cards, on the window's black: 43 pt band, the switch 20 pt in.
-    let (band, _) = ui.allocate_exact_size(vec2(ui.available_width().min(kit::CARD_W), 43.0), egui::Sense::hover());
-    let mut head = ui.new_child(egui::UiBuilder::new().max_rect(Rect::from_min_max(pos2(band.min.x + 20.0, band.min.y + 13.0), band.max)).layout(egui::Layout::left_to_right(egui::Align::Center)));
-    kit::toggle_raw(&mut head, &mut app.prefs.show_stems, "Enable the STEMS Function");
-    card(ui, "STEMS mode", |ui| {
-        if radio(ui, app.prefs.stem_parts == 3, "3 Stems(VOCAL, INST, DRUMS)") {
-            app.prefs.stem_parts = 3;
-        }
-        if radio(ui, app.prefs.stem_parts != 3, "4 Stems(VOCAL, INST, BASS, DRUMS)") {
-            app.prefs.stem_parts = 4;
-        }
-    });
-    let [quality, speed] = &crate::stems::CATALOG;
+    crate::ui_prefs_adv::page_stems(app, ui);
+}
+
+pub(crate) fn stem_model_card(app: &mut App, ui: &mut Ui) {
     let cur = app.stem.model.clone().or_else(|| app.prefs.stem_model.clone()).unwrap_or_default();
-    let tip = format!("Prioritize sound quality: {} — {}\nPrioritize speed: {} — {}", quality.name, quality.about, speed.name, speed.about);
-    kit::card_help(ui, "STEMS Analysis Process", Some(&tip), |ui| {
-        ui.add_space(-2.0);
-        let able = app.stem.hw.as_ref().is_none_or(|hw| hw.ram_gb >= quality.min_ram_gb && crate::stems::backend_status().0);
-        let mut pick = None;
-        if able || cur == quality.id {
-            if radio(ui, cur == quality.id, "Prioritize sound quality") {
-                pick = Some(quality);
-            }
-        } else {
-            let ram = app.stem.hw.as_ref().map_or(0.0, |hw| hw.ram_gb);
-            kit::radio_off(ui, false, "Prioritize sound quality", &format!("{} requires GPU separation and {:.0} GB of system RAM. Detected {:.0} GB of system RAM. STEMS backend: {}", quality.name, quality.min_ram_gb, ram, crate::stems::backend_status().1));
-        }
-        if radio(ui, cur != quality.id, "Prioritize speed") {
-            pick = Some(speed);
-        }
-        ui.add_space(2.0);
-        if let Some(m) = pick.filter(|m| m.id != cur) {
-            app.select_stem_model(m);
-        }
-    });
-    card(ui, "Layout", |ui| {
-        sub(ui, "ACTIVE STEM/STEM ISO/STEM FX Layout");
-        kit::indent(ui, 88.0);
-        let why = "recordbox has one layout for the part buttons, in the player's STEMS strip.";
-        radio(ui, true, "Auto");
-        kit::radio_off(ui, false, "Customize", why);
-        kit::combo_row(ui, 22.0, |ui| {
-            // Greyed as in the original while "Customize" is not chosen: it opens on nothing.
-            egui::ComboBox::from_id_salt("stem_layout").width(520.0).selected_text(RichText::new("CUSTOM3").font(inter_bold(14.0)).color(hex(0x878787))).icon(kit::chevron_dim).show_ui(ui, |ui| {
-                ui.label(kit::text(why, 12.0).color(DIM));
-            });
-        });
-        kit::radio_off(ui, false, "Do not display", "Switch \"Enable the STEMS Function\" off to hide the part buttons.");
-    });
-    kit::card_help(ui, "STEM Waveform Display", Some("When enabled, the waveform shows the parts that sound. When disabled, the original waveform is always shown."), |ui| {
-        toggle_if(app, ui, STEM_WAVEFORM_WIRED, |p| &mut p.stem_waveform, "Enable", "recordbox always shows the original waveform, so far.");
-    });
-    card(ui, "ACTIVE STEM Setting", |ui| {
-        if radio(ui, !app.prefs.stem_solo, "MUTE") {
-            crate::prefs_ext::set_stem_solo(app, false);
-        }
-        if STEM_SOLO_WIRED {
-            if radio(ui, app.prefs.stem_solo, "SOLO") {
-                crate::prefs_ext::set_stem_solo(app, true);
-            }
-        } else {
-            kit::radio_off(ui, false, "SOLO", "The part buttons mute their part, so far.");
-        }
-        toggle(ui, &mut app.prefs.stem_reset_on_load, "Reset the MUTE/SOLO state while loading");
-    });
     card(ui, "Stem separation model (recordbox)", |ui| {
         if let Some(hw) = &app.stem.hw {
             kit::line(
@@ -1962,6 +1492,14 @@ fn page_stems(app: &mut App, ui: &mut Ui) {
         }
         if let Some((d, t)) = app.stem.downloading {
             kit::line(ui, &if t > 0 { format!("Downloading… {:.0}%", d as f64 / t as f64 * 100.0) } else { "Downloading…".into() });
+        }
+        let model = crate::stems::spec(&cur);
+        let preview_supported = app.stem.hw.as_ref().zip(model).is_some_and(|(hw, model)|
+            crate::stems::Live::supported(hw, model, app.manual_stem_device())
+        );
+        if preview_supported {
+            toggle(ui, &mut app.prefs.stems_progressive_preview, "Preview finished sections during new separations");
+            note(ui, "Mute and solo work in finished sections, up to the first 6 min 20 s. Later sections play the original until separation completes. With enough free GPU memory, fine-tuned parts become available from the first section. With less headroom, previews begin during the fourth pass.");
         }
         let automatic_available = !crate::app::MANUAL_STEMS_PREVIEW && crate::stems::backend_hold().is_none();
         ui.add_enabled_ui(automatic_available, |ui| {
@@ -2064,6 +1602,7 @@ fn page_stems(app: &mut App, ui: &mut Ui) {
 
 /// Keyboard Shortcuts, Backup Library and Restore Library windows.
 pub fn extra_windows(app: &mut App, ctx: &Context) {
+    crate::prefs_shell::confirm_window(app, ctx);
     shortcuts_window(app, ctx);
     backup_windows(app, ctx);
 }
@@ -2212,18 +1751,21 @@ mod tests {
 
     #[test]
     fn search_finds_settings_and_shortcuts() {
-        assert!(search_settings("").is_empty());
-        let hits = search_settings("buffer");
+        let ex = Mode::Export;
+        assert!(search_settings("", ex).is_empty());
+        let hits = search_settings("buffer", ex);
         assert_eq!(hits, vec![(5, 0, "Buffer size".to_string())]);
-        let hits = search_settings("memory cue 10");
-        assert!(hits.iter().any(|h| h.0 == 3 && h.2 == "Memory Cue 10"));
-        assert!(hits.iter().any(|h| h.2 == "Delete Memory Cue 10"));
-        assert!(search_settings("WAVEFORM").len() >= 5, "search ignores case");
-        assert!(search_settings("zzzz").is_empty());
-        // Every indexed setting points at a tab that exists.
+        assert!(search_settings("WAVEFORM", ex).len() >= 5, "search ignores case");
+        assert!(search_settings("zzzz", ex).is_empty());
+        assert_eq!(search_settings("grid estimator", ex), vec![(1, 0, "Beat grid estimator".to_string())]);
+        assert_eq!(search_settings("MP3 cue", ex), vec![(1, 0, "MP3 cue timing".to_string())]);
+        // A page that exists only in Performance mode is found only there.
+        assert!(search_settings("needle lock", ex).is_empty());
+        assert_eq!(search_settings("needle lock", Mode::Performance), vec![(7, 0, "Needle Lock".to_string())]);
+        assert!(search_settings("Play/Pause", Mode::Performance).iter().any(|h| h.0 == 3));
+        // Every indexed setting points at a tab that exists in some mode.
         for (page, tab, name) in SETTINGS {
-            assert!(PAGES.iter().any(|p| p.0 == page), "{name}");
-            assert!(tab < tabs_of(page).len(), "{name}");
+            assert!([Mode::Export, Mode::Performance].iter().any(|m| rb::categories(*m).contains(&page) && tabs_of(page, *m).contains(&tab)), "{name}: {page} > {tab}");
         }
     }
 

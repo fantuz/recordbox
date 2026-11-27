@@ -237,15 +237,34 @@ pub struct Prefs {
     pub perf_fx: bool,
     /// Performance: 4Deck Horizontal instead of 2Deck Horizontal.
     pub perf_four: bool,
+    /// The rest of the Performance layout (vertical, Browse, zoom ...): ui_perf_layouts.rs.
+    pub perf_lay: crate::ui_perf_layouts::LayoutPrefs,
     /// Performance: the sampler panel is shown.
     pub perf_sampler: bool,
     /// The sampler deck: its slots and settings.
     pub sampler: crate::ui_sampler::SamplerPrefs,
+    /// Traffic Light (traffic.rs): on / off, target per mode, range.
+    pub traffic: crate::traffic::TrafficPrefs,
+    /// The Performance deck's settings (Preferences > Controller > Deck and Mixer; `deck.rs`).
+    #[serde(default)]
+    pub deck: crate::deck::DeckPrefs,
+    /// Groove Circuit: Preferences > Extensions > STEMS, its rows (groove.rs).
+    pub groove: crate::groove::GroovePrefs,
+    /// Controller settings (midi.rs).
+    pub midi: crate::midi::MidiPrefs,
+    /// Recording: the panel and Preferences > Controller > Recordings (ui_rec.rs).
+    pub rec: crate::ui_rec::RecPrefs,
+    /// The pad modes' settings (layout, BEAT JUMP pages, hot cue colour set, slicer, USER pads).
+    pub pads: crate::pads::PadsPrefs,
+    /// Automix, MIX POINT LINK and the sampler lists (automix.rs, mpl.rs, sampler_lib.rs).
+    pub mixx: crate::automix::MixPrefs,
     /// The FX panel's choices (rekordbox's FxUnitSettings): modes, effects, beat values,
     /// single-mode snapshots, RELEASE FX and the CFX row.
     pub fx: crate::ui_fx::FxSaved,
     /// 0 = EXPORT, 1 = PERFORMANCE (the header's mode list).
     pub app_mode: u8,
+    /// EDIT mode's settings (ui_edit.rs); `app_mode` 2 is EDIT.
+    pub edit: crate::ui_edit::EditPrefs,
     /// Preferences > Controller > Mixer: HIGH / MID / LOW as an isolator (else an equalizer),
     /// and the channel fader curve (0 Exponential, 1 Linear, 2 Logarithmic).
     pub eq_isolator: bool,
@@ -254,6 +273,8 @@ pub struct Prefs {
     pub stems_auto_separate: bool,
     /// Also start uncached model inference on Load when no accelerator is available.
     pub stems_auto_cpu: bool,
+    /// Preview finalized sections during eligible GPU jobs started after this preference is set.
+    pub stems_progressive_preview: bool,
     /// Storage budget in decimal GB. At zero, each new save keeps only its own result.
     pub stem_cache_gb: u32,
     /// Skip automatic eviction and retain the budget in case the user switches back.
@@ -288,7 +309,7 @@ pub struct Prefs {
     pub center_selected: bool,
     /// Vocal positions above the overview waveform.
     pub show_vocal: bool,
-    /// Detect vocals (with the stem model) for loaded tracks rekordbox never analysed.
+    /// Detect vocals when analysing (rekordbox's detector, `vocal_rb`; the stem model without rekordbox).
     pub vocal_analysis: bool,
     /// The column set and sort not in use: playlists and the collection each keep their own
     /// (rekordbox shows # and fewer columns in playlists). `columns_for_playlist` says which
@@ -307,8 +328,12 @@ pub struct Prefs {
     pub wave_half: bool,
     /// View > Color > Customize Color Comments: names of the 8 track colours (Pink..Purple).
     pub color_names: [String; 8],
-    /// Analysis: "Use high precision BeatGrid analysis".
+    /// Select the earlier recordbox estimator for both Normal and Dynamic analysis.
+    pub use_recordbox_estimator: bool,
+    /// Refine the selected detector's grid against transient attacks in the audio.
     pub refine_beatgrid_transients: bool,
+    /// Additional model-based beat grid analysis, requested by the user.
+    pub use_installed_beatgrid_model: bool,
     /// CUE Analysis: "Set Memory Cue at the first beat of track when analyzing".
     pub memory_cue_first_beat: bool,
     /// Audio: buffer size in frames (0 = the device's default), sample rate (0 = the
@@ -330,6 +355,7 @@ pub struct Prefs {
     pub hot_cue_auto_load_on_import: bool,
     /// Phrase analysis: shown in the player and written to USB exports.
     pub phrase_analysis: bool,
+    pub classic_phrase_estimator: bool,
     /// Library (see library_ext.rs). Auto Relocate Search Folders: missing files are looked
     /// for under these.
     pub relocate_folders: Vec<String>,
@@ -404,6 +430,9 @@ pub struct Prefs {
     pub stem_reset_on_load: bool,
     /// STEMS > STEM Waveform Display: the waveform shows only the parts that sound.
     pub stem_waveform: bool,
+    /// The settings of rekordbox's Preferences that came with the full window (prefs_rb.rs).
+    #[serde(default = "crate::prefs_rb::legacy_library_preferences")]
+    pub rb: crate::prefs_rb::RbPrefs,
 }
 
 /// Keyboard actions: (id, label, default shortcut in stored form or "" for none, category).
@@ -472,6 +501,23 @@ impl Shortcut {
 }
 
 impl Prefs {
+    /// Snapshot the settings shared by manual analysis, automatic analysis and device export.
+    pub fn analysis_settings(&self) -> AnalysisSettings {
+        let (lo, hi) = BPM_RANGES[self.bpm_range.min(BPM_RANGES.len() - 1)];
+        AnalysisSettings {
+            bpm_min: lo,
+            bpm_max: hi,
+            do_grid: self.analyze_grid,
+            use_recordbox_estimator: self.use_recordbox_estimator,
+            high_precision: self.refine_beatgrid_transients,
+            model_grid_mode: crate::analysis::rb_hp::mode_from_preferences(self.use_installed_beatgrid_model, self.analysis_mode),
+            dynamic: self.analysis_mode == 1,
+            vocal: self.vocal_analysis,
+            do_key: self.analyze_key,
+            target_lufs: self.target_lufs,
+        }
+    }
+
     /// The shortcut assigned to an action (the user's choice, else the default).
     pub fn shortcut_for(&self, action: &str) -> Option<Shortcut> {
         let name = self.keymap.get(action).cloned().or_else(|| ACTIONS.iter().find(|a| a.0 == action).map(|a| a.2.to_string()))?;
@@ -617,8 +663,31 @@ mod prefs_tests {
     fn the_old_inactive_precision_switch_does_not_opt_users_into_new_work() {
         let old: super::Prefs = serde_json::from_str(r#"{"high_precision_grid":true}"#).unwrap();
         assert!(!old.refine_beatgrid_transients);
+        assert!(!old.use_installed_beatgrid_model);
         let saved: super::Prefs = serde_json::from_str(r#"{"refine_beatgrid_transients":true}"#).unwrap();
         assert!(saved.refine_beatgrid_transients);
+    }
+
+    #[test]
+    fn analysis_jobs_snapshot_the_saved_estimator_independently_of_mode_and_refinement() {
+        let old: super::Prefs = serde_json::from_str(r#"{"analysis_mode":1,"refine_beatgrid_transients":true}"#).unwrap();
+        let job = old.analysis_settings();
+        assert!(!job.use_recordbox_estimator && job.dynamic && job.high_precision);
+        let defaults = super::Prefs::default().analysis_settings();
+        assert!(!defaults.use_recordbox_estimator && !defaults.dynamic && !defaults.high_precision);
+
+        for mode in [0, 1] {
+            for classic in [false, true] {
+                let prefs = super::Prefs { analysis_mode: mode, use_recordbox_estimator: classic, use_installed_beatgrid_model: true, ..super::Prefs::default() };
+                let saved: super::Prefs = serde_json::from_str(&serde_json::to_string(&prefs).unwrap()).unwrap();
+                let job = saved.analysis_settings();
+                assert_eq!(job.use_recordbox_estimator, classic);
+                assert_eq!(job.dynamic, mode == 1);
+                assert!(!job.high_precision);
+                assert!(saved.use_installed_beatgrid_model);
+                assert_eq!(job.model_grid_mode, crate::analysis::rb_hp::mode_from_preferences(true, mode));
+            }
+        }
     }
 
     #[test]
@@ -963,13 +1032,23 @@ impl Default for Prefs {
             perf_fx: false,
             fx: Default::default(),
             perf_four: false,
+            perf_lay: Default::default(),
             perf_sampler: false,
             sampler: Default::default(),
+            traffic: Default::default(),
+            deck: Default::default(),
+            groove: Default::default(),
+            midi: Default::default(),
+            rec: Default::default(),
+            pads: Default::default(),
+            mixx: Default::default(),
             app_mode: 0,
+            edit: Default::default(),
             eq_isolator: false,
             ch_fader_curve: 1,
             stems_auto_separate: true,
             stems_auto_cpu: false,
+            stems_progressive_preview: false,
             stem_cache_gb: 20,
             keep_all_stems: false,
             import_device_history: true,
@@ -996,7 +1075,9 @@ impl Default for Prefs {
             cue_markers_on_preview: true,
             wave_half: false,
             color_names: crate::prefs_ext::default_color_names(),
+            use_recordbox_estimator: false,
             refine_beatgrid_transients: false,
+            use_installed_beatgrid_model: false,
             memory_cue_first_beat: false,
             audio_buffer: 0,
             audio_rate: 0,
@@ -1007,6 +1088,7 @@ impl Default for Prefs {
             device_import_dir: String::new(),
             hot_cue_auto_load_on_import: true,
             phrase_analysis: true,
+            classic_phrase_estimator: false,
             relocate_folders: vec![],
             itunes_xml: None,
             rekordbox_xml_path: None,
@@ -1040,6 +1122,7 @@ impl Default for Prefs {
             vocal_enlarged: false,
             metronome_sound: 0,
             preview_volume: 0.5,
+            rb: Default::default(),
             stem_solo: false,
             stem_reset_on_load: true,
             stem_waveform: true,
@@ -1089,6 +1172,7 @@ pub enum StemMsg {
     Download(u64, u64),
     DownloadDone(Result<(), String>),
     Progress(i64, f32),
+    Preview(StemCacheKey, Arc<crate::stems::Live>),
     CacheWrite(StemCacheKey, Result<(), String>),
     Cached(StemCacheKey, anyhow::Result<Arc<crate::stems::Stems>>),
     Done(i64, anyhow::Result<std::sync::Arc<crate::stems::Stems>>),
@@ -1118,6 +1202,7 @@ pub struct StemState {
     cache_limit: Arc<parking_lot::Mutex<Option<u64>>>,
     pub(crate) cache_usage: Option<Arc<std::sync::OnceLock<std::io::Result<u64>>>>,
     active_key: Option<StemCacheKey>,
+    preview: Option<Arc<crate::stems::Live>>,
     pub execution: crate::stems::SeparationDevice,
     /// Track to separate as soon as the model download finishes.
     pending: Option<(StemCacheKey, crate::stems::SeparationDevice)>,
@@ -1228,7 +1313,7 @@ impl StemState {
 
     pub fn new() -> Self {
         let (tx, rx) = crossbeam_channel::unbounded();
-        StemState { hw: None, model: None, active_key: None, model_ready: false, downloading: None, separating: None, loading: HashMap::new(), errors: HashMap::new(), last_cache_warning: None, cache_limit: Default::default(), cache_usage: None, execution: crate::stems::SeparationDevice::Selected, pending: None, cancel: Default::default(), download_cancel: Default::default(), tx, rx }
+        StemState { hw: None, model: None, active_key: None, preview: None, model_ready: false, downloading: None, separating: None, loading: HashMap::new(), errors: HashMap::new(), last_cache_warning: None, cache_limit: Default::default(), cache_usage: None, execution: crate::stems::SeparationDevice::Selected, pending: None, cancel: Default::default(), download_cancel: Default::default(), tx, rx }
     }
 }
 
@@ -1260,6 +1345,8 @@ pub enum View {
     /// An outside library (kind 0 iTunes, 1 rekordbox xml): node "" is All Tracks, else the
     /// playlist's key (see `SourceLib::node`). Its tracks are not collection tracks.
     Source { kind: u8, node: String },
+    /// A row of the Sampler tree (sampler_lib.rs): -1 All Samples, -2 Capture, else a list.
+    Sampler(i64),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1274,6 +1361,10 @@ pub enum SideMode {
     Explorer,
     Itunes,
     RekordboxXml,
+    /// The Recordings folder (ui_rec.rs).
+    Recordings,
+    /// The Sampler tree (PERFORMANCE mode).
+    Sampler,
 }
 
 pub struct Deck {
@@ -1562,6 +1653,21 @@ pub struct App {
     pub deck: Deck,
     /// Second deck, active deck number and other player state (player_ext.rs).
     pub px: crate::player_ext::PlayerExt,
+    /// Duplicate review and per-window controls.
+    pub dupes: crate::dupes::Dupes,
+    pub(crate) toggle_library_window: bool,
+    pub cue_tools: crate::cue_tools::CueTools,
+    pub traffic_now: Vec<i32>,
+    /// Groove Circuit's state while the app runs (groove.rs).
+    pub gc: crate::groove::GrooveUi,
+    /// The recorder: the recording in progress and the steps after it (ui_rec.rs).
+    pub rec: crate::ui_rec::RecUi,
+    /// The pad modes' state per deck (`pads_ext.rs`).
+    pub pads: crate::pads_ext::PadsState,
+    /// Automix, MIX POINT LINK and the sampler lists (automix.rs, mpl.rs, sampler_lib.rs).
+    pub mixx: crate::automix::MixExt,
+    /// Preferences rows that act over time (prefs_bridge.rs).
+    pub wiring: crate::prefs_bridge::WiringState,
     /// Deck that double-click / Return / "Load to Player" load into: 0 = PLAYER A, 1 = PLAYER B
     /// (B only in the 2 Players layout).
     pub load_target: u8,
@@ -1628,6 +1734,10 @@ pub struct App {
     pub edit_events: Vec<egui::Event>,
     /// Library management state kept by `library_ext` (histories, Tag List, filter, preview…).
     pub ext: crate::library_ext::LibExt,
+    /// MIDI controllers and the MIDI setting window (midi.rs).
+    pub midi: crate::midi::MidiState,
+    /// EDIT mode: the open project and the editor's state (ui_edit.rs).
+    pub edit: crate::ui_edit::EditState,
 }
 
 impl App {
@@ -1642,7 +1752,7 @@ impl App {
         std::mem::swap(&mut self.drag, &mut self.detached_player_drag);
     }
 
-    fn open_library(ctx: &egui::Context, screenshot: Option<String>, deck_options: crate::DeckOptions) -> App {
+    pub(crate) fn open_library(ctx: &egui::Context, screenshot: Option<String>, deck_options: crate::DeckOptions) -> App {
         crate::theme::apply(ctx);
         // SVG images (the recordbox logo).
         egui_extras::install_image_loaders(ctx);
@@ -1721,6 +1831,15 @@ impl App {
             filter_tags_all: false,
             player: Player::with_device(audio_device.as_deref(), !deck_options.disable_play),
             px: Default::default(),
+            dupes: Default::default(),
+            toggle_library_window: false,
+            cue_tools: Default::default(),
+            traffic_now: Vec::new(),
+            gc: Default::default(),
+            rec: Default::default(),
+            pads: Default::default(),
+            mixx: Default::default(),
+            wiring: Default::default(),
             load_target: 0,
             deck: Deck::default(),
             pool,
@@ -1756,13 +1875,20 @@ impl App {
             menu: None,
             edit_events: vec![],
             ext: Default::default(),
+            midi: Default::default(),
+            edit: Default::default(),
         }
     }
 
     pub fn new(cc: &eframe::CreationContext, screenshot: Option<String>, deck_options: crate::DeckOptions) -> App {
         let mut app = Self::open_library(&cc.egui_ctx, screenshot, deck_options);
-        app.menu = crate::menus::build();
-        crate::menus::wake_on_menu(&app.ctx);
+        // Only AppKit installs the native menu. Other platforms dispatch its shortcuts
+        // through egui, so an unused menu must not claim those keys or scan the library.
+        if cfg!(target_os = "macos") {
+            app.menu = crate::menus::build();
+            crate::ui_edit::attach_menu(&mut app);
+            crate::menus::wake_on_menu(&app.ctx);
+        }
         app.reload_all();
         app.reload_library_ext();
         if let Some(e) = app.player.error.clone() {
@@ -1867,6 +1993,23 @@ impl App {
                         app.view = View::Related;
                     }
                     "grid" => app.deck.ctrl_tab = 1,
+                    // EXPORT mode whatever mode was saved (the 1 Player layout: "exportmode1").
+                    "exportmode" => app.prefs.app_mode = 0,
+                    "exportmode1" => {
+                        app.prefs.app_mode = 0;
+                        app.prefs.browser_only = false;
+                        app.prefs.player_layout = 0;
+                    }
+                    "dupes" | "dupesmerge" => crate::dupes::shot_setup(&mut app, v.as_str()),
+                    // Traffic Light on, for the target PREPDECK_SHOT_TRAFFIC names (default: the
+                    // mode's default target).
+                    "traffic" => {
+                        app.prefs.traffic.on = true;
+                        if let Some(t) = std::env::var("PREPDECK_SHOT_TRAFFIC").ok().and_then(|v| v.parse::<u8>().ok()) {
+                            app.prefs.traffic.target_export = t;
+                            app.prefs.traffic.target_perf = t;
+                        }
+                    }
                     "hotcue" => app.deck.panel_tab = 1,
                     "info" => app.deck.panel_tab = 2,
                     "prefs" => {
@@ -2045,10 +2188,14 @@ impl App {
                         app.prefs.perf_fx = true;
                     }
                     // Performance with BEAT JUMP pads on deck 1 and BEAT LOOP pads on deck 2.
+                    // The recording panel (ui_rec.rs).
+                    "perfrec" | "exportrec" => crate::ui_rec::shot_view(&mut app, &v),
                     "perfpads" => {
                         app.prefs.app_mode = 1;
                         app.px.pad_mode = [2, 3, 0, 0];
                     }
+                    v if crate::ui_edit::shot_view(&mut app, v) => {}
+                    v if crate::ui_perf_layouts::shot_view(&mut app, v) => {}
                     other => crate::library_ext::shot_view(&mut app, other),
                 }
             }
@@ -2123,6 +2270,7 @@ impl App {
             }
             // PREPDECK_SHOT_PLAYER=…: player layouts and states (player_ext.rs).
             app.shot_player_setup();
+            crate::mix_selftest::shot_setup(&mut app);
         }
         app
     }
@@ -2147,13 +2295,8 @@ impl App {
         self.toasts.push(Toast { text: s.into(), until: Instant::now() + std::time::Duration::from_secs(8), error: true });
     }
 
-    /// Tracks queued with "Analyze Track (Normal)" / "(Dynamic)" override the preference once.
-    pub fn analysis_dynamic(&self) -> bool {
-        self.prefs.analysis_mode == 1
-    }
     pub fn analysis_settings(&self) -> AnalysisSettings {
-        let (lo, hi) = BPM_RANGES[self.prefs.bpm_range.min(BPM_RANGES.len() - 1)];
-        AnalysisSettings { bpm_min: lo, bpm_max: hi, do_grid: self.prefs.analyze_grid, high_precision: self.prefs.refine_beatgrid_transients, do_key: self.prefs.analyze_key, target_lufs: self.prefs.target_lufs, dynamic: self.analysis_dynamic() }
+        self.prefs.analysis_settings()
     }
 
     // ------------------------------------------------------------------ loading
@@ -2199,6 +2342,10 @@ impl App {
     /// Move a playlist/folder before or after `target`, or into `target` when it is a folder.
     /// Refuses to put a folder inside itself or one of its own subfolders.
     pub fn drop_node(&mut self, id: i64, target: i64, zone: i8) {
+        // (Advanced > Browse > Library Protection.)
+        if crate::prefs_bridge::library_protected(self) {
+            return;
+        }
         if id == target {
             return;
         }
@@ -2318,6 +2465,7 @@ impl App {
                 None => vec![],
             },
             View::Device { .. } | View::DeviceHistory { .. } | View::Explorer(_) | View::Source { .. } => vec![],
+            View::Sampler(_) => vec![],
             View::History(id) => self.db.history_tracks(*id).unwrap_or_default().into_iter().filter(|t| self.index.contains_key(t)).collect(),
             View::TagList => self.ext.tag_list.iter().copied().filter(|t| self.index.contains_key(t)).collect(),
             View::Matching => self.related_source().map(|s| self.matching_of(s)).unwrap_or_default(),
@@ -2486,6 +2634,9 @@ impl App {
                         return false;
                     }
                 }
+                if !crate::ui_edit::attribute_pass(self, t.id) {
+                    return false;
+                }
                 if self.filter_open {
                     if !crate::library_ext::filter_pass(&self.ext.filter, t) {
                         return false;
@@ -2537,6 +2688,11 @@ impl App {
         let col = self.prefs.sort_col;
         let asc = self.prefs.sort_asc;
         let alnum = self.prefs.key_alnum;
+        let key_labels: HashMap<_, _> = if col == Col::Key {
+            v.iter().filter_map(|id| self.track(*id).map(|t| (*id, key_sort_key(&t.key_label(alnum))))).collect()
+        } else {
+            HashMap::new()
+        };
         let tagtexts: HashMap<i64, String> = if col == Col::MyTag { v.iter().map(|id| (*id, tag_text(*id))).collect() } else { HashMap::new() };
         // Text columns compare case- and accent-folded text: fold each row's text once, not
         // twice per comparison.
@@ -2585,13 +2741,7 @@ impl App {
                 Col::Bpm => fc(ta.bpm, tb.bpm),
                 Col::Rating => ta.rating.cmp(&tb.rating),
                 Col::Time => fc(ta.duration, tb.duration),
-                Col::Key => {
-                    if alnum {
-                        (ta.key % 12, ta.key / 12).cmp(&(tb.key % 12, tb.key / 12))
-                    } else {
-                        key_name(ta.key, false).cmp(&key_name(tb.key, false))
-                    }
-                }
+                Col::Key => key_labels[a].cmp(&key_labels[b]),
                 Col::DateAdded => ta.date_added.cmp(&tb.date_added).then(ta.id.cmp(&tb.id)),
                 Col::Color => ta.color.cmp(&tb.color),
                 Col::Comments => tc(&ta.comment, &tb.comment),
@@ -2652,6 +2802,7 @@ impl App {
         let beats = self.deck.beats.clone();
         let (tx, rx) = crossbeam_channel::bounded(1);
         let ctx = self.ctx.clone();
+        let classic = self.prefs.classic_phrase_estimator;
         let cancel = self.deck.cancel_work.clone();
         std::thread::spawn(move || {
             let from_rb = base.and_then(|b| {
@@ -2660,10 +2811,11 @@ impl App {
                 if !same || !crate::rbimport::pqtz_beat_indices_match(&dat, &beats) {
                     return None;
                 }
-                crate::export::anlz::read_sections(&b.with_extension("EXT")).get("PSSI").and_then(|s| crate::phrase::parse(s))
+                crate::export::anlz::read_pssi(&b.with_extension("EXT")).and_then(|s| crate::phrase::parse(&s))
             });
-            let r = from_rb.or_else(|| if beats.is_empty() || cancel.load(std::sync::atomic::Ordering::Relaxed) { None } else { crate::phrase::analyze(&a.mono(), a.sr as f64, &beats) });
-            let _ = tx.send((id, r));
+            let stopped = || cancel.load(std::sync::atomic::Ordering::Relaxed);
+            let r = from_rb.or_else(|| crate::phrase::analyze_audio(&a, &beats, classic, &stopped));
+            let _ = tx.send((id, if stopped() { None } else { r }));
             ctx.request_repaint();
         });
         self.deck.phrases_rx = Some(rx);
@@ -2675,20 +2827,26 @@ impl App {
         if MANUAL_STEMS_PREVIEW || !self.prefs.vocal_analysis || self.deck.vocal.is_some() || self.screenshot.is_some() {
             return;
         }
-        // Only with a downloaded model and a GPU (about a minute per track there; much slower on
-        // the CPU).
-        if !crate::stems::CATALOG.iter().any(crate::stems::model_ready) || !self.stem.gpu_available() {
+        // rekordbox's detector (CPU, about a second per track) unless PREPDECK_VOCAL=stems or
+        // rekordbox is not installed.
+        let rb = !crate::vocal_rb::use_stems();
+        // The stem model only when downloaded and with a GPU (about a minute per track there;
+        // much slower on the CPU).
+        if !rb && (!crate::stems::CATALOG.iter().any(crate::stems::model_ready) || !self.stem.gpu_available()) {
             return;
         }
         let Some(id) = self.deck.track else { return };
         if self.vocal_failed.contains(&id) || self.loading_stems() || self.stem.separating.is_some_and(|(track, _)| track == id) {
             return;
         }
+        let path = self.track(id).map(|t| t.path.clone()).unwrap_or_default();
         let (tx, rx) = crossbeam_channel::bounded(1);
         let ctx = self.ctx.clone();
         let cancel = self.deck.cancel_work.clone();
         std::thread::spawn(move || {
-            let r = if !cancel.load(std::sync::atomic::Ordering::Relaxed) && crate::stems::gpu_active() {
+            let r = if rb && !cancel.load(std::sync::atomic::Ordering::Relaxed) {
+                crate::vocal_rb::analyse_file(&path, Some(&a))
+            } else if !cancel.load(std::sync::atomic::Ordering::Relaxed) && crate::stems::gpu_active() {
                 crate::stems::separate_vocals(&a.samples, a.sr, &mut |_| !cancel.load(std::sync::atomic::Ordering::Relaxed)).ok().map(|v| crate::stems::vocal_levels(&v, &crate::stems::mono_44k(&a.samples, a.sr)))
             } else { None };
             let _ = tx.send((id, r));
@@ -2888,6 +3046,9 @@ impl App {
 
     // ------------------------------------------------------------------ import
     pub fn import_paths(&mut self, paths: Vec<std::path::PathBuf>, to_playlist: Option<i64>) {
+        if crate::prefs_bridge::import_protected(self) {
+            return;
+        }
         if paths.is_empty() {
             return;
         }
@@ -3061,7 +3222,9 @@ impl App {
             if self.stem.errors.get(&Some(key.track)).is_some_and(|error| error.retry_model.is_none()) {
                 self.stem.errors.remove(&Some(key.track));
             }
-            self.player.state.lock().stems = None;
+            let mut player = self.player.state.lock();
+            player.stems = None;
+            player.stem_preview = None;
             self.deck.x.stem_wave = None;
             self.deck.x.stem_wave_rx = None;
         }
@@ -3071,17 +3234,22 @@ impl App {
             self.player.state.lock().stems = Some(parts);
             return true;
         }
+        if self.stem.active_key.as_ref() == Some(key) && !self.stem.cancel.load(std::sync::atomic::Ordering::Relaxed) {
+            if let Some(preview) = &self.stem.preview {
+                self.player.state.lock().stem_preview = Some(preview.clone());
+            }
+        }
         if let Some(request) = self.stem.loading.get_mut(key) {
             if on_failure.is_some() { *request = on_failure; }
             return true;
         }
-        if !key.path.exists() { return false; }
+        let Some(saved) = crate::stems::existing_cache_path(&key.path) else { return false };
         let key = key.clone();
         self.stem.loading.insert(key.clone(), on_failure);
         let tx = self.stem.tx.clone();
         let ctx = self.ctx.clone();
         std::thread::spawn(move || {
-            let r = crate::stems::load(&key.path).map(Arc::new);
+            let r = crate::stems::load(&saved).map(Arc::new).map_err(|error| anyhow::anyhow!("{}: {error:#}", saved.display()));
             let _ = tx.send(StemMsg::Cached(key, r));
             ctx.request_repaint();
         });
@@ -3136,6 +3304,9 @@ impl App {
         let cancel: std::sync::Arc<std::sync::atomic::AtomicBool> = Default::default();
         self.stem.cancel = cancel.clone();
         let audio = self.deck.audio.clone();
+        let preview_hw = self.stem.hw.as_ref().filter(|hw|
+            self.prefs.stems_progressive_preview && crate::stems::Live::supported(hw, m, execution)
+        ).cloned();
         let cache_limit = self.stem.cache_limit.clone();
         let worker = std::thread::Builder::new().name("rb-stems".into()).spawn(move || {
             let run = || -> anyhow::Result<std::sync::Arc<crate::stems::Stems>> {
@@ -3144,8 +3315,14 @@ impl App {
                     Some(audio) => audio,
                     None => Arc::new(crate::audio::decode_until(&t.path, cancelled)?),
                 };
+                if cancelled() { anyhow::bail!("stopped"); }
+                let preview = preview_hw.and_then(|hw| crate::stems::Live::for_job(&hw, m, execution, dec.frames(), dec.sr));
+                if let Some(preview) = &preview {
+                    if cancelled() { anyhow::bail!("stopped"); }
+                    let _ = tx.send(StemMsg::Preview(key.clone(), preview.clone()));
+                }
                 let mut last_progress = 0.0;
-                let st = crate::stems::separate_with_device(m, &dec.samples, dec.sr, &mut |p| {
+                let st = crate::stems::separate_with_live(m, &dec.samples, dec.sr, &mut |p| {
                     if cancelled() { return false; }
                     if p > last_progress {
                         last_progress = p;
@@ -3153,7 +3330,7 @@ impl App {
                         ctx.request_repaint();
                     }
                     true
-                }, execution)?;
+                }, execution, preview.as_deref())?;
                 if cancelled() { anyhow::bail!("stopped"); }
                 let saved = match crate::stems::save(&key.path, &st) {
                     Ok(()) => {
@@ -3178,16 +3355,28 @@ impl App {
         }
     }
 
+    fn detach_stem_preview(&mut self) {
+        if let Some(preview) = self.stem.preview.take() {
+            for deck in &self.player.decks {
+                let mut player = deck.lock();
+                if player.stem_preview.as_ref().is_some_and(|p| Arc::ptr_eq(p, &preview)) {
+                    player.stem_preview = None;
+                }
+            }
+        }
+    }
+
     pub fn stop_separation(&mut self) {
         self.stem.pending = None;
         for request in self.stem.loading.values_mut() { *request = None; }
         self.stem.download_cancel.store(true, std::sync::atomic::Ordering::Relaxed);
         self.stem.cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+        self.detach_stem_preview();
     }
 
     /// Mute or unmute one part (source index: 0 drums, 1 bass, 2 other, 3 vocals).
     pub fn toggle_stem(&mut self, src: usize) {
-        let have = self.player.state.lock().stems.is_some();
+        let have = self.player.state.lock().has_playable_stems();
         if !have {
             self.separate_loaded();
             return;
@@ -3239,6 +3428,16 @@ impl App {
                     if let Err(warning) = &result { self.toast_err(warning.as_str()); }
                     self.stem.record_cache_write(key, result);
                 }
+                StemMsg::Preview(key, preview) => {
+                    if self.stem.active_key.as_ref() == Some(&key) && !self.stem.cancel.load(std::sync::atomic::Ordering::Relaxed) {
+                        self.stem.preview = Some(preview.clone());
+                        for n in 0..4 {
+                            if self.deck_of(n).stem_cache_key.as_ref() == Some(&key) {
+                                self.player.decks[n as usize].lock().stem_preview = Some(preview.clone());
+                            }
+                        }
+                    }
+                }
                 StemMsg::Progress(id, p) => {
                     // (Not for a separation that was stopped because its track left the deck.)
                     if self.stem.separating.map(|s| s.0) == Some(id) {
@@ -3255,7 +3454,7 @@ impl App {
                         }
                         (Err(e), None) => {
                             self.stem.errors.insert(Some(key.track), StemError { retry_model: None,
-                                detail: format!("Could not load saved stems from {}: {e:#}. Choose Separate to rebuild them.", key.path.display()) });
+                                detail: format!("Could not load saved stems from {e:#}. Choose Separate to rebuild them.") });
                         }
                     }
                 }
@@ -3267,6 +3466,7 @@ impl App {
                             self.apply_stems(&key, result);
                         }
                     }
+                    self.detach_stem_preview();
                     self.resume_pending_stems();
                 }
             }
@@ -3315,6 +3515,9 @@ impl App {
     /// Copy rekordbox's library into Recordbox's data folder and read the copy, off the UI thread.
     /// rekordbox's own files are only read (byte copy), never opened by a database or written.
     pub fn start_rekordbox_sync(&mut self) {
+        if crate::prefs_bridge::import_protected(self) {
+            return;
+        }
         if !self.can_review_library_sync() || self.dialogs.library_sync_review.is_some() {
             return;
         }
@@ -3619,6 +3822,12 @@ impl App {
                 let preview: Vec<u8> = res.wave.columns(400).iter().flat_map(|c| c.iter().copied()).collect();
                 let _ = self.db.save_wave(id, &res.wave, &preview);
                 self.previews.insert(id, preview);
+                if let Some(v) = &res.vocal {
+                    let _ = self.db.save_vocal(id, v);
+                    if self.deck.track == Some(id) && self.deck.vocal.is_none() {
+                        self.deck.vocal = Some(std::sync::Arc::new((crate::vocal_rb::hop_seconds(), v.clone())));
+                    }
+                }
                 if let Some(g) = &save_grid {
                     let _ = self.db.save_grid(id, g);
                 }
@@ -3685,8 +3894,9 @@ impl App {
     /// egui subtracts predicted_dt from nonzero repaint delays. Account for it
     /// so a 30 Hz preference does not request another frame after just 16 ms.
     pub fn repaint_playback(&self, ctx: &egui::Context) {
-        match self.prefs.playback_fps {
-            fps @ (15 | 30) => {
+        let fps = if self.prefs.playback_fps == 0 { crate::prefs_bridge::draw_fps(self.prefs.rb.draw_rate) as u8 } else { self.prefs.playback_fps };
+        match fps {
+            fps @ (15 | 30 | 40) => {
                 let delay = 1.0 / f32::from(fps) + ctx.input(|i| i.predicted_dt);
                 ctx.request_repaint_after_secs(delay);
             }
@@ -3700,7 +3910,11 @@ impl App {
         {
             // Performance mode, including an initialized sampler's independent
             // sequencer/quantization clock, always keeps its low-latency output.
-            let keep_ready = self.performance() || crate::sampler::SAMPLER.lock().is_some();
+            let editor_playing = {
+                let edit = crate::edit_audio::EDIT.lock();
+                edit.main.playing || edit.any_pal_playing()
+            };
+            let keep_ready = self.performance() || crate::sampler::SAMPLER.lock().is_some() || editor_playing || self.rec.recording();
             match self.player.service_output(keep_ready, running, self.prefs.audio_device.as_deref()) {
                 Ok(Some(delay)) => ctx.request_repaint_after_secs(delay.as_secs_f32() + ctx.input(|i| i.predicted_dt)),
                 Err(error) => {
@@ -3742,6 +3956,10 @@ impl App {
 
     /// Load a track into the load-target deck (`load_target`; deck A outside 2 Players).
     pub fn load_track(&mut self, id: i64) {
+        if self.deck_options.disable_load {
+            return self.toast_err("Deck loading is disabled for this session (--disable-load).");
+        }
+        if crate::ui_edit::intercept_load(self, id) { return; }
         self.load_track_to(self.load_target, id);
     }
 
@@ -3769,7 +3987,7 @@ impl App {
             s.loop_range = None;
             s.metronome = None;
             s.search = 0.0;
-            let mut g = if t.gain_db.is_finite() { 10f32.powf(t.gain_db / 20.0).min(4.0) } else { 1.0 };
+            let mut g = if t.gain_db.is_finite() && crate::prefs_bridge::auto_gain_on(self) { 10f32.powf(t.gain_db / 20.0).min(4.0) } else { 1.0 };
             // rekordbox's optional peak cap (traced): when gain × peak reaches 1, the gain becomes
             // 0.9999998807907104 / peak.
             if self.prefs.auto_gain_peak_cap {
@@ -3803,10 +4021,12 @@ impl App {
         self.deck.bpm_text = format!("{:.2}", self.deck.grid.first_bpm());
         let first_mem = self.deck.cues.iter().filter(|c| c.kind == CueKind::Memory).map(|c| c.start).fold(f64::NAN, f64::min);
         self.deck.cue_point = if first_mem.is_nan() { self.deck.beats.first().map(|b| b.time).unwrap_or(0.0) } else { first_mem };
+        crate::prefs_bridge::on_load(self);
         self.deck.loading = Some(spawn_load(id, t.path.clone(), self.ctx.clone(), self.deck.cancel_work.clone()));
         {
             let mut st = self.player.state.lock();
             st.stems = None;
+            st.stem_preview = None;
             // Preferences > STEMS: "Reset the MUTE/SOLO state while loading".
             if self.prefs.stem_reset_on_load {
                 st.stem_on = [true; 4];
@@ -3834,6 +4054,7 @@ impl App {
                         self.toast_err("This file is incomplete: it ends before the length its header declares (cut short when copied or downloaded?).");
                     }
                     self.deck.duration = a.duration();
+                    crate::prefs_bridge::after_load(self, &a);
                     let cp = self.deck.cue_point;
                     let mut s = self.player.state.lock();
                     s.pos = cp * a.sr as f64;
@@ -3932,17 +4153,25 @@ impl App {
         if self.deck.audio.is_none() {
             return;
         }
+        // As rekordbox's `eventCueOn`: CUE leaves loop adjust and ends a running loop first.
+        self.deck.x.loop_adjust = 0;
         if self.playing() {
             self.set_playing(false);
             let c = self.deck.cue_point;
             self.seek(c);
-            self.player.state.lock().loop_range = None;
+            let mut s = self.player.state.lock();
+            s.loop_range = None;
+            s.dk.warp = None;
+            s.dk.arm_loop = None;
         } else {
             let p = self.pos();
             if (p - self.deck.cue_point).abs() < 0.01 {
                 if self.deck_options.disable_play { return; }
                 self.deck.cue_preview = true;
                 self.set_playing(true);
+            } else if p >= self.deck.duration - 0.01 {
+                // (At the end of the track CUE does nothing.)
+            } else if self.before_start() {
             } else {
                 let q = self.quantized(p);
                 self.deck.cue_point = q;
@@ -3965,6 +4194,7 @@ impl App {
         if self.deck.audio.is_none() {
             return;
         }
+        self.deck.x.loop_adjust = 0;
         if self.deck.cue_preview {
             self.deck.cue_preview = false;
             return;
@@ -3987,13 +4217,19 @@ impl App {
                 }
                 st.slip_hold = st.slip && st.playing;
             }
-            self.seek(c.start);
+            if c.end.is_some() || !self.hot_cue_quantized(c.start) {
+                self.seek(c.start);
+            }
             if let Some(e) = c.end.filter(|e| *e > c.start) {
                 self.player.state.lock().loop_range = Some((c.start, e));
                 self.deck.last_loop = Some((c.start, e));
             }
+            crate::prefs_bridge::smart_cue(self, c.start);
             if !self.playing() {
-                self.deck.hot_preview = Some(c.start);
+                // Gate Cue: it plays while held; off, it plays on.
+                if crate::prefs_bridge::gate_cue(self) {
+                    self.deck.hot_preview = Some(c.start);
+                }
                 self.set_playing(true);
             }
         } else {
@@ -4139,6 +4375,9 @@ impl App {
             }
         }
         self.set_track_cues(track, after);
+        if let Some(cue) = replacement {
+            crate::prefs_bridge::smart_cue(self, cue.start);
+        }
     }
 
     pub fn delete_cue(&mut self, cue_id: i64) {
@@ -4239,6 +4478,9 @@ impl App {
         v
     }
     pub fn memory_jump(&mut self, dir: i32) {
+        if crate::prefs_bridge::memory_call_locked(self) {
+            return;
+        }
         let p = if self.playing() { self.pos() } else { self.deck.cue_point };
         let m = self.memory_cues();
         let target = if dir > 0 { m.iter().find(|c| c.start > p + 0.005) } else { m.iter().rev().find(|c| c.start < p - 0.005) };
@@ -4247,6 +4489,9 @@ impl App {
         }
     }
     pub fn call_memory(&mut self, c: &Cue) {
+        if crate::prefs_bridge::memory_call_locked(self) {
+            return;
+        }
         self.deck.cue_point = c.start;
         self.seek(c.start);
         if let Some(e) = c.end.filter(|e| *e > c.start) {
@@ -4274,21 +4519,26 @@ impl App {
     }
 
     pub fn auto_loop(&mut self, beats: f64) {
-        if self.deck.audio.is_none() {
+        if self.deck.audio.is_none() || self.perf_auto_loop(beats) {
             return;
         }
+        let sr = self.deck.audio.as_ref().map(|a| a.sr).unwrap_or(44100);
+        // With Q the loop starts on the nearest beat (rekordbox prepares an auto beat loop
+        // with its SNAP rule; a loop ahead of the playhead begins when the playhead gets
+        // there). Loops shorter than a beat start on the beat behind, so they sound at once.
         let start = if self.prefs.quantize && !self.deck.beats.is_empty() {
             let p = self.pos();
             let i = self.deck.beats.partition_point(|b| b.time <= p + 0.001);
-            if i > 0 {
-                self.deck.beats[i - 1].time
-            } else {
-                p
-            }
+            let behind = if i > 0 { self.deck.beats[i - 1].time } else { p };
+            if self.performance() && beats >= 1.0 && self.playing() { crate::deck::quantize_point(&self.deck.beats, p, crate::deck::QType::Snap, 1.0, false) } else { behind }
         } else {
             self.pos()
         };
-        let end = loop_end_on_grid(&self.deck.beats, start, beats).unwrap_or(start + beats * self.beat_len());
+        let start = crate::deck::on_frame(start, sr);
+        // The end is found on the grid (so a tempo change inside the loop is followed) and
+        // both ends are whole frames; never shorter than rekordbox's minimum loop.
+        let end = crate::deck::grid_pos(&self.deck.beats, start).and_then(|p| crate::deck::grid_time(&self.deck.beats, p + beats)).unwrap_or(start + beats * self.beat_len());
+        let end = crate::deck::on_frame(end.max(start + crate::deck::MIN_LOOP_SECS), sr);
         self.player.state.lock().loop_range = Some((start, end));
         self.deck.last_loop = Some((start, end));
     }
@@ -4296,7 +4546,11 @@ impl App {
         self.player.state.lock().loop_range
     }
     pub fn loop_exit(&mut self) {
-        self.player.state.lock().loop_range = None;
+        let mut s = self.player.state.lock();
+        s.loop_range = None;
+        if s.dk.arm_loop.take().is_some() {
+            s.dk.warp = None;
+        }
     }
     pub fn reloop(&mut self) {
         if let Some((a, b)) = self.deck.last_loop {
@@ -4305,13 +4559,20 @@ impl App {
         }
     }
     pub fn loop_in(&mut self) {
-        let q = self.quantized(self.pos());
+        if self.perf_loop_in() {
+            return;
+        }
+        let q = crate::prefs_bridge::loop_point(self, self.pos());
         self.deck.loop_in = Some(q);
     }
     pub fn loop_out(&mut self) {
+        if self.perf_loop_out() {
+            return;
+        }
         if let Some(a) = self.deck.loop_in {
-            let b = self.quantized(self.pos());
-            if b > a + 0.01 {
+            let sr = self.deck.audio.as_ref().map(|a| a.sr).unwrap_or(44100);
+            let (a, b) = (crate::deck::on_frame(a, sr), crate::deck::on_frame(crate::prefs_bridge::loop_point(self, self.pos()), sr));
+            if b > a + crate::deck::MIN_LOOP_SECS {
                 self.player.state.lock().loop_range = Some((a, b));
                 self.deck.last_loop = Some((a, b));
                 self.seek(a);
@@ -4319,12 +4580,8 @@ impl App {
         }
     }
     pub fn resize_loop(&mut self, factor: f64) {
-        self.prefs.loop_beats = (self.prefs.loop_beats * factor).clamp(1.0 / 64.0, 512.0);
-        if let Some((a, b)) = self.loop_active() {
-            let nb = a + (b - a) * factor;
-            self.player.state.lock().loop_range = Some((a, nb));
-            self.deck.last_loop = Some((a, nb));
-        }
+        // (One step in the 16 sizes; a running loop is halved or doubled on the beat grid.)
+        self.loop_step(if factor > 1.0 { 1 } else { -1 });
     }
 
     // ------------------------------------------------------------------ grid editing
@@ -4495,6 +4752,10 @@ impl App {
 
     // ------------------------------------------------------------------ playlists
     pub fn add_to_playlist(&mut self, pl: i64, ids: &[i64]) {
+        // (Advanced > Browse > Library Protection.)
+        if crate::prefs_bridge::library_protected(self) {
+            return;
+        }
         if self.node(pl).map(|n| n.kind != NodeKind::Playlist).unwrap_or(true) {
             return;
         }
@@ -4511,6 +4772,10 @@ impl App {
     }
     /// Add tracks to a playlist without asking about duplicates.
     pub fn add_to_playlist_force(&mut self, pl: i64, ids: &[i64]) {
+        // (Advanced > Browse > Library Protection.)
+        if crate::prefs_bridge::library_protected(self) {
+            return;
+        }
         let mut cur = self.db.playlist_tracks(pl).unwrap_or_default();
         cur.extend_from_slice(ids);
         let _ = self.db.set_playlist_tracks(pl, &cur);
@@ -4519,11 +4784,19 @@ impl App {
         self.toast(format!("Added {} track(s) to \"{name}\"", ids.len()));
     }
     pub fn remove_from_playlist(&mut self, pl: i64, ids: &HashSet<i64>) {
+        // (Advanced > Browse > Library Protection.)
+        if crate::prefs_bridge::library_protected(self) {
+            return;
+        }
         let cur: Vec<i64> = self.db.playlist_tracks(pl).unwrap_or_default().into_iter().filter(|t| !ids.contains(t)).collect();
         let _ = self.db.set_playlist_tracks(pl, &cur);
         self.reload_playlists();
     }
     pub fn move_in_playlist(&mut self, pl: i64, ids: &[i64], to: usize) {
+        // (Advanced > Browse > Library Protection.)
+        if crate::prefs_bridge::library_protected(self) {
+            return;
+        }
         let cur = self.db.playlist_tracks(pl).unwrap_or_default();
         let set: HashSet<i64> = ids.iter().copied().collect();
         let before = cur.iter().take(to).filter(|t| set.contains(t)).count();
@@ -4537,6 +4810,9 @@ impl App {
         self.reload_playlists();
     }
     pub fn create_node(&mut self, parent: i64, kind: NodeKind) -> i64 {
+        if crate::prefs_bridge::library_protected(self) {
+            return 0;
+        }
         if kind == NodeKind::Smart && self.nodes.iter().filter(|n| n.kind == NodeKind::Smart).count() >= 128 {
             self.toast_err("You can't create more than 128 intelligent lists.");
             return 0;
@@ -4561,6 +4837,10 @@ impl App {
     }
 
     pub fn remove_from_collection(&mut self, ids: &[i64]) {
+        // (Advanced > Browse > Library Protection.)
+        if crate::prefs_bridge::library_protected(self) {
+            return;
+        }
         // Remember removed files so a rekordbox sync does not add them back.
         let mut removed: HashSet<String> = self.db.setting("rb_removed_paths").and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default();
         for id in ids {
@@ -4625,6 +4905,10 @@ impl App {
     }
 
     pub fn set_tag(&mut self, ids: &[i64], tag: i64, on: bool) {
+        // (Advanced > Browse > Library Protection.)
+        if crate::prefs_bridge::library_protected(self) {
+            return;
+        }
         for id in ids {
             let _ = self.db.set_track_tag(*id, tag, on);
             let e = self.track_tags.entry(*id).or_default();
@@ -4995,6 +5279,7 @@ impl App {
 
     /// Point a track at another file. Refused when another track already uses that file.
     pub fn relocate_track(&mut self, id: i64, path: &str) -> bool {
+        if crate::prefs_bridge::library_protected(self) { return false; }
         if let Some(other) = self.db.track_by_path(path).filter(|o| *o != id) {
             let name = self.track(other).map(|t| t.display_title()).unwrap_or_default();
             self.toast_err(format!("That file already belongs to \"{name}\" in your collection."));
@@ -5152,7 +5437,7 @@ impl App {
             .filter(|c| c.parent == 0)
             .map(|c| (c.name.clone(), self.mytags.iter().filter(|t| t.parent == c.id).map(|t| t.name.clone()).collect()))
             .collect();
-        let req = crate::export::usb::ExportRequest { root: std::path::PathBuf::from(root), nodes, tracks, tag_categories, skipped, analysis: settings, settings: self.prefs.usb_settings.clone(), browse: self.prefs.usb_browse.clone(), phrases: self.prefs.phrase_analysis, ..self.export_options(root) };
+        let req = crate::export::usb::ExportRequest { root: std::path::PathBuf::from(root), nodes, tracks, tag_categories, skipped, analysis: settings, settings: self.prefs.usb_settings.clone(), browse: self.prefs.usb_browse.clone(), phrases: self.prefs.phrase_analysis, classic_phrase_estimator: self.prefs.classic_phrase_estimator, ..self.export_options(root) };
         self.export_report = None;
         self.export_job = Some(spawn_export(req, self.ctx.clone()));
     }

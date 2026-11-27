@@ -412,6 +412,9 @@ impl Review {
         if busy {
             ui.label("Close this review, finish library jobs and unload any selected tracks from decks or preview, then scan again.");
         }
+        if app.prefs.rb.library_protection {
+            ui.label("Library Protection is enabled. Cleanup is read-only.");
+        }
         ui.horizontal(|ui| {
             if ui.add(btn("Back to review")).clicked() {
                 self.clear_confirmation();
@@ -419,6 +422,7 @@ impl Review {
             } else if ui
                 .add_enabled(
                     !busy
+                        && !app.prefs.rb.library_protection
                         && report.can_apply
                         && count > 0
                         && count <= store::MAX_SELECTION

@@ -293,16 +293,46 @@ jobs:
           cache-on-failure: true
       - name: Compile the release executable
         run: cargo build --manifest-path app/Cargo.toml --release --locked
-      - name: Database, backup and import integrity regressions
+      - name: Fetch the public mixed USB export for OneLibrary verification
+        if: runner.os == 'Linux'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: dylanljones/rbox
+          ref: 9677e21448fe3a8462111b7df099b5608efcba90
+          path: fixtures/rbox
+          persist-credentials: false
+          sparse-checkout-cone-mode: false
+          sparse-checkout: /.testdata/RBv7/demo/export/PIONEER/
+      - name: Compare OneLibrary and classic playlists before and after an external reorder
+        if: runner.os == 'Linux'
+        env:
+          RECORDBOX_TEST_RBOX: ${{ github.workspace }}/fixtures/rbox
+          RECORDBOX_TEST_BINARY: ${{ github.workspace }}/app/target/release/recordbox
+          RECORDBOX_ONELIBRARY_PYTHON: ${{ runner.temp }}/onelibrary-test/bin/python
+        run: |
+          python -m venv "$RUNNER_TEMP/onelibrary-test"
+          "$RECORDBOX_ONELIBRARY_PYTHON" -m pip install --only-binary=:all: --require-hashes -r packaging/onelibrary-test-requirements.txt
+          "$RECORDBOX_ONELIBRARY_PYTHON" packaging/test_public_onelibrary_roundtrip.py -v
+      - name: Collection, import, phrase analysis and controller regressions
         shell: bash
         run: |
-          for test_filter in backup::tests collection_cleanup:: db::sqlcipher_tests:: export::device_import::tests:: \
+          for test_filter in backup::tests collection_cleanup:: db::sqlcipher_tests:: mp3_timeline_tests export::device_import::tests:: \
             export::pdb::tests:: export::anlz::tests:: export::usb_target::tests:: \
+            phrase_rb::unit:: midi::routing::tests:: sampler_ext::tests::concurrent_captures_preserve_all_three_files \
             rbimport::snapshot_tests:: rbimport::schema_tests:: rbimport::merge::tests:: rbimport::writeback:: \
             export::usb_fix_test::a1_a_row_too_big_for_a_page_is_an_error_not_a_panic \
             export::usb_fix_test::a1_aligned_rows_paginate_at_row_group_boundaries_without_overlap; do
             cargo test --manifest-path app/Cargo.toml --release --locked "$test_filter" -- --test-threads=1
           done
+      - name: Check the macOS encoder, CoreMIDI loopback and supported Metal tensor operations
+        if: runner.os == 'macOS'
+        shell: bash
+        env:
+          RECORDBOX_REQUIRE_MIDI_LOOPBACK: "1"
+        run: |
+          cargo test --manifest-path app/Cargo.toml --release --locked edit_render::tests::m4a_is_written_by_the_system_encoder_when_it_is_there -- --exact
+          cargo test --manifest-path app/Cargo.toml --release --locked midi::tests::a_virtual_controller_plays_a_deck_moves_the_mixer_and_gets_its_leds -- --exact
+          cargo test --manifest-path app/Cargo.toml --release --locked tensor_gemm_matches_reference_on_apple10 -- --nocapture
       - name: Create macOS app bundle
         if: runner.os == 'macOS'
         run: python packaging/build_archive.py --binary app/target/release/recordbox --platform macos --arch ${{ matrix.arch }} --source-commit ${{ github.sha }} --output dist

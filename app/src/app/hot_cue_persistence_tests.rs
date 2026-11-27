@@ -289,3 +289,40 @@ fn cue_undo_and_redo_can_retry_after_a_partial_restore_fails() -> Result<()> {
         },
     )
 }
+
+#[test]
+fn midi_active_loop_survives_reload_and_brake_follows_the_selected_side() -> Result<()> {
+    use crate::midi::{apply, registry, Hub};
+    use crate::midi_map::Val;
+    isolated(concat!(module_path!(), "::midi_active_loop_survives_reload_and_brake_follows_the_selected_side"), |dir| {
+        let mut app = open_app();
+        let track = add_track(&mut app, &dir.join("loop.wav"))?;
+        app.db.save_cue(&Cue {
+            id: 0, track_id: track, kind: CueKind::Memory, slot: -1,
+            start: 1.0, end: Some(1.5), color: 0, comment: String::new(), active_loop: false,
+        })?;
+        app.set_app_mode(1);
+        load(&mut app, 0, track);
+        let (hub, _) = Hub::new(app.player.decks.clone(), dir.to_path_buf(), false);
+        let active_loop = registry().by_name("ActiveLoop").unwrap();
+        app.deck.cue_point = 2.0;
+        apply(&mut app, &hub, "fixture", active_loop, 1, Val::On(true, 127), false, 0);
+        assert!(!app.db.cues(track)?[0].active_loop);
+        app.deck.cue_point = 1.0;
+        apply(&mut app, &hub, "fixture", active_loop, 1, Val::On(true, 127), false, 0);
+        assert!(app.db.cues(track)?[0].active_loop);
+        assert!(app.deck.cues[0].active_loop);
+
+        let original_left = app.prefs.rb.brake[0];
+        let brake = registry().by_name("VinylAdjustBrake.Right").unwrap();
+        apply(&mut app, &hub, "fixture", brake, 0, Val::Raw(127), false, 0);
+        assert_eq!(app.prefs.rb.brake, [original_left, u8::MAX]);
+        assert_eq!(app.prefs.rb.brake, app.prefs.deck.vinyl_brake);
+        app.save_prefs();
+        drop(app);
+        let reopened = open_app();
+        assert!(reopened.db.cues(track)?[0].active_loop);
+        assert_eq!(reopened.prefs.rb.brake, [original_left, u8::MAX]);
+        Ok(())
+    })
+}
