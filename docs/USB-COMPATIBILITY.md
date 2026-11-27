@@ -49,3 +49,5 @@ cargo test --manifest-path app/Cargo.toml --locked export::public_device_tests::
 ```
 
 To check a particular player, export a short original track with a known downbeat, memory cue, hot cue and loop to a spare drive. Record the exporting application version, player model, firmware and catalog type. Check playlist visibility, load and playback, then save a cue or playlist on the player and reopen that same drive. A report about mismatched analysis files is most useful with both catalogs, all analysis siblings for the track and their relative directories.
+
+For OneLibrary, the follow-up study compares all 22 tables in a published mixed export and describes a two-track playlist reorder to test on official software and hardware. [OneLibrary round trips](studies/onelibrary-grv6-quality-stems.md#onelibrary-on-a-usb-drive)
