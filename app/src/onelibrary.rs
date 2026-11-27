@@ -157,9 +157,9 @@ fn read_copy(dir: &Path, python: &Path, one: Option<i64>, classic: Option<i64>) 
 }
 
 fn snapshot_dir(root: &Path) -> Result<tempfile::TempDir> {
-    let temp_base = std::env::temp_dir().canonicalize()?;
+    let temp_base = std::path::absolute(std::env::temp_dir())?;
     ensure!(
-        !temp_base.starts_with(root.canonicalize()?),
+        !temp_base.canonicalize()?.starts_with(root.canonicalize()?),
         "Choose a system temporary directory outside the selected USB root"
     );
     let mut builder = tempfile::Builder::new();
@@ -321,7 +321,10 @@ impl Inspector {
                 }
                 if let Some(err) = &self.error {
                     ui.label(err);
-                ui.hyperlink_to("Reader setup", "https://github.com/fantuz/recordbox/blob/main/docs/USB-COMPATIBILITY.md#inspect-onelibrary-playlists");
+                    ui.hyperlink_to(
+                        "Reader setup",
+                        "https://github.com/fantuz/recordbox/blob/main/docs/USB-COMPATIBILITY.md#inspect-onelibrary-playlists",
+                    );
                     if ui.button("Reload catalogs").clicked() {
                         self.report = None;
                         self.one = None;
@@ -359,33 +362,25 @@ impl Inspector {
                     });
                 }
                 if let Some(tracks) = &report.one_tracks {
-                    ui.label(format!("OneLibrary · {} resolved entries", tracks.len()));
+                    let mut ordered = vec![("OneLibrary", tracks)];
                     if let Some(classic) = &report.classic_tracks {
-                        ui.label(format!("Classic · {} entries", classic.len()));
+                        ordered.push(("Classic", classic));
                     }
-                    let classic = report.classic_tracks.as_deref().unwrap_or_default();
-                    let n = tracks.len().max(classic.len());
+                    ui.columns(ordered.len(), |columns| {
+                        for (ui, (name, rows)) in columns.iter_mut().zip(&ordered) {
+                            ui.strong(format!("{name} · {} resolved entries", rows.len()));
+                        }
+                    });
+                    let total = ordered.iter().map(|(_, rows)| rows.len()).max().unwrap_or(0);
                     egui::ScrollArea::vertical().max_height(300.0).show_rows(
-                        ui,
-                        ui.text_style_height(&egui::TextStyle::Body),
-                        n,
-                        |ui, range| {
+                        ui, ui.text_style_height(&egui::TextStyle::Body), total, |ui, range| {
                             for i in range {
-                                ui.horizontal(|ui| {
-                                    ui.label(format!("{}.", i + 1));
-                                    for entry in std::iter::once(tracks.get(i)).chain(
-                                        report.classic_tracks.as_ref().map(|_| classic.get(i)),
-                                    ) {
-                                        if let Some(t) = entry {
-                                            ui.add(
-                                                egui::Label::new(if t.title.is_empty() {
-                                                    &t.path
-                                                } else {
-                                                    &t.title
-                                                })
-                                                .truncate(),
-                                            )
-                                            .on_hover_text(&t.path);
+                                ui.columns(ordered.len(), |columns| {
+                                    for (ui, (_, rows)) in columns.iter_mut().zip(&ordered) {
+                                        if let Some(track) = rows.get(i) {
+                                            let title = if track.title.is_empty() { &track.path } else { &track.title };
+                                            ui.add(egui::Label::new(format!("{}. {title}", i + 1)).truncate())
+                                                .on_hover_text(&track.path);
                                         } else {
                                             ui.label("—");
                                         }
