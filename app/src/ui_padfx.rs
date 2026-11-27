@@ -504,6 +504,15 @@ impl Default for PadFxState {
 }
 
 impl PadFxState {
+    fn press(&mut self, n: usize, pads: &[Pad], idx: u8) -> Option<DeckAsk> {
+        let deck = &mut self.decks[n];
+        let ask = deck.press(pads, idx);
+        // A MIDI or keyboard pad can sound before this deck's pad grid is drawn.
+        // Keep the unit alive after release so its delay/reverb tails can finish.
+        self.made[n] |= deck.beat.is_some() || deck.color.is_some() || deck.release.is_some();
+        ask
+    }
+
     /// What each deck's unit is asked for (for the audio thread).
     pub fn sets(&self, prefs: &PadFxPrefs) -> [PadSet; 4] {
         std::array::from_fn(|d| {
@@ -513,7 +522,7 @@ impl PadFxState {
         })
     }
 
-    /// A deck's unit has to exist (it shows PAD FX or something is held).
+    /// Decks whose PAD FX grid was shown or whose effect was activated.
     pub fn wanted(&self) -> [bool; 4] {
         self.made
     }
@@ -557,8 +566,9 @@ pub fn pad_down(app: &mut App, n: usize, idx: u8) {
         app.toast_err("Invalid operation. PAD FX cannot be operated when MERGE FX is ON.");
         return;
     }
-    let pads = app.prefs.fx.padfx.all(n.min(3), &app.px.fxx.pad.decks[n.min(3)].shift);
-    let ask = app.px.fxx.pad.decks[n.min(3)].press(&pads, idx);
+    let n = n.min(3);
+    let pads = app.prefs.fx.padfx.all(n, &app.px.fxx.pad.decks[n].shift);
+    let ask = app.px.fxx.pad.press(n, &pads, idx);
     deck_ask(app, n, ask);
 }
 
@@ -779,6 +789,21 @@ mod tests {
         assert!(e.on && e.kind == Kind::Echo && (e.level - 0.3).abs() < 1e-6 && e.value == 1.0);
         assert_eq!(Pad { color: 80, ..Pad::of(25) }.engine().color, Some((7, 0.9, 0.5)));
         assert_eq!(Pad::of(31).engine().release, Some((2, 1.0)));
+    }
+
+    #[test]
+    fn an_unrendered_controller_pad_requests_only_its_own_effect_unit_and_keeps_its_tail() {
+        let pads = [Pad::of(SLIP_LOOP), Pad::of(1), Pad::of(25), Pad { hold: 0, ..Pad::of(30) }];
+        for (i, fx) in pads.iter().enumerate() {
+            let mut state = PadFxState::default();
+            assert_eq!(state.wanted(), [false; 4]);
+            state.press(2, &pads, i as u8);
+            let expected = [false, false, fx.fx != SLIP_LOOP, false];
+            assert_eq!(state.wanted(), expected);
+            assert_eq!(state.decks[2].engine(&pads).any(), expected[2]);
+            state.decks[2].release(&pads, i as u8);
+            assert_eq!(state.wanted(), expected);
+        }
     }
 
     #[test]

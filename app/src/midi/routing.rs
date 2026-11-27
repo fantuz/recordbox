@@ -655,6 +655,8 @@ mod tests {
         let mut app = App::open_library(&Default::default(), None, crate::DeckOptions { disable_play: true, disable_load: true });
         app.prefs.app_mode = 1;
         app.prefs.perf_four = true;
+        app.px.pad_mode = [crate::ui_padfx::PAD_FX; 4];
+        app.poll_decks();
         let (hub, rx) = Hub::new(app.player.decks.clone(), PathBuf::new(), false);
         hub.routing.lock().performance = true;
         app.midi.hub = Some(hub.clone());
@@ -670,7 +672,9 @@ mod tests {
         };
         let (a, b) = (port("A"), port("B"));
         hub.devices.lock().extend([a.clone(), b.clone()]);
-        let send = |dev, channel, note, down| hub.input_message(dev, [0x90 | channel, note, if down { 127 } else { 0 }], 0.0, 0, 0);
+        let send = |dev, channel: u8, note: u8, down: bool| {
+            hub.input_message(dev, [0x90 | channel, note, if down { 127 } else { 0 }], 0.0, 0, 0);
+        };
         app.activate_deck(3);
         poll(&mut app);
         for dev in [&a, &b] {
