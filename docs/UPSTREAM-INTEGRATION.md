@@ -75,6 +75,14 @@ All three settings found every kick. These measurements cover constant tempo and
 
 MP3 timing can be tried separately with `recordbox --mp3-timeline rekordbox`. This opens a separate recordbox collection. An unchanged cue timestamp can refer to a different sound when the decoder counts encoder delay differently. With a 44.1 kHz test impulse, switching clocks moved the impulse by 25.06 ms for one FFmpeg-tagged MP3 and 26.12 ms for the LAME-tagged and untagged samples. Starting recordbox normally opens the usual collection. [MP3 trial and cache details](PLAYBACK-PERFORMANCE.md#auditioning-rekordbox-mp3-timing)
 
+### Tempo, key and vocal data in a prepared collection
+
+The collection saves the track-wide BPM returned by Dynamic analysis. A track with a 118 BPM intro and a 126 BPM later section can display 122 BPM in the browser while the deck follows each local tempo. A waveform-only refresh preserves a previously saved collection BPM. USB preparation uses the same whole-track memory limit as library analysis, checks Stop during decoding and between model windows, and reports tracks it could not prepare. An existing device copy can still occupy its place in the playlist. Sync stops before deleting unreferenced audio if preparation fails. [Analysis persistence and USB changes](https://github.com/fantuz/recordbox/commit/361bec9fe164b64b153814341ed3579b52eb44c8)
+
+At 44.1 and 48 kHz, recordbox feeds stereo frames directly to its key detector in one-second blocks. Its standard compatible beat detector uses the existing sinc converter at other rates. The optional beat model uses the reconstructed 29-tap converter on supported input. Upstream also changed key detection to use 16-bit reader samples and two-second blocks. Adopting those changes would require checking key labels against reference recordings across genres and sample rates. The synthetic kick and tempo tests above measure beat timing only. [Upstream reader and key changes](https://github.com/adamsardo/recordbox/commit/9dac7589c5c31eace36d94b40d1abfdf9788b31e)
+
+Vocal detection uses the local graph selected through `RECORDBOX_VOCAL_GRAPH` when configured. The fork keeps existing vocal markers when upgrading. Upstream’s background conversion clears stored vocal levels and fills them again from the installed library or a new analysis. [Upstream vocal conversion](https://github.com/adamsardo/recordbox/commit/75d21a2b2d9f310e7fedc9b8fa4028428d37daeb)
+
 ## STEMS by device
 
 | Device or build | Behavior |

@@ -221,8 +221,10 @@ fn analyze_passes(dec: &Decoded, s: &AnalysisSettings, parallel: bool, cancelled
         } else { -1 };
         (bpm, grid, key)
     };
-    let wave = || waveform(&mono, sr);
-    let level = || loudness_and_peak(dec);
+    // The bounded caller discards the entire result on Stop. In particular the
+    // sequential USB worker need not start another full-track pass afterwards.
+    let wave = || if cancelled() { Waveform::default() } else { waveform(&mono, sr) };
+    let level = || if cancelled() { (f64::NAN, 0.0) } else { loudness_and_peak(dec) };
     let ((bpm, grid, key), (wave, (lufs, peak))) = if parallel {
         rayon::join(timing, || rayon::join(wave, level))
     } else {
