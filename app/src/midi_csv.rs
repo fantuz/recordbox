@@ -11,7 +11,7 @@
 //! order, CRLF, no column header.
 //!
 //! The factory files themselves are AlphaTheta's and are never part of recordbox: they are
-//! read from the installed rekordbox at run time (`factory_dir`).
+//! read from the installed rekordbox at run time (`factory_dirs`).
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -482,12 +482,21 @@ pub fn mapping_name(device: &str) -> String {
 /// ordinary device named, for example, "Studio_A" cannot overwrite "Studio/A".
 pub fn local_file(dir: &Path, port: &str) -> PathBuf {
     let stem = file_stem(port);
-    if stem == port && !port.contains(',') {
-        return dir.join(mapping_name(port));
-    }
     use sha2::{Digest, Sha256};
     let hash = format!("{:x}", Sha256::digest(port.as_bytes()));
-    dir.join("recordbox-overrides").join(format!("{stem}-{}.midi.csv", &hash[..24]))
+    let distinct = dir.join("recordbox-overrides").join(format!("{stem}-{}.midi.csv", &hash[..24]));
+    if stem != port || port.contains(',') || distinct.is_file() {
+        return distinct;
+    }
+    let standard = dir.join(mapping_name(port));
+    // Older versions could have used this exact name for another device (A/B → A_B).
+    // Keep that file available to its owner, including if its contents cannot be verified.
+    match read_file(&standard) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => standard,
+        Ok(bytes) if CsvFile::parse(&bytes).is_ok_and(|csv| device_matches(port, &csv.device)) => standard,
+        _ => distinct,
+    }
+
 }
 
 fn alsa_endpoint(name: &str) -> Option<(&str, &str, &str)> {
@@ -910,6 +919,22 @@ mod tests {
         assert!(validate_import("Deck,A", empty_user_file("Deck,A").as_bytes()).is_ok());
         assert!(validate_import("Test", "@file,1,Test\n🎵é broken row".as_bytes()).is_err());
         assert!(validate_import("Test", b"@file,1,Test\n@file,1,Other").is_err());
+    }
+
+    #[test]
+    fn legacy_sanitized_file_cannot_be_overwritten_by_a_device_with_that_literal_name() {
+        let temp = tempfile::tempdir().unwrap();
+        let legacy = temp.path().join("Studio_A.midi.csv");
+        std::fs::write(&legacy, b"@file,1,Studio/A\n").unwrap();
+        let separate = local_file(temp.path(), "Studio_A");
+        assert_ne!(separate, legacy);
+        atomic_write(&separate, b"@file,1,Studio_A\n", true, std::iter::empty()).unwrap();
+        assert_eq!(local_file(temp.path(), "Studio_A"), separate);
+        assert_eq!(std::fs::read(legacy).unwrap(), b"@file,1,Studio/A\n");
+        let native = temp.path().join("original");
+        std::fs::create_dir(&native).unwrap();
+        assert!(atomic_write(&native.join("sub/map.csv"), b"data", true, std::iter::once(&native)).is_err());
+        assert!(!native.join("sub").exists());
     }
 
     #[test]

@@ -365,6 +365,30 @@ mod tests {
     }
 
     #[test]
+    fn disconnect_after_replacing_a_track_preserves_its_transport_and_slip() {
+        let (replacement, _) = hub();
+        let (hub, _) = hub();
+        hub.routing.lock().performance = true;
+        let dev = controller("A");
+        press(&hub, &dev, "Cue", 1, true);
+        hub.snap.lock().decks[0].hot[0] = Some((0.0, None));
+        press(&hub, &dev, "PAD1_HotCue", 1, true);
+        let audio = replacement.decks[0].lock().audio.clone();
+        {
+            let mut deck = hub.decks[0].lock();
+            deck.audio = audio;
+            deck.playing = true;
+            deck.slip_hold = true;
+            deck.pos = 75.0;
+        }
+        hub.release_device(&dev);
+        let deck = hub.decks[0].lock();
+        assert!(deck.playing && deck.slip_hold);
+        assert_eq!(deck.pos, 75.0);
+        assert!(!hub.pad_held(0));
+    }
+
+    #[test]
     fn stale_platter_timeouts_and_disconnect_cannot_release_another_controller() {
         let (hub, _) = hub();
         hub.routing.lock().performance = true;

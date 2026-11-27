@@ -639,7 +639,7 @@ fn content(app: &mut App, ui: &mut Ui, o: Pos2, live: bool) {
     let cr = at(16.0, 40.0, 208.0, 24.0);
     let cresp = combo_box(ui, cr, "device", &shown, cur.is_empty(), live);
     app.midi.win.at.insert("device".into(), cr.center());
-    let cresp = tip(cresp, "Display devices connected to the computer that can set MIDI setting.\nWhen multiple rekordbox dj supporting devices are connected, only one device will be displayed. \nYou can edit MIDI setting of the selected device.");
+    let cresp = tip(cresp, "Choose a connected MIDI input. If available, recordbox reads the installed factory mapping and your existing Rekordbox settings. Edits are saved in recordbox.");
     let mut at_map = std::mem::take(&mut app.midi.win.at);
     if let Some(i) = menu_popup(ui, &cresp, ui.id().with("device_pop"), 208.0, &names, &mut at_map) {
         app.midi.win.at = at_map;
@@ -654,7 +654,7 @@ fn content(app: &mut App, ui: &mut Ui, o: Pos2, live: bool) {
     // ---- DEFAULT
     let r = at(W - 184.0, 40.0, 150.0, 24.0);
     app.midi.win.at.insert("DEFAULT".into(), r.center());
-    if tip(text_button(ui, r, "default", "DEFAULT", false, has_dev && live, (false, false)), "Reset MIDI setting of the selected equipment back to default.").clicked() {
+    if tip(text_button(ui, r, "default", "DEFAULT", false, has_dev && live, (false, false)), "Use the factory mapping for this device in recordbox. Your original Rekordbox settings stay on disk.").clicked() {
         app.midi.win.ask = Some(Ask::Default);
     }
 
@@ -723,12 +723,12 @@ fn content(app: &mut App, ui: &mut Ui, o: Pos2, live: bool) {
     }
     let r = at(W - 336.0, by, 150.0, 24.0);
     app.midi.win.at.insert("IMPORT".into(), r.center());
-    if tip(text_button(ui, r, "import", "IMPORT", false, en, (false, true)), "Import MIDI setting file").clicked() {
+    if tip(text_button(ui, r, "import", "IMPORT", false, en, (false, true)), "Replace this device’s recordbox mapping with a matching MIDI CSV.").clicked() {
         app.midi.win.ask = Some(Ask::Import);
     }
     let r = at(W - 184.0, by, 150.0, 24.0);
     app.midi.win.at.insert("EXPORT".into(), r.center());
-    if tip(text_button(ui, r, "export", "EXPORT", false, en, (true, false)), "Export MIDI setting file").clicked() {
+    if tip(text_button(ui, r, "export", "EXPORT", false, en, (true, false)), "Save this device’s user mappings to a MIDI CSV.").clicked() {
         export(app);
     }
 }

@@ -957,10 +957,9 @@ pub struct Hub {
     pub user_dir: PathBuf,
     factory_dirs: Vec<PathBuf>,
     native_user_dirs: Vec<PathBuf>,
-    /// A CUE held on a stopped deck is playing from the cue point.
-    cue_preview: [AtomicBool; 4],
-    /// A hot cue pad held on a stopped deck: where it started (bits of the seconds; NaN = none).
-    hot_preview: [AtomicU64; 4],
+    /// A physical release belongs to the audio loaded at the time of the press.
+    cue_preview: [Mutex<Option<Preview>>; 4],
+    hot_preview: [Mutex<Option<Preview>>; 4],
     /// Pads held, per deck (for the on-screen pads, which end a hold when no pointer is down).
     pub pads_down: [AtomicU8; 4],
     jog_bend: [AtomicU64; 4],
@@ -981,8 +980,15 @@ pub struct Hub {
     pub born: Instant,
 }
 
-fn nan_bits() -> u64 {
-    f64::NAN.to_bits()
+struct Preview {
+    audio: std::sync::Weak<crate::audio::Decoded>,
+    return_frame: Option<f64>,
+}
+
+impl Preview {
+    fn belongs_to(&self, state: &PlayState) -> bool {
+        state.audio.as_ref().is_some_and(|a| self.audio.ptr_eq(&Arc::downgrade(a)))
+    }
 }
 
 impl Hub {
@@ -1002,8 +1008,8 @@ impl Hub {
             user_dir,
             factory_dirs: crate::midi_csv::factory_dirs(),
             native_user_dirs: crate::midi_csv::native_user_dirs(),
-            cue_preview: std::array::from_fn(|_| AtomicBool::new(false)),
-            hot_preview: std::array::from_fn(|_| AtomicU64::new(nan_bits())),
+            cue_preview: Default::default(),
+            hot_preview: Default::default(),
             pads_down: std::array::from_fn(|_| AtomicU8::new(0)),
             jog_bend: std::array::from_fn(|_| AtomicU64::new(0f64.to_bits())),
             takeover: Mutex::new([TempoTakeover::default(); 4]),
@@ -1048,7 +1054,8 @@ impl Hub {
         let local = self.user_file(device);
         let legacy = self.user_dir.join(format!("{}.midi.csv", crate::midi_csv::legacy_stem(device)));
         // An old reserved name (e.g. CON.midi.csv) can denote a device on Windows.
-        let legacy = (legacy != local && legacy.file_name() == Some(std::ffi::OsStr::new(&crate::midi_csv::mapping_name(device)))).then_some(legacy);
+        let legacy_allowed = !cfg!(windows) || legacy.file_name() == Some(std::ffi::OsStr::new(&crate::midi_csv::mapping_name(device)));
+        let legacy = (legacy != local && legacy_allowed).then_some(legacy);
         let native = crate::midi_csv::native_user_files(&self.native_user_dirs, device);
         let inputs = std::iter::once((local, true)).chain(legacy.map(|p| (p, true))).chain(native.into_iter().map(|p| (p, false)));
         for (path, own) in inputs {
@@ -1232,7 +1239,7 @@ impl Hub {
         if s.audio.is_none() {
             return;
         }
-        if self.cue_preview[n].swap(false, Relaxed) {
+        if self.cue_preview[n].lock().take().is_some_and(|p| p.belongs_to(&s)) {
             return;
         }
         s.playing = !s.playing;
@@ -1243,16 +1250,18 @@ impl Hub {
     pub fn cue(&self, n: usize, down: bool) -> bool {
         let cue = self.snap.lock().decks[n].cue_point;
         let mut s = self.decks[n].lock();
-        let Some(sr) = s.audio.as_ref().map(|a| a.sr as f64) else { return true };
+        let mut preview = self.cue_preview[n].lock();
         if !down {
-            if self.cue_preview[n].swap(false, Relaxed) {
+            if let Some(frame) = preview.take().filter(|p| p.belongs_to(&s)).and_then(|p| p.return_frame) {
                 s.playing = false;
-                s.pos = cue * sr;
+                s.pos = frame;
             }
             return true;
         }
+        let Some(audio) = s.audio.as_ref() else { return true };
+        let sr = audio.sr as f64;
         if s.playing {
-            if !self.cue_preview[n].load(Relaxed) {
+            if !preview.as_ref().is_some_and(|p| p.belongs_to(&s)) {
                 s.playing = false;
                 s.pos = cue * sr;
                 s.loop_range = None;
@@ -1260,7 +1269,7 @@ impl Hub {
             true
         } else if (s.pos / sr - cue).abs() < 0.01 {
             if !self.playback_enabled { return true; }
-            self.cue_preview[n].store(true, Relaxed);
+            *preview = Some(Preview { audio: Arc::downgrade(audio), return_frame: Some(cue * sr) });
             s.playing = true;
             true
         } else {
@@ -1273,19 +1282,25 @@ impl Hub {
     pub fn hot_cue(&self, n: usize, slot: usize, down: bool) -> bool {
         let hot = self.snap.lock().decks[n].hot.get(slot).copied().flatten();
         let mut s = self.decks[n].lock();
-        let Some(sr) = s.audio.as_ref().map(|a| a.sr as f64) else { return true };
+        let mut preview = self.hot_preview[n].lock();
         if !down {
             self.pads_down[n].store(0, Relaxed);
-            s.slip_hold = false;
-            let start = f64::from_bits(self.hot_preview[n].swap(nan_bits(), Relaxed));
-            if !start.is_nan() {
-                s.playing = false;
-                s.loop_range = None;
-                s.pos = start * sr;
+            if let Some(held) = preview.take().filter(|p| p.belongs_to(&s)) {
+                s.slip_hold = false;
+                if let Some(frame) = held.return_frame {
+                    s.playing = false;
+                    s.loop_range = None;
+                    s.pos = frame;
+                }
             }
             return true;
         }
+        let Some(audio) = s.audio.as_ref() else { return true };
         let Some((start, end)) = hot else { return false };
+        let sr = audio.sr as f64;
+        if !preview.as_ref().is_some_and(|p| p.belongs_to(&s)) {
+            *preview = Some(Preview { audio: Arc::downgrade(audio), return_frame: None });
+        }
         self.pads_down[n].store(1, Relaxed);
         // SLIP on a playing deck: the cue sounds while the pad is held.
         if s.slip && s.playing && s.slip_pos.is_none() {
@@ -1299,7 +1314,7 @@ impl Hub {
         if self.playback_enabled && !s.playing {
             // (Gate Cue: held, it plays and returns; off, it plays on.)
             if crate::prefs_bridge::GATE_CUE.load(Relaxed) {
-                self.hot_preview[n].store(start.to_bits(), Relaxed);
+                if let Some(held) = preview.as_mut() { held.return_frame = Some(start * sr); }
             }
             s.playing = true;
         }
@@ -1308,7 +1323,7 @@ impl Hub {
 
     /// A pad is being held on deck `n` by a controller.
     pub fn pad_held(&self, n: usize) -> bool {
-        self.pads_down[n.min(3)].load(Relaxed) != 0 || !f64::from_bits(self.hot_preview[n.min(3)].load(Relaxed)).is_nan()
+        self.pads_down[n.min(3)].load(Relaxed) != 0
     }
 
     // ------------------------------------------------------------------ absolute controls

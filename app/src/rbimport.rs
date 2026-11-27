@@ -454,6 +454,14 @@ fn pqtz_indices_match(b: &[u8], beats: &[Beat]) -> bool {
     pqtz_beats(b).and_then(|source| matching_pqtz_prefix(source, beats)).is_some()
 }
 
+/// A source PSSI can travel with its own grid even when a positive native shift
+/// gives the normalized, locally expanded grid an extra leading beat.
+pub(crate) fn valid_pqtz_section(section: &[u8]) -> bool {
+    pqtz_section_beats(section).is_some_and(|mut entries| {
+        entries.next().flatten().is_some() && entries.all(|entry| entry.is_some())
+    })
+}
+
 /// Edited/inferred phrases can refer to any local beat, including tail beats that
 /// a shorter native grid never contained. Check the exact section USB will write.
 pub(crate) fn pqtz_matches_all_beats(section: &[u8], beats: &[Beat]) -> bool {

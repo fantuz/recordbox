@@ -756,8 +756,9 @@ pub fn build_with(usb_path: &str, beats: &[Beat], wave: &Waveform, cues: &[Cue],
     // A signed shift or shortened native PQTZ can change beat numbering even
     // when its first tempo anchor still compares equal. Locally edited or
     // inferred phrases must be paired with exactly the grid used to number them.
-    let grid_ov = ov.filter(|o| o.grid_same && (o.pssi.is_none() ||
-        o.sections.get("PQTZ").is_some_and(|s| crate::rbimport::pqtz_matches_all_beats(s, beats))));
+    let grid_ov = ov.filter(|o| o.grid_same && o.sections.get("PQTZ").is_some_and(|s| {
+        if o.pssi.is_some() { crate::rbimport::pqtz_matches_all_beats(s, beats) } else { crate::rbimport::valid_pqtz_section(s) }
+    }));
     let take_grid = |tag: &str| grid_ov.and_then(|o| o.sections.get(tag).cloned());
     let or = |tag: &str, f: &dyn Fn() -> Vec<u8>| take(tag).unwrap_or_else(f);
     let dat = vec![
@@ -897,10 +898,16 @@ mod tests {
         native[30] = 9;
         crate::phrase::mask_section(&mut native);
         let mut ov = Overrides { sections: Default::default(), grid_same: true, pssi: None, device: Default::default(), pvdi: None };
-        let exported = |ov: &Overrides| section_list(&build_with("/a.wav", &[], &Waveform::default(), &[], 0, 44100, Some(ov)).ext)
+        let beats = crate::model::BeatGrid::constant(0.1, 120.0, 1).beats(1.1);
+        let exported = |ov: &Overrides| section_list(&build_with("/a.wav", &beats, &Waveform::default(), &[], 0, 44100, Some(ov)).ext)
             .into_iter().find(|(tag, _)| tag == "PSSI").map(|(_, bytes)| bytes);
         ov.sections.insert("PSSI".into(), native.clone());
-        assert_eq!(exported(&ov).as_ref(), Some(&native));
+        assert!(exported(&ov).is_none(), "native PSSI requires an available companion grid");
+        let mut shifted = pqtz(&beats);
+        shifted[18..20].copy_from_slice(&600i16.to_be_bytes());
+        ov.sections.insert("PQTZ".into(), shifted);
+        assert_eq!(exported(&ov).as_ref(), Some(&native), "unchanged native pair retains its own numbering");
+        ov.sections.insert("PQTZ".into(), pqtz(&beats));
         ov.sections.get_mut("PSSI").unwrap()[15] = 23;
         assert!(exported(&ov).is_none());
         ov.pssi = Some(native.clone());
