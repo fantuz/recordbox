@@ -91,10 +91,6 @@ struct Held {
     event: Event,
 }
 
-fn is_drum_release(event: &Event) -> bool {
-    registry().get(event.tag).is_some_and(|f| f.act == Act::DrumRelease)
-}
-
 #[derive(Default)]
 pub(super) struct Routing {
     pub(super) performance: bool,
@@ -297,8 +293,19 @@ impl Hub {
         dev.reindex_map(&mut map, &offs);
     }
 
-    pub(super) fn release_hidden_drum_decks(&self, count: u8) {
-        self.release_matching(&mut self.routing.lock(), |h| h.event.deck > count && is_drum_release(&h.event));
+    pub(super) fn release_hidden_decks(&self, count: u8) {
+        let mut route = self.routing.lock();
+        // Per-deck holds are recorded as 1..=4. Shared FX units retain deck 0.
+        self.release_matching(&mut route, |h| h.event.deck > count);
+        for n in usize::from(count)..4 {
+            if route.jog_owner[n].take().is_some() {
+                self.reset_jog(n);
+            }
+            for dev in self.devices.lock().iter() {
+                dev.jog.lock()[n].reset();
+                dev.scan.lock()[n] = Default::default();
+            }
+        }
     }
 
     fn release_holds(&self, route: &mut Routing, device: Option<&Arc<Device>>) {
@@ -620,13 +627,87 @@ mod tests {
         hub.input_message(&b, [0x90, 0x24, 127], 1.0, 0, 0);
         assert_eq!(drum_edges(&rx), [(1, true), (4, true)]);
         hub.snap.lock().count = 2;
-        hub.release_hidden_drum_decks(2);
+        hub.release_hidden_decks(2);
         assert_eq!(drum_edges(&rx), [(4, false)]);
         let mut route = hub.routing.lock();
         route.performance = false;
         hub.release_holds(&mut route, None);
         assert_eq!(drum_edges(&rx), [(1, false)]);
         assert!(route.held.is_empty());
+    }
+
+    #[test]
+    fn collapsing_four_decks_releases_parked_pad_fx_and_bend_and_keeps_other_owners() {
+        // Use the real UI poll and application state without opening host MIDI/audio
+        // ports or reading the developer's settings.
+        const TEST: &str = "midi::routing::tests::collapsing_four_decks_releases_parked_pad_fx_and_bend_and_keeps_other_owners";
+        const PROFILE: &str = "RECORDBOX_MIDI_LAYOUT_TEST_PROFILE";
+        if std::env::var_os(PROFILE).is_none() {
+            let dir = tempfile::tempdir().unwrap();
+            let child = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", TEST, "--nocapture"])
+                .env(PROFILE, dir.path()).env("PREPDECK_DATA", dir.path()).output().unwrap();
+            let stdout = String::from_utf8_lossy(&child.stdout);
+            assert!(child.status.success() && stdout.contains("1 passed"), "{stdout}\n{}", String::from_utf8_lossy(&child.stderr));
+            return;
+        }
+        assert_eq!(std::env::var_os(PROFILE), std::env::var_os("PREPDECK_DATA"));
+        let mut app = App::open_library(&Default::default(), None, crate::DeckOptions { disable_play: true, disable_load: true });
+        app.prefs.app_mode = 1;
+        app.prefs.perf_four = true;
+        let (hub, rx) = Hub::new(app.player.decks.clone(), PathBuf::new(), false);
+        hub.routing.lock().performance = true;
+        app.midi.hub = Some(hub.clone());
+        app.midi.rx = Some(rx);
+        app.midi.started = true;
+        let port = |name: &str| {
+            let csv = format!("@file,1,{name}\n\
+                PAD1_PadFx1,,Button,,9010,9110,9210,9310,,,,,,,\n\
+                PitchBendUp,,Button,,9011,9111,9211,9311,,,,,,,\n\
+                FX1ReleaseFXOn,,Button,9012,,,,,,,,,,,\n");
+            let map = MidiMap::load(name, None, Some(csv.as_bytes())).unwrap();
+            Device::mapped(name, name.to_owned(), map, false, None)
+        };
+        let (a, b) = (port("A"), port("B"));
+        hub.devices.lock().extend([a.clone(), b.clone()]);
+        let send = |dev, channel, note, down| hub.input_message(dev, [0x90 | channel, note, if down { 127 } else { 0 }], 0.0, 0, 0);
+        app.activate_deck(3);
+        poll(&mut app);
+        for dev in [&a, &b] {
+            for channel in [0, 3] {
+                send(dev, channel, 0x10, true);
+                send(dev, channel, 0x11, true);
+            }
+            send(dev, 0, 0x12, true);
+        }
+        poll(&mut app);
+        for n in [0, 3] {
+            assert_eq!(app.px.fxx.pad.decks[n].held, [0]);
+            assert_eq!(app.deck_of(n as u8).x.bend, 1);
+        }
+        assert!(app.px.fx[0].params.release.is_some());
+
+        app.prefs.perf_four = false;
+        app.poll_decks();
+        poll(&mut app);
+        assert!(app.px.fxx.pad.decks[3].held.is_empty());
+        assert_eq!(app.deck_of(3).x.bend, 0);
+        // Releasing A and the old fourth-deck keys cannot release B's visible
+        // pad, bend or shared FX unit, even after the fourth deck reappears.
+        app.prefs.perf_four = true;
+        poll(&mut app);
+        hub.release_device(&a);
+        for note in [0x10, 0x11] { send(&b, 3, note, false); }
+        poll(&mut app);
+        assert_eq!(app.px.fxx.pad.decks[0].held, [0]);
+        assert_eq!(app.deck_of(0).x.bend, 1);
+        assert!(app.px.fx[0].params.release.is_some());
+        for note in [0x10, 0x11, 0x12] { send(&b, 0, note, false); }
+        poll(&mut app);
+        assert!(app.px.fxx.pad.decks[0].held.is_empty());
+        assert_eq!(app.deck_of(0).x.bend, 0);
+        assert!(app.px.fx[0].params.release.is_none());
+        assert!(hub.routing.lock().held.is_empty());
     }
 
     #[test]

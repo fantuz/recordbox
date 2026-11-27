@@ -33,6 +33,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 mod ports;
+mod performance;
 mod routing;
 #[cfg(test)]
 mod grv6_groove_tests;
@@ -234,6 +235,7 @@ pub fn output_acts(name: &str, kind: Kind) -> bool {
 pub fn act_accepts(a: Act, c: InClass) -> bool {
     use Act as A;
     match a {
+        A::Performance(action) => action.accepts(c),
         A::SamplerVolume | A::FxUnitBeatRot(_) => matches!(c, InClass::Abs | InClass::Rel),
         A::Needle | A::Tempo | A::FxLevel(..) | A::CfxColor(_) | A::SamplerGain | A::Trim | A::Eq(_) | A::StemIsoKnob(_) | A::ChFader | A::HpMix | A::HpLevel | A::CrossFader | A::MasterLevel => c == InClass::Abs,
         A::LoopSize | A::FxReleaseType(_) | A::Browse | A::Zoom | A::LoopMoveRot => c == InClass::Rel,
@@ -255,6 +257,7 @@ pub fn echo_led(a: Act) -> bool {
 pub fn act_has_led(a: Act) -> bool {
     use Act as A;
     use crate::sampler_ext::SmpAct;
+    if let A::Performance(action) = a { return action.has_led(); }
     matches!(
         a,
         A::PlayPause | A::Cue | A::Search(_) | A::Slip | A::Quantize | A::QuantizeAll | A::MasterTempo | A::Sync | A::Master | A::KeySync | A::TempoLed(_) | A::AutoLoop | A::Loop4 | A::Reloop | A::LoopIn | A::LoopOut | A::PitchBend(_) | A::PadMode(_) | A::HotCue(_) | A::HotCueDelete(_) | A::BeatJumpPad(_) | A::BeatLoopPad(_) | A::StemPart(_) | A::StemFx(_) | A::StemSolo | A::DrumSwap(_) | A::DrumCapture | A::FxOn(..) | A::FxMode(_) | A::FxAuto(_) | A::FxTap(_) | A::FxReleaseOn(_) | A::FxAssign(..) | A::SamplerPad(..) | A::SamplerPadStop(_) | A::Smp(SmpAct::Sync | SmpAct::Master | SmpAct::Quantize | SmpAct::SeqPlay | SmpAct::SeqRec) | A::SamplerCue | A::SeqCall(..) | A::HeadCue | A::XfAssign(_) | A::StemIso | A::Panel(_) | A::Related | A::Stub(Stub::Vinyl) | A::Stub(Stub::Reverse)
@@ -294,6 +297,7 @@ pub enum Stub {
 /// What a function does.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Act {
+    Performance(performance::Action),
     PlayPause,
     Cue,
     TrackStart,
@@ -771,6 +775,7 @@ fn build_registry() -> Vec<Func> {
         }
         add(t, "", "", &format!("{cat}Assign.MASTER"), b, false, A::FxAssignHold(u, crate::fx::MASTER as u8));
     }
+    performance::register(&mut add);
     v
 }
 
@@ -1524,7 +1529,10 @@ impl Hub {
             }
         }
         if routing::momentary(f.act) {
-            if !matches!(ev.val, Val::On(false, _)) && !matches!(f.act, Act::FxTapLong(_) | Act::FxAssignHold(..)) {
+            if !f.per_deck {
+                // The FX unit is shared by all decks and physical ports.
+                ev.deck = 0;
+            } else if !matches!(ev.val, Val::On(false, _)) {
                 let Some(n) = self.deck_ix(ev.deck) else { return };
                 ev.deck = n as u8 + 1;
             }
@@ -1977,8 +1985,6 @@ pub struct MidiState {
     /// Device names, as the MIDI setting window lists them.
     pub devices: Vec<String>,
     pub paused_inputs: Vec<String>,
-    /// The beat jump pads' page per deck (1..9; 5 puts 1 beat on the first pad).
-    pub jump_page: [u8; 4],
     /// Instant Doubles asked for: (deck, source deck), waiting for the track to be read.
     pending_double: Option<(u8, u8)>,
     /// What the stubs were last asked (for the features other parts are building).
@@ -1999,7 +2005,7 @@ pub struct MidiState {
 
 impl Default for MidiState {
     fn default() -> MidiState {
-        MidiState { hub: None, rx: None, _keeper: None, win: Default::default(), devices: vec![], paused_inputs: vec![], jump_page: [5; 4], pending_double: None, stub_log: vec![], last_tempo: [0.0; 4], last_iso: [false; 4], last_follow: [false; 4], started: false, handled: 0, drum_release: [false; crate::groove::DECKS], tap_held: [None; 2] }
+        MidiState { hub: None, rx: None, _keeper: None, win: Default::default(), devices: vec![], paused_inputs: vec![], pending_double: None, stub_log: vec![], last_tempo: [0.0; 4], last_iso: [false; 4], last_follow: [false; 4], started: false, handled: 0, drum_release: [false; crate::groove::DECKS], tap_held: [None; 2] }
     }
 }
 
@@ -2136,7 +2142,7 @@ pub fn poll(app: &mut App) {
     let next = snapshot(app);
     let previous = std::mem::replace(&mut *hub.snap.lock(), next);
     if next.count < previous.count {
-        hub.release_hidden_drum_decks(next.count);
+        hub.release_hidden_decks(next.count);
     }
     // The takeover is armed again when the tempo was changed on screen or sync changed, and
     // the EQ knobs wait for a pick-up when they switch between EQ and STEM ISO.
@@ -2305,9 +2311,17 @@ pub fn apply(app: &mut App, hub: &Arc<Hub>, device: &str, f: &Func, deck: u8, va
     if !app.performance() && !routing::browsing(f.act) {
         return;
     }
-    let Some(n) = deck_of(app, deck) else { return };
+    // The routing ledger delivers the final release to the deck that owned
+    // the press, including a deck parked by a four-to-two layout change.
+    let n = if release && routing::momentary(f.act) && (1..=4).contains(&deck) {
+        deck - 1
+    } else {
+        let Some(n) = deck_of(app, deck) else { return };
+        n
+    };
     let ni = n as usize;
     match f.act {
+        Act::Performance(action) => action.apply(app, n, val),
         Act::PlayPause => {
             if press {
                 if fast_done {
@@ -2568,20 +2582,17 @@ pub fn apply(app: &mut App, hub: &Arc<Hub>, device: &str, f: &Func, deck: u8, va
         }
         Act::BeatJumpPad(i) => {
             if press {
-                // rekordbox's cells: FINE, 1/8 ... 128, each back and forward; the page
-                // chooses the first cell on the pads (page 5: 1 beat on pads 1 and 2).
-                const CELLS: [f64; 12] = [0.0625, 0.125, 0.25, 0.5, 1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 64.0, 128.0];
-                let first = (2 * app.midi.jump_page[ni] as i32 - 2).clamp(0, 16) as usize;
-                let id = first + i as usize;
-                if let Some(b) = CELLS.get(id / 2) {
-                    let beats = if id % 2 == 0 { -*b } else { *b };
-                    app.with_deck(n, |a| a.beat_jump(beats));
+                let id = crate::pads::jump_page_first(app.prefs.pads.beat_jump_page[ni]) + i;
+                if id < 24 {
+                    app.with_deck(n, |a| a.pad_beat_jump(id));
                 }
             }
         }
         Act::BeatJumpPage(dir) => {
             if press {
-                app.midi.jump_page[ni] = (app.midi.jump_page[ni] as i32 + dir).clamp(1, 9) as u8;
+                let page = app.prefs.pads.beat_jump_page[ni];
+                app.prefs.pads.beat_jump_page[ni] = crate::pads::jump_page_step(page, dir > 0, false);
+                app.save_prefs();
             }
         }
         Act::DrumSwap(row) => {
@@ -3257,9 +3268,9 @@ pub fn stub(app: &mut App, hub: &Arc<Hub>, s: Stub, deck: u8, val: Val) {
             // (Pads 1..16 of a bank; the second bank's pads follow the first's.)
             let idx = ((bank.max(1) - 1) as u8) * 16 + pad as u8;
             if press {
-                crate::ui_padfx::pad_down(app, deck as usize, idx);
+                app.with_deck(deck, |a| crate::ui_padfx::pad_down(a, deck as usize, idx));
             } else if release {
-                crate::ui_padfx::pad_up(app, deck as usize, idx);
+                app.with_deck(deck, |a| crate::ui_padfx::pad_up(a, deck as usize, idx));
             }
             if press || release {
                 note(app, format!("PadFx {bank} pad {} {} deck {}", pad + 1, if press { "on" } else { "off" }, deck + 1));
@@ -3267,7 +3278,7 @@ pub fn stub(app: &mut App, hub: &Arc<Hub>, s: Stub, deck: u8, val: Val) {
         }
         Stub::PadFxBeat(bank, dir) => {
             if press {
-                crate::ui_padfx::beat_shift(app, deck as usize, dir < 0);
+                app.with_deck(deck, |a| crate::ui_padfx::beat_shift(a, deck as usize, dir < 0));
                 note(app, format!("PadFxBeat {bank} {dir:+} deck {}", deck + 1));
             }
         }
@@ -3435,6 +3446,7 @@ fn leds(app: &mut App, hub: &Arc<Hub>) {
             let m = app.px.mix[ni];
             let pad_mode = app.px.pad_mode[ni];
             let led = match f.act {
+                Act::Performance(action) => match action.led(app, d.loaded) { Some(lit) => on(lit), None => continue },
                 Act::PlayPause => if d.playing { Led::On } else if d.loaded { Led::Blink } else { Led::Off },
                 Act::Cue => if !d.loaded { Led::Off } else if d.playing || d.at_cue { Led::On } else { Led::Blink },
                 Act::Search(dir) => on(d.searching == dir),
