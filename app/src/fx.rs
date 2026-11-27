@@ -1564,8 +1564,14 @@ impl Slot {
                 // An echo (feedback 0.7) of the sound without its lows (under 284 Hz).
                 e.fb = if multi { 0.7 } else { echo_fb(k1, !p.on) };
                 if !multi {
-                    e.ml = swing(k2);
-                    e.mr = swing(k2);
+                    // SingleLowCutFxEcho's SWING shortens the selected side by up to a
+                    // quarter of the delay. Both sides stay on the beat in the center.
+                    let shorter = 1.0 - 0.25 * through_value(k2);
+                    if k2 < 0.5 {
+                        e.ml = shorter;
+                    } else {
+                        e.mr = shorter;
+                    }
                     e.rev = b1;
                     e.freeze = b2;
                 }
@@ -3529,6 +3535,41 @@ mod tests {
             run(Kind::LowCutEcho, 0.75, &mut x);
             let echo = rms(&x[26000 * 2..34000 * 2]);
             assert_eq!(echo > 0.1, repeated, "{freq} Hz: {echo}");
+        }
+    }
+
+    #[test]
+    fn low_cut_echo_swing_shortens_only_the_selected_stereo_side() {
+        let rate = 48_000;
+        let beat = 24_000; // One beat at 120 BPM.
+        let click = 5000;
+        for (swing, left, right, block) in [
+            (0.0, 18_000, beat, 257),
+            (0.243135, 21_000, beat, 192),
+            (0.49, beat, beat, 128),
+            (0.5, beat, beat, 960),
+            (0.51, beat, beat, 192),
+            (1.0, beat, 18_000, 257),
+        ] {
+            let mut rack = Rack::new();
+            rack.enabled = true;
+            let mut p = unit(Kind::LowCutEcho, 1.0, 1.0);
+            p.single = true;
+            p.one = SlotParams { knob: [0.5, swing], ..p.slots[0] };
+            rack.units[0].params = p;
+            rack.units[0].prepare(&p.assign);
+
+            let mut audio = vec![0.0; 2 * (click + beat + 2)];
+            audio[2 * click..2 * click + 2].fill(0.5);
+            for chunk in audio.chunks_mut(2 * block) {
+                rack.process(0, chunk, rate);
+            }
+            for (side, delay) in [left, right].into_iter().enumerate() {
+                let repeat = audio.chunks_exact(2).enumerate().skip(click + 1)
+                    .find(|(_, frame)| frame[side].abs() > 0.001)
+                    .map(|(i, _)| i);
+                assert_eq!(repeat, Some(click + delay), "swing {swing}, channel {side}");
+            }
         }
     }
 
