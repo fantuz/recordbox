@@ -157,6 +157,9 @@ fn interrupted_export_recovers_to_before_or_after() {
         settings: Default::default(),
         browse: Default::default(),
         phrases: true,
+        // This test replays every journal failure on the same songs. Keep real PSSI
+        // generation here; full_export_to_folder exercises the default estimator.
+        classic_phrase_estimator: true,
         ..Default::default()
     };
     let cancel = std::sync::atomic::AtomicBool::new(false);
