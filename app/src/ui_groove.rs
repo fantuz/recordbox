@@ -292,7 +292,7 @@ fn panel(app: &mut App, ui: &mut Ui, r: Rect, deck: usize) {
     p.text(at(v9 + 132, 30, 33, 18).left_center(), Align2::LEFT_CENTER, "GAIN", caps(9.0), WHITE);
     let (gv, gresp) = small_knob(ui, at(v9 + 165, 30, 18, 18), "gain", app.gc.gain[deck], true);
     if let Some(v) = gv {
-        app.gc.gain[deck] = v;
+        app.groove_set_deck_gain(deck, v);
     }
     tip(gresp, app, "DRUM SWAP GAIN:\nAdjusts volume of all DRUM SWAP SLOTs of the entire DECK.");
 
@@ -318,7 +318,7 @@ fn panel(app: &mut App, ui: &mut Ui, r: Rect, deck: usize) {
     let nresp = ui.interact(name_r, ui.id().with("rfx"), Sense::click_and_drag());
     let held = nresp.is_pointer_button_down_on();
     app.groove_release_fx(deck, held || app.gc.rfx_held[deck] && scripted_hold(deck));
-    let lit = app.gc.rfx_held[deck];
+    let lit = app.groove_release_held(deck);
     let round_l = egui::CornerRadius { nw: 2, sw: 2, ne: 0, se: 0 };
     let round_r = egui::CornerRadius { nw: 0, sw: 0, ne: 2, se: 2 };
     p.rect_filled(name_r, round_l, BTN_FILL);
@@ -1092,7 +1092,7 @@ fn state_line(app: &App) -> String {
         app.gc.gain[d],
         groove::RFX_NAMES[set.fx_type.min(2) as usize],
         groove::beat_text(set.fx_beats[set.fx_type.min(2) as usize]),
-        app.gc.rfx_held[d],
+        app.groove_release_held(d),
         app.gc.capture_on,
         app.gc.capture_len,
         app.gc.page,

@@ -1,0 +1,13 @@
+@file,1,DDJ-GRV6
+# recordbox replay fixture for the unshifted Groove Circuit controls G1-G6 and G11.
+# Independently transcribed from the AlphaTheta DDJ-GRV6 MIDI Message List E1.
+# https://downloads.support.alphatheta.com/software_info/dj-controllers/DDJ-GRV6/DDJ-GRV6_MIDI_Message_List_E1.pdf
+# The four deck columns use MIDI channels 1 through 4. G1 sends MSB then LSB.
+# Both directions of the G11 lever send the same note. Only G2-G6 receive LED feedback.
+DrumSwapGain,Gain,KnobSliderHiRes,B012,0,1,2,3,,,,,,,
+DrumSwap1,Swap 1,Button,9000,0,1,2,3,9000,0,1,2,3,,
+DrumSwap2,Swap 2,Button,9001,0,1,2,3,9001,0,1,2,3,,
+DrumSwap3,Swap 3,Button,9002,0,1,2,3,9002,0,1,2,3,,
+DrumSwap4,Swap 4,Button,9003,0,1,2,3,9003,0,1,2,3,,
+DrumSwapCapture,Capture,Button,9008,0,1,2,3,9008,0,1,2,3,,
+DrumReleaseFx,Release,Button,9024,0,1,2,3,,,,,,,

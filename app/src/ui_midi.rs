@@ -179,6 +179,10 @@ fn device(midi: &MidiState) -> Option<std::sync::Arc<Device>> {
     midi.hub.as_ref()?.device(&midi.win.device)
 }
 
+fn editable_device(midi: &MidiState) -> Option<(&Hub, std::sync::Arc<Device>)> {
+    Some((midi.hub.as_deref()?, device(midi).filter(|d| !d.rx3_trial_active())?))
+}
+
 fn save(app: &mut App) {
     if let (Some(hub), Some(dev)) = (app.midi.hub.clone(), device(&app.midi)) {
         if let Err(e) = hub.save_map(&dev) {
@@ -188,7 +192,7 @@ fn save(app: &mut App) {
 }
 
 pub fn set_learn(midi: &mut MidiState, on: bool) {
-    let on = on && device(midi).is_some();
+    let on = on && editable_device(midi).is_some();
     midi.win.learn = on;
     midi.win.filter.reset();
     if let Some(hub) = midi.hub.as_ref() {
@@ -304,16 +308,15 @@ fn show_clash(app: &mut App) {
 fn commit_in(app: &mut App, r: usize, new: Option<u16>) -> bool {
     let tab = app.midi.win.tab;
     let Some(row) = app.midi.win.rows.get(tab).and_then(|v| v.get(r)).cloned() else { return false };
-    let Some(dev) = device(&app.midi) else { return false };
+    let Some((hub, dev)) = editable_device(&app.midi) else { return false };
     if row.input == new {
         return false;
     }
     let reg = registry();
-    let res = dev.map.lock().change_input(&row.entry(row.input_kind), row.input, new, &|n| reg.learnable(n));
+    let res = hub.try_edit_mapping(&dev, |map| map.change_input(&row.entry(row.input_kind), row.input, new, &|n| reg.learnable(n)));
     match res {
         Ok(()) => {
             app.midi.win.rows[tab][r].input = new;
-            dev.reindex();
             true
         }
         Err(Reject::Taken(e)) => {
@@ -327,16 +330,15 @@ fn commit_in(app: &mut App, r: usize, new: Option<u16>) -> bool {
 fn commit_out(app: &mut App, r: usize, new: Option<u16>) -> bool {
     let tab = app.midi.win.tab;
     let Some(row) = app.midi.win.rows.get(tab).and_then(|v| v.get(r)).cloned() else { return false };
-    let Some(dev) = device(&app.midi) else { return false };
+    let Some((hub, dev)) = editable_device(&app.midi) else { return false };
     if row.output == new {
         return false;
     }
     let reg = registry();
-    let res = dev.map.lock().change_output(&row.entry(row.output_kind), row.output, new, &|n| reg.learnable(n));
+    let res = hub.try_edit_mapping(&dev, |map| map.change_output(&row.entry(row.output_kind), row.output, new, &|n| reg.learnable(n)));
     match res {
         Ok(()) => {
             app.midi.win.rows[tab][r].output = new;
-            dev.reindex();
             true
         }
         Err(Reject::Taken(e)) => {
@@ -351,14 +353,12 @@ fn commit_out(app: &mut App, r: usize, new: Option<u16>) -> bool {
 fn commit_row(app: &mut App, r: usize) {
     let tab = app.midi.win.tab;
     let Some(row) = app.midi.win.rows.get(tab).and_then(|v| v.get(r)).cloned() else { return };
-    let Some(dev) = device(&app.midi) else { return };
+    let Some((hub, dev)) = editable_device(&app.midi) else { return };
     if row.input.is_none() && row.output.is_none() { return; }
-    {
-        let mut map = dev.map.lock();
+    hub.edit_mapping(&dev, |map| {
         map.rewrite(&row.entry(row.input_kind), row.input, None);
         map.rewrite(&row.entry(row.output_kind), None, row.output);
-    }
-    dev.reindex();
+    });
     save(app);
 }
 
@@ -416,9 +416,8 @@ pub fn delete_row(app: &mut App) {
     let row = app.midi.win.rows[tab].remove(r);
     app.midi.win.sel[tab] = None;
     if row.input.is_none() && row.output.is_none() { return; }
-    if let Some(dev) = device(&app.midi) {
-        dev.map.lock().delete(row.input, row.output);
-        dev.reindex();
+    if let Some((hub, dev)) = editable_device(&app.midi) {
+        hub.edit_mapping(&dev, |map| map.delete(row.input, row.output));
     }
     save(app);
 }
@@ -438,8 +437,7 @@ fn pick_file(save_name: Option<&str>) -> Option<std::path::PathBuf> {
 /// EXPORT: the user's part of the mapping, in rekordbox's file format. False when the file
 /// could not be written; None when no place was chosen.
 pub fn export(app: &mut App) -> Option<bool> {
-    let hub = app.midi.hub.clone()?;
-    let dev = device(&app.midi)?;
+    let (hub, dev) = editable_device(&app.midi)?;
     let path = pick_file(Some(&crate::midi_csv::export_name(&dev.name)))?;
     let text = dev.map.lock().save_text();
     match hub.export_file(&path, text.as_bytes()) {
@@ -453,26 +451,26 @@ pub fn export(app: &mut App) -> Option<bool> {
 
 /// Import into the recordbox copy only after validating the selected file.
 pub fn import(app: &mut App) {
-    let (Some(hub), Some(dev)) = (app.midi.hub.clone(), device(&app.midi)) else { return };
+    let Some((hub, dev)) = editable_device(&app.midi) else { return };
     let Some(path) = pick_file(None) else { return };
     if let Err(e) = crate::midi_csv::read_file(&path).and_then(|bytes| hub.write_override(&dev.name, &bytes)) {
         app.midi.win.alert = Some(("Cannot import the MIDI setting file".into(), e.to_string()));
         return;
     }
-    *dev.map.lock() = hub.load_map(&dev.name).0;
-    dev.reindex();
+    let replacement = hub.load_map(&dev.name).0;
+    hub.edit_mapping(&dev, |map| *map = replacement);
     rebuild_rows(&mut app.midi);
 }
 
 /// Reset this recordbox device to its factory mapping, including when a native user map exists.
 pub fn reset_default(app: &mut App) {
-    let (Some(hub), Some(dev)) = (app.midi.hub.clone(), device(&app.midi)) else { return };
+    let Some((hub, dev)) = editable_device(&app.midi) else { return };
     if let Err(e) = hub.write_override(&dev.name, crate::midi_csv::empty_user_file(&dev.name).as_bytes()) {
         app.midi.win.alert = Some(("MIDI settings could not be reset".into(), e.to_string()));
         return;
     }
-    *dev.map.lock() = hub.load_map(&dev.name).0;
-    dev.reindex();
+    let replacement = hub.load_map(&dev.name).0;
+    hub.edit_mapping(&dev, |map| *map = replacement);
     rebuild_rows(&mut app.midi);
 }
 
@@ -646,7 +644,8 @@ fn content(app: &mut App, ui: &mut Ui, o: Pos2, live: bool) {
     let p = ui.painter().clone();
     let at = |x: f32, y: f32, w: f32, h: f32| Rect::from_min_size(o + vec2(x, y), vec2(w, h));
     let selected = device(&app.midi);
-    let has_dev = selected.is_some();
+    let trial = selected.as_ref().is_some_and(|d| d.rx3_trial_active());
+    let can_edit = selected.is_some() && !trial;
     let tips = app.prefs.tooltips;
     let tip = move |r: egui::Response, t: &str| if tips { r.on_hover_text(t) } else { r };
 
@@ -658,7 +657,9 @@ fn content(app: &mut App, ui: &mut Ui, o: Pos2, live: bool) {
     let cr = at(16.0, 40.0, 208.0, 24.0);
     let cresp = combo_box(ui, cr, "device", &shown, cur.is_empty(), live);
     app.midi.win.at.insert("device".into(), cr.center());
-    let source_tip = if selected.as_ref().is_some_and(|d| d.from_rekordbox()) {
+    let source_tip = if trial {
+        "The experimental XDJ-RX3 profile is active for this connection. Stop the trial to return to your previous mapping."
+    } else if selected.as_ref().is_some_and(|d| d.from_rekordbox()) {
         "This controller uses your AlphaTheta Rekordbox user mapping. MIDI Learn saves your edits in recordbox."
     } else {
         "Choose a connected MIDI input. recordbox reads available factory and user mappings and saves edits in its own folder."
@@ -671,14 +672,30 @@ fn content(app: &mut App, ui: &mut Ui, o: Pos2, live: bool) {
     } else {
         app.midi.win.at = at_map;
     }
-    if let Some(d) = selected.filter(|d| d.needs_auth) {
+    if let Some(d) = selected.as_ref().filter(|d| d.needs_auth) {
         p.text(o + vec2(240.0, 52.0), Align2::LEFT_CENTER, format!("{}: rekordbox unlocks this model with a hardware handshake that recordbox does not have. It may not respond.", d.name), jf(13.0), hex(0xE04848));
+    } else if let Some(d) = selected.as_ref().filter(|d| crate::midi_csv::rx3_primary_input(&d.name)) {
+        let label = if trial { "Stop RX3 profile" } else { "Try RX3 profile" };
+        let r = at(240.0, 40.0, 152.0, 24.0);
+        let button = text_button(ui, r, "rx3_trial", label, trial, live, (false, false));
+        if tip(button, "Try two decks in PERFORMANCE mode. On the XDJ-RX3 choose SOURCE → SOFTWARE CONTROL and press LOAD for each deck. Set MIXER MODE to MIDI CONTROL to use the software mixer.").clicked() {
+            set_learn(&mut app.midi, false);
+            if let Some(hub) = &app.midi.hub {
+                hub.set_rx3_trial(d, !trial);
+            }
+            app.midi.win.edit = None;
+            app.midi.win.ask = None;
+            rebuild_rows(&mut app.midi);
+            ui.ctx().request_repaint();
+            return;
+        }
+        p.text(o + vec2(401.0, 52.0), Align2::LEFT_CENTER, "Experimental · this connection only", jf(13.0), hex(0xAEB3B6));
     }
 
     // ---- DEFAULT
     let r = at(W - 184.0, 40.0, 150.0, 24.0);
     app.midi.win.at.insert("DEFAULT".into(), r.center());
-    if tip(text_button(ui, r, "default", "DEFAULT", false, has_dev && live, (false, false)), "Use the factory mapping for this device in recordbox. Your original Rekordbox settings stay on disk.").clicked() {
+    if tip(text_button(ui, r, "default", "DEFAULT", false, can_edit && live, (false, false)), "Use the factory mapping for this device in recordbox. Your original Rekordbox settings stay on disk.").clicked() {
         app.midi.win.ask = Some(Ask::Default);
     }
 
@@ -718,13 +735,13 @@ fn content(app: &mut App, ui: &mut Ui, o: Pos2, live: bool) {
     p.rect_filled(frame, 0.0, hex(0x8E989B));
     let tr = frame.shrink(1.0);
     p.rect_filled(tr, 0.0, hex(0x1B1B1E));
-    table(app, ui, tr, live && has_dev);
+    table(app, ui, tr, live && can_edit);
 
     // ---- the buttons along the bottom
     let by = H - 33.0;
     let tab = app.midi.win.tab;
     let has_sel = app.midi.win.sel.get(tab).copied().flatten().is_some();
-    let en = has_dev && live;
+    let en = can_edit && live;
     let r = at(16.0, by, 150.0, 24.0);
     app.midi.win.at.insert("LEARN".into(), r.center());
     if tip(text_button(ui, r, "learn", "LEARN", app.midi.win.learn, en, (false, false)), "Click to enter the MIDI LEARN standby mode. \nUsing a MIDI controller, you can operate selected feature.").clicked() {
