@@ -156,6 +156,22 @@ fn read_copy(dir: &Path, python: &Path, one: Option<i64>, classic: Option<i64>) 
     )?)?)
 }
 
+fn snapshot_dir(root: &Path) -> Result<tempfile::TempDir> {
+    let temp_base = std::env::temp_dir().canonicalize()?;
+    ensure!(
+        !temp_base.starts_with(root.canonicalize()?),
+        "Choose a system temporary directory outside the selected USB root"
+    );
+    let mut builder = tempfile::Builder::new();
+    builder.prefix("recordbox-onelibrary-");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        builder.permissions(fs::Permissions::from_mode(0o700));
+    }
+    Ok(builder.tempdir_in(temp_base)?)
+}
+
 fn inspect(root: &Path, one: Option<i64>, classic_id: Option<i64>) -> Result<Report> {
     let root = std::path::absolute(root)?;
     let files = crate::export::inspect_onelibrary_files(&root)?;
@@ -164,14 +180,7 @@ fn inspect(root: &Path, one: Option<i64>, classic_id: Option<i64>) -> Result<Rep
         "This device has no classic catalog"
     );
     let python = interpreter()?;
-    let temp_base = std::env::temp_dir().canonicalize()?;
-    ensure!(
-        !temp_base.starts_with(root.canonicalize()?),
-        "Choose a system temporary directory outside the selected USB root"
-    );
-    let temp = tempfile::Builder::new()
-        .prefix("recordbox-onelibrary-")
-        .tempdir_in(temp_base)?;
+    let temp = snapshot_dir(&root)?;
     let mut sources = vec![(&files.0, "exportLibrary.db")];
     if let Some(classic) = &files.1 {
         sources.push((classic, "export.pdb"));
@@ -429,6 +438,19 @@ fn select(ui: &mut egui::Ui, label: &str, nodes: &[Playlist], id: &mut Option<i6
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[cfg(unix)]
+    fn snapshot_directory_is_private_even_on_a_shared_temp_volume() -> Result<()> {
+        use std::os::unix::fs::PermissionsExt;
+        let source = tempfile::tempdir()?;
+        let snapshot = snapshot_dir(source.path())?;
+        assert_eq!(
+            snapshot.path().metadata()?.permissions().mode() & 0o777,
+            0o700
+        );
+        Ok(())
+    }
 
     #[test]
     fn refuses_live_sidecars_recovery_and_ambiguous_onelibraries() -> Result<()> {
