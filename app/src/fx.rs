@@ -1630,6 +1630,7 @@ impl Slot {
                 }
             }
             Roll | RevRoll | SlipRoll => mix = if self.roll.is_some() { roll_mix(level) } else { (1.0, 0.0) },
+            Robot if !multi => mix = half_mix(level),
             Robot | Helix => mix = (0.0, 1.0),
             Pitch => mix = if level <= 0.0 || p.value == 0.0 && (multi || (k1 - 0.5).abs() <= 0.02) { (1.0, 0.0) } else { (0.0, 1.0) },
             Noise => {
@@ -1664,8 +1665,13 @@ impl Slot {
         let pct = if !multi && (k1 - 0.5).abs() > 0.02 { (k1 - 0.5) * 200.0 } else { p.value };
         let robot_ratio = pitch_ratio(pct.clamp(-100.0, 100.0));
         let pitch_r = pitch_ratio(if multi { pct * 2.0 * level } else { pct });
-        let (rob_a, rob_b, rob_mod) = robot_law(level);
-        let rob_mod = if multi { rob_mod } else { 0.8 * k2 };
+        // SingleFxRobot sets the pitch and flanger gains with MODULATION and
+        // holds flanger feedback at 0.267. LEVEL/DEPTH controls its wet/dry mix.
+        let (rob_a, rob_b, rob_mod) = if multi {
+            robot_law(level)
+        } else {
+            (robot_law(k2).0, k2, 0.267)
+        };
         let speed = stretch_speed(level);
         let stages = if multi { (6, 6) } else { phaser_stages(k2) };
         let (helix_keep, helix_in) = helix_law(level);
@@ -3506,6 +3512,47 @@ mod tests {
 
     fn burst(n: usize) -> Vec<f32> {
         (0..n).flat_map(|i| { let v = if i < 480 { 0.5 } else { 0.0 }; [v, v] }).collect()
+    }
+
+    #[test]
+    fn robot_level_mixes_the_dry_signal_and_modulation_controls_the_single_mode_voices() {
+        let input = tone(8_192, 873.0);
+        let render = |single, level, modulation| {
+            let mut rack = Rack::new();
+            rack.enabled = true;
+            let mut p = unit(Kind::Robot, 0.0, level);
+            p.single = single;
+            p.slots[0].knob = [0.5, modulation];
+            p.one = p.slots[0];
+            rack.units[0].params = p;
+            rack.units[0].prepare(&p.assign);
+            let mut out = input.clone();
+            for block in out.chunks_mut(2 * 257) {
+                rack.process(0, block, 48_000);
+            }
+            let slot = if single { 3 } else { 0 };
+            let gains = rack.units[0].channels[0].as_ref().unwrap().slots[slot].ga;
+            (out, gains)
+        };
+
+        let (dry, _) = render(true, 0.0, 1.0);
+        assert!(dry == input, "zero LEVEL/DEPTH must preserve the dry signal");
+        let (half, _) = render(true, 0.25, 1.0);
+        let (wet, _) = render(true, 0.5, 1.0);
+        assert!(half.iter().zip(&dry).zip(&wet).all(|((&a, &d), &w)| (a - (d + w) * 0.5).abs() < 1e-5),
+            "25% LEVEL/DEPTH should mix equal amounts of dry and wet audio");
+        let (fully_wet, gains) = render(true, 1.0, 1.0);
+        assert!(wet == fully_wet, "LEVEL/DEPTH should remain fully wet from the midpoint");
+        assert_eq!(gains, [0.75, 1.0]);
+        let (unmodulated, gains) = render(true, 1.0, 0.0);
+        assert_eq!(gains, [1.0, 0.0]);
+        assert!(unmodulated.iter().zip(&wet).any(|(&a, &b)| (a - b).abs() > 0.05));
+
+        // Multi mode gets both voice gains from LEVEL/DEPTH and has no MODULATION knob.
+        let (multi, gains) = render(false, 0.05, 0.0);
+        let (pitch, flanger, _) = robot_law(0.05);
+        assert_eq!(gains, [pitch, flanger]);
+        assert!(render(false, 0.05, 1.0).0 == multi, "multi mode should ignore the single-mode knob");
     }
 
     #[test]
