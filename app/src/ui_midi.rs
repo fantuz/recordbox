@@ -56,20 +56,30 @@ pub struct LearnRow {
     pub input: Option<u16>,
     pub output: Option<u16>,
     pub ty: u8,
+    // The type menu groups several distinct wire formats under the same label.
+    // Preserve both sides of an imported row until the user changes that menu.
+    input_kind: crate::midi_csv::Kind,
+    output_kind: crate::midi_csv::Kind,
     pub comment: String,
     pub min: i32,
     pub max: i32,
 }
 
 impl LearnRow {
-    fn entry(&self) -> LearnEntry {
+    fn set_type(&mut self, ty: u8) {
+        self.ty = ty;
+        self.input_kind = kind_of_type(ty);
+        self.output_kind = self.input_kind;
+    }
+
+    fn entry(&self, kind: crate::midi_csv::Kind) -> LearnEntry {
         // "Button(for Pad)" is a Button with LED values; they default to 0 / 127.
         let (min, max) = match self.ty {
             T_BUTTON_PAD => (if self.min == -1 && self.max == -1 { 0 } else { self.min }, if self.max == -1 { 127 } else { self.max }),
             T_BUTTON => (-1, -1),
             _ => (self.min, self.max),
         };
-        LearnEntry { name: self.name.clone(), deck: self.deck, kind: kind_of_type(self.ty), min, max, comment: self.comment.clone() }
+        LearnEntry { name: self.name.clone(), deck: self.deck, kind, min, max, comment: self.comment.clone() }
     }
 }
 
@@ -201,45 +211,47 @@ pub fn select_device(midi: &mut MidiState, name: &str) {
 /// read-only and whose function is one of the window's commands, with its output; then the
 /// outputs that have no input (indicators).
 pub fn rebuild_rows(midi: &mut MidiState) {
-    let reg = registry();
-    let mut rows: Vec<Vec<LearnRow>> = vec![vec![]; TABS.len()];
-    if let Some(dev) = device(midi) {
-        let map = dev.map.lock();
-        let mut ins: Vec<&crate::midi_csv::Entry> = map.live_inputs().map(|i| &i.e).collect();
-        ins.sort_by_key(|e| e.code);
-        let mut used = vec![false; map.outputs.len()];
-        let mk = |e: &crate::midi_csv::Entry, input: Option<u16>, output: Option<u16>| {
-            let f = reg.by_name(&e.name)?;
-            let t = tab_index(f.tab)?;
-            Some((t, LearnRow { name: e.name.clone(), display: f.display.clone(), deck: e.deck, input, output, ty: type_of_entry(e), comment: e.comment.clone(), min: e.opts.min, max: e.opts.max }))
-        };
-        for e in ins {
-            if e.opts.ro || e.kind == crate::midi_csv::Kind::Parameter {
-                continue;
-            }
-            // Its output: the same function and deck, the same code first.
-            let same = |o: &crate::midi_csv::Entry| o.name == e.name && o.deck == e.deck;
-            let oi = map.outputs.iter().enumerate().position(|(i, o)| !used[i] && same(o) && o.code == e.code).or_else(|| map.outputs.iter().enumerate().position(|(i, o)| !used[i] && same(o)));
-            if let Some((t, row)) = mk(e, Some(e.code), oi.map(|i| map.outputs[i].code)) {
-                if let Some(i) = oi {
-                    used[i] = true;
-                }
-                rows[t].push(row);
-            }
-        }
-        for (i, o) in map.outputs.iter().enumerate() {
-            if used[i] || o.opts.ro {
-                continue;
-            }
-            if let Some((t, row)) = mk(o, None, Some(o.code)) {
-                rows[t].push(row);
-            }
-        }
-    }
+    let rows = device(midi).map_or_else(|| vec![vec![]; TABS.len()], |dev| rows_of(&dev.map.lock()));
     let w = &mut midi.win;
     w.rows = rows;
     w.sel = vec![None; TABS.len()];
     w.sort = None;
+}
+
+fn rows_of(map: &crate::midi_map::MidiMap) -> Vec<Vec<LearnRow>> {
+    let reg = registry();
+    let mut rows: Vec<Vec<LearnRow>> = vec![vec![]; TABS.len()];
+    let mut ins: Vec<&crate::midi_csv::Entry> = map.live_inputs().map(|i| &i.e).collect();
+    ins.sort_by_key(|e| e.code);
+    let mut used = vec![false; map.outputs.len()];
+    let mk = |e: &crate::midi_csv::Entry, input: Option<u16>, output: Option<&crate::midi_csv::Entry>| {
+        let f = reg.by_name(&e.name)?;
+        let t = tab_index(f.tab)?;
+        Some((t, LearnRow { name: e.name.clone(), display: f.display.clone(), deck: e.deck, input, output: output.map(|o| o.code), ty: type_of_entry(e), input_kind: e.kind, output_kind: output.map_or(e.kind, |o| o.kind), comment: e.comment.clone(), min: e.opts.min, max: e.opts.max }))
+    };
+    for e in ins {
+        if e.opts.ro || e.kind == crate::midi_csv::Kind::Parameter {
+            continue;
+        }
+        // Its output: the same function and deck, the same code first.
+        let same = |o: &crate::midi_csv::Entry| !o.opts.ro && o.name == e.name && o.deck == e.deck;
+        let oi = map.outputs.iter().enumerate().position(|(i, o)| !used[i] && same(o) && o.code == e.code).or_else(|| map.outputs.iter().enumerate().position(|(i, o)| !used[i] && same(o)));
+        if let Some((t, row)) = mk(e, Some(e.code), oi.map(|i| &map.outputs[i])) {
+            if let Some(i) = oi {
+                used[i] = true;
+            }
+            rows[t].push(row);
+        }
+    }
+    for (i, o) in map.outputs.iter().enumerate() {
+        if used[i] || o.opts.ro {
+            continue;
+        }
+        if let Some((t, row)) = mk(o, None, Some(o)) {
+            rows[t].push(row);
+        }
+    }
+    rows
 }
 
 /// The device list changed.
@@ -297,7 +309,7 @@ fn commit_in(app: &mut App, r: usize, new: Option<u16>) -> bool {
         return false;
     }
     let reg = registry();
-    let res = dev.map.lock().change_input(&row.entry(), row.input, new, &|n| reg.learnable(n));
+    let res = dev.map.lock().change_input(&row.entry(row.input_kind), row.input, new, &|n| reg.learnable(n));
     match res {
         Ok(()) => {
             app.midi.win.rows[tab][r].input = new;
@@ -320,7 +332,7 @@ fn commit_out(app: &mut App, r: usize, new: Option<u16>) -> bool {
         return false;
     }
     let reg = registry();
-    let res = dev.map.lock().change_output(&row.entry(), row.output, new, &|n| reg.learnable(n));
+    let res = dev.map.lock().change_output(&row.entry(row.output_kind), row.output, new, &|n| reg.learnable(n));
     match res {
         Ok(()) => {
             app.midi.win.rows[tab][r].output = new;
@@ -341,7 +353,11 @@ fn commit_row(app: &mut App, r: usize) {
     let Some(row) = app.midi.win.rows.get(tab).and_then(|v| v.get(r)).cloned() else { return };
     let Some(dev) = device(&app.midi) else { return };
     if row.input.is_none() && row.output.is_none() { return; }
-    dev.map.lock().rewrite(&row.entry(), row.input, row.output);
+    {
+        let mut map = dev.map.lock();
+        map.rewrite(&row.entry(row.input_kind), row.input, None);
+        map.rewrite(&row.entry(row.output_kind), None, row.output);
+    }
     dev.reindex();
     save(app);
 }
@@ -374,7 +390,7 @@ pub fn add_row(app: &mut App, name: &str) {
     if w.rows.len() <= tab {
         return;
     }
-    w.rows[tab].push(LearnRow { name: f.name.clone(), display: f.display.clone(), deck: f.per_deck as u8, input: None, output: None, ty: f.ty, comment: String::new(), min: -1, max: -1 });
+    w.rows[tab].push(LearnRow { name: f.name.clone(), display: f.display.clone(), deck: f.per_deck as u8, input: None, output: None, ty: f.ty, input_kind: kind_of_type(f.ty), output_kind: kind_of_type(f.ty), comment: String::new(), min: -1, max: -1 });
     w.sel[tab] = Some(w.rows[tab].len() - 1);
 }
 
@@ -629,7 +645,8 @@ pub fn window(app: &mut App, ctx: &egui::Context) {
 fn content(app: &mut App, ui: &mut Ui, o: Pos2, live: bool) {
     let p = ui.painter().clone();
     let at = |x: f32, y: f32, w: f32, h: f32| Rect::from_min_size(o + vec2(x, y), vec2(w, h));
-    let has_dev = device(&app.midi).is_some();
+    let selected = device(&app.midi);
+    let has_dev = selected.is_some();
     let tips = app.prefs.tooltips;
     let tip = move |r: egui::Response, t: &str| if tips { r.on_hover_text(t) } else { r };
 
@@ -641,7 +658,12 @@ fn content(app: &mut App, ui: &mut Ui, o: Pos2, live: bool) {
     let cr = at(16.0, 40.0, 208.0, 24.0);
     let cresp = combo_box(ui, cr, "device", &shown, cur.is_empty(), live);
     app.midi.win.at.insert("device".into(), cr.center());
-    let cresp = tip(cresp, "Choose a connected MIDI input. If available, recordbox reads the installed factory mapping and your existing Rekordbox settings. Edits are saved in recordbox.");
+    let source_tip = if selected.as_ref().is_some_and(|d| d.from_rekordbox()) {
+        "This controller uses your AlphaTheta Rekordbox user mapping. MIDI Learn saves your edits in recordbox."
+    } else {
+        "Choose a connected MIDI input. recordbox reads available factory and user mappings and saves edits in its own folder."
+    };
+    let cresp = tip(cresp, source_tip);
     let mut at_map = std::mem::take(&mut app.midi.win.at);
     if let Some(i) = menu_popup(ui, &cresp, ui.id().with("device_pop"), 208.0, &names, &mut at_map) {
         app.midi.win.at = at_map;
@@ -649,7 +671,7 @@ fn content(app: &mut App, ui: &mut Ui, o: Pos2, live: bool) {
     } else {
         app.midi.win.at = at_map;
     }
-    if let Some(d) = device(&app.midi).filter(|d| d.needs_auth) {
+    if let Some(d) = selected.filter(|d| d.needs_auth) {
         p.text(o + vec2(240.0, 52.0), Align2::LEFT_CENTER, format!("{}: rekordbox unlocks this model with a hardware handshake that recordbox does not have. It may not respond.", d.name), jf(13.0), hex(0xE04848));
     }
 
@@ -950,7 +972,7 @@ fn table(app: &mut App, ui: &mut Ui, tr: Rect, live: bool) {
             }
             RowAct::Type(t) => {
                 if app.midi.win.rows[tab][r].ty == t { continue; }
-                app.midi.win.rows[tab][r].ty = t;
+                app.midi.win.rows[tab][r].set_type(t);
                 commit_row(app, r);
             }
             RowAct::Edit(c, text) => app.midi.win.edit = Some((r, c, text)),
@@ -1357,13 +1379,42 @@ mod tests {
     }
 
     #[test]
+    fn editing_a_native_pad_keeps_its_input_and_led_families_across_reload() {
+        use crate::midi_csv::{PadType, Row};
+        use crate::midi_map::MidiMap;
+        let input = Kind::Pad(PadType::Rz);
+        let led = Kind::Pad(PadType::Sx);
+        let none = [None; 5];
+        let code = [None, Some(0x9703), None, None, None];
+        let name = "PAD1_HotCue";
+        let rows = [
+            "@file,1,Test controller".into(),
+            Row::new(name, name, input, code, none, Opts::default(), "").line(),
+            Row::new(name, name, led, none, code, Opts::default(), "").line(),
+        ].join("\r\n");
+        let mut map = MidiMap::load("Test controller", Some(rows.as_bytes()), None).unwrap();
+        let mut row = rows_of(&map).into_iter().flatten().next().unwrap();
+        assert_eq!(row.ty, T_PAD);
+        assert_eq!((row.input, row.output), (Some(0x9703), Some(0x9703)));
+        row.comment = "My hot cue".into();
+        map.rewrite(&row.entry(row.input_kind), row.input, None);
+        map.rewrite(&row.entry(row.output_kind), None, row.output);
+        map.change_input(&row.entry(row.input_kind), row.input, Some(0x9704), &|_| true).unwrap();
+        let saved = map.save_text();
+        let reloaded = MidiMap::load("Test controller", Some(rows.as_bytes()), Some(saved.as_bytes())).unwrap();
+        assert_eq!(reloaded.input_at(0x9704).unwrap().kind, input);
+        assert_eq!(reloaded.outputs_at(0x9703)[0].kind, led);
+        assert_eq!(reloaded.outputs_at(0x9703)[0].comment, "My hot cue");
+    }
+
+    #[test]
     fn a_button_for_pad_row_keeps_led_values() {
-        let mut r = LearnRow { name: "PlayPause".into(), display: "PlayPause".into(), deck: 1, input: None, output: None, ty: T_BUTTON, comment: String::new(), min: -1, max: -1 };
-        assert_eq!((r.entry().min, r.entry().max, r.entry().kind), (-1, -1, Kind::Button));
-        r.ty = T_BUTTON_PAD;
-        assert_eq!((r.entry().min, r.entry().max, r.entry().kind), (0, 127, Kind::Button));
-        r.ty = T_KNOB14;
-        assert_eq!(r.entry().kind, Kind::KnobSliderHiRes);
+        let mut r = LearnRow { name: "PlayPause".into(), display: "PlayPause".into(), deck: 1, input: None, output: None, ty: T_BUTTON, input_kind: Kind::Button, output_kind: Kind::Button, comment: String::new(), min: -1, max: -1 };
+        assert_eq!((r.entry(r.input_kind).min, r.entry(r.input_kind).max, r.entry(r.input_kind).kind), (-1, -1, Kind::Button));
+        r.set_type(T_BUTTON_PAD);
+        assert_eq!((r.entry(r.input_kind).min, r.entry(r.input_kind).max, r.entry(r.input_kind).kind), (0, 127, Kind::Button));
+        r.set_type(T_KNOB14);
+        assert_eq!(r.entry(r.input_kind).kind, Kind::KnobSliderHiRes);
         // The six columns rekordbox shows, at its widths.
         assert_eq!(COLS.iter().map(|c| c.1).sum::<f32>(), 850.0);
         assert_eq!(shown_tabs().len(), 9);

@@ -71,6 +71,16 @@ For an existing AlphaTheta mapping, connect the controller in PERFORMANCE. A sav
 
 Opening and closing MIDI Learn preserves the inherited mapping. On Linux, a learned mapping follows the named controller port when ALSA assigns it a new client number. If two connected inputs would use the same mapping identity, recordbox pauses those inputs and lists them in the MIDI tooltip. Disconnecting one lets the remaining input resume. Distinct numbered ports can operate together.
 
+### Check a controller mapping before a set
+
+Run `recordbox --midi-coverage "My Controller.midi.csv"` to see which input actions and output indicators recordbox handles in that file. Use `./recordbox` from the Linux portable folder or `.\recordbox.exe` in Windows PowerShell. The command reads one CSV and exits before the GUI or MIDI ports open. Each row identifies its source line, action and direction. A PLAY row can appear in both totals, and a mapping for several decks counts once per direction. A valid CSV can contain unsupported rows. Missing or invalid files produce an error exit.
+
+For the DDJ-GRV6, the two-deck study CSV exercises transport, both jog surfaces, a 14-bit channel fader and the first Hot Cue pad. On the controller, press PLAY and then toggle it with the mouse to check the return LED independently. A passing CSV report establishes software support for the specified rows. Port selection, audio response and physical LED reception still need the controller. [Two-deck test and mapping](https://github.com/fantuz/recordbox/pull/29) · [AlphaTheta MIDI message list](https://downloads.support.alphatheta.com/software_info/dj-controllers/DDJ-GRV6/DDJ-GRV6_MIDI_Message_List_E1.pdf)
+
+This follow-up incorporates Adam Sardo’s controller updates for pressure-pad types, jog handling, higher-resolution indicators and additional mapped deck, mixer and effects controls. MIDI Learn preserves device-specific pad types when editing. The output scheduler honors mapped timing for jog indicators. [Upstream MIDI changes](https://github.com/adamsardo/recordbox/commit/4b71b0158d89ab35dafa7d54636c684ba0053318)
+
+### Effects
+
 This integration brings upstream’s SPACE and two-band GATE COMP processing, Beat FX including SPIRAL and HELIX, Pad FX combination pads and beat steps, and MERGE FX parameter and sample handling. Controller and effect behavior depends on the mapping, audio device and sample rate. An automated virtual-controller exchange exercises the mapping and LED paths on macOS. Physical-controller latency and listening comparisons with the original effects still require hardware testing. [Upstream changes](https://github.com/adamsardo/recordbox/compare/74ba5e9...3cc12d9)
 
 MERGE FX can read factory sounds from your Music folder under `rekordbox/Sampler/MERGE FX`. You can also point `RECORDBOX_MERGE_FX_ARCHIVE` at your own `MERGE FX.zip`. The release contains the effect processors. Factory sample audio comes from your installation.
