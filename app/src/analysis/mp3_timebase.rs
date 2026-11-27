@@ -14,16 +14,50 @@
 
 /// Sample frames of silence rekordbox has in front of the first decoded audio frame.
 pub fn lead_frames(path: &str) -> usize {
-    use std::io::Read;
     if !path.to_ascii_lowercase().ends_with(".mp3") {
         return 0;
     }
     let Ok(f) = std::fs::File::open(path) else { return 0 };
-    let mut d = Vec::new();
-    if f.take(4 << 20).read_to_end(&mut d).is_err() {
-        return 0;
+    read_lead(f).unwrap_or(0)
+}
+
+fn id3_span(header: &[u8]) -> Option<usize> {
+    if header.len() < 10 || &header[..3] != b"ID3" || header[4] == 0xff {
+        return None;
     }
-    lead_frames_in(&d)
+    let valid_flags = match header[3] { 2 => 0xc0, 3 => 0xe0, 4 => 0xf0, _ => return None };
+    if header[5] & !valid_flags != 0 || header[6..10].iter().any(|byte| byte & 0x80 != 0) {
+        return None;
+    }
+    let size = header[6..10].iter().fold(0usize, |size, byte| (size << 7) | usize::from(*byte));
+    let footer = if header[3] == 4 && header[5] & 0x10 != 0 { 10 } else { 0 };
+    Some(10 + size + footer)
+}
+
+fn read_lead(mut input: impl std::io::Read + std::io::Seek) -> std::io::Result<usize> {
+    use std::io::{Read, SeekFrom};
+    // Cover art can be much larger than the frame scan. Seek over leading tags
+    // without allocating for artwork or reading it from removable storage.
+    let mut header = [0; 10];
+    let mut tags = 0;
+    loop {
+        input.read_exact(&mut header)?;
+        let Some(size) = id3_span(&header) else {
+            input.seek(SeekFrom::Current(-(header.len() as i64)))?;
+            break;
+        };
+        if tags == 32 { return Ok(0); }
+        tags += 1;
+        input.seek(SeekFrom::Current((size - header.len()) as i64))?;
+    }
+    let mut data = Vec::with_capacity(8192);
+    (&mut input).take(8192).read_to_end(&mut data)?;
+    // The largest supported frame is 1441 bytes. A candidate in the
+    // first 4 KiB has both lookahead headers in an 8 KiB buffer.
+    if let Some(lead) = scan(&data, 4096) { return Ok(lead); }
+    let remaining = (4 << 20) - data.len();
+    input.take(remaining as u64).read_to_end(&mut data)?;
+    Ok(lead_frames_in(&data))
 }
 
 const BR1: [u32; 15] = [0, 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320];
@@ -53,12 +87,15 @@ fn frame(h: &[u8]) -> Option<(usize, usize, bool)> {
 }
 
 pub fn lead_frames_in(d: &[u8]) -> usize {
+    scan(d, d.len()).unwrap_or(0)
+}
+
+fn scan(d: &[u8], max_start: usize) -> Option<usize> {
     let mut p = 0usize;
-    while p + 4 <= d.len() {
+    while p <= max_start && p + 4 <= d.len() {
         let h = &d[p..p + 4];
-        if &h[..3] == b"ID3" && p + 10 <= d.len() {
-            let sz = ((d[p + 6] as usize & 0x7f) << 21) | ((d[p + 7] as usize & 0x7f) << 14) | ((d[p + 8] as usize & 0x7f) << 7) | (d[p + 9] as usize & 0x7f);
-            p += 10 + sz;
+        if let Some(size) = id3_span(&d[p..]) {
+            p += size;
             continue;
         }
         let Some((len, spf, m1)) = frame(h) else {
@@ -90,9 +127,9 @@ pub fn lead_frames_in(d: &[u8]) -> usize {
         let tag = d.get(p + 4 + side..p + 4 + side + 8).unwrap_or(&[]);
         let info = tag.len() == 8 && (&tag[..4] == b"Info" || (&tag[..4] == b"Xing" && tag[7] & 1 != 0));
         let vbri = d.get(p + 36..p + 40) == Some(b"VBRI");
-        return if info || vbri { spf } else { 0 };
+        return Some(if info || vbri { spf } else { 0 });
     }
-    0
+    None
 }
 
 #[cfg(test)]
@@ -108,6 +145,38 @@ mod tests {
             f[43] = 1;
         }
         f
+    }
+
+    #[test]
+    fn large_cover_art_and_consecutive_tags_do_not_hide_the_first_frame() {
+        use std::io::Cursor;
+        let header = *b"ID3\x04\x00\x10\x02\x40\x00\x00"; // 5 MiB, plus a v2.4 footer
+        let size = 5 << 20;
+        let mut data = header.to_vec();
+        data.resize(10 + size, 0xaa);
+        data.extend(b"3DI\x04\x00\x10\x02\x40\x00\x00");
+        data.extend(b"ID3\x03\x00\x00\x00\x00\x00\x03abc");
+        let audio = data.len();
+        data.extend(frame_bytes(0x64, Some(b"Info")));
+        for _ in 0..16 { data.extend(frame_bytes(0x64, None)); }
+        assert_eq!(id3_span(&header), Some(size + 20));
+        assert_eq!(lead_frames_in(&data), 1152);
+        let mut file = Cursor::new(data);
+        assert_eq!(read_lead(&mut file).unwrap(), 1152);
+        assert_eq!(file.position(), (audio + 8192) as u64);
+    }
+
+    #[test]
+    fn malformed_tag_sizes_do_not_seek_or_extend_the_frame_scan() {
+        use std::io::Cursor;
+        let header = b"ID3\x04\x00\x00\xff\x7f\x7f\x7f";
+        assert_eq!(id3_span(header), None);
+        assert_eq!(id3_span(b"ID3\x03\x00\x10\x00\x00\x00\x00"), None); // v2.3 has no footer
+        let mut junk = header.to_vec();
+        junk.resize(5 << 20, 0);
+        let mut file = Cursor::new(junk);
+        assert_eq!(read_lead(&mut file).unwrap(), 0);
+        assert_eq!(file.position(), 4 << 20);
     }
 
     #[test]

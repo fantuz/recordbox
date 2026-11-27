@@ -3246,7 +3246,7 @@ impl App {
         let tx = self.stem.tx.clone();
         let ctx = self.ctx.clone();
         std::thread::spawn(move || {
-            let r = crate::stems::load(&saved).map(Arc::new);
+            let r = crate::stems::load(&saved).map(Arc::new).map_err(|error| anyhow::anyhow!("{}: {error:#}", saved.display()));
             let _ = tx.send(StemMsg::Cached(key, r));
             ctx.request_repaint();
         });
@@ -3450,7 +3450,7 @@ impl App {
                         }
                         (Err(e), None) => {
                             self.stem.errors.insert(Some(key.track), StemError { retry_model: None,
-                                detail: format!("Could not load saved stems from {}: {e:#}. Choose Separate to rebuild them.", key.path.display()) });
+                                detail: format!("Could not load saved stems from {e:#}. Choose Separate to rebuild them.") });
                         }
                     }
                 }

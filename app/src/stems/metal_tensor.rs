@@ -226,12 +226,15 @@ mod tests {
     #[test]
     fn tensor_gemm_matches_reference_on_apple10() -> Result<()> {
         let Ok(Device::Metal(dev)) = Device::new_metal(0) else {
+            eprintln!("Metal tensor hardware check skipped: no Metal device on this runner");
             return Ok(());
         };
         let gpu = dev.metal_device().as_ref();
         if gpu.supportsFamily(MTLGPUFamily::Apple10) && gpu.supportsFamily(MTLGPUFamily::Metal4) {
             compile_and_verify(&dev)?;
             eprintln!("Metal 4 tensor GEMM verified all three layouts on Apple GPU family 10");
+        } else {
+            eprintln!("Metal tensor hardware check skipped: the device does not expose Apple10 and Metal 4");
         }
         Ok(())
     }

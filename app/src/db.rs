@@ -75,8 +75,8 @@ mod mp3_timeline_tests {
             assert!(!data_dir_for_inspection().exists());
             let path = data_dir().join("library.db");
             let db = Db::open(&path)?;
-            assert!(db.setting("test-cue").is_none());
-            db.set_setting_checked("test-cue", "alternate collection")?;
+            let tracks: i64 = db.conn.query_row("SELECT count(*) FROM tracks", [], |r| r.get(0))?;
+            assert_eq!(tracks, 0);
             assert!(Db::open(&root.join("library.db")).err().unwrap().to_string().contains("--mp3-timeline legacy"));
             assert_eq!(crate::stems::models_dir(), root.join("models"));
             assert_eq!(crate::stems::stems_dir(), data_dir().join("stems"));
@@ -100,7 +100,10 @@ mod mp3_timeline_tests {
         let dir = tempfile::tempdir()?;
         let path = dir.path().join("library.db");
         let legacy = Db::open(&path)?;
-        legacy.set_setting_checked("test-cue", "original collection")?;
+        legacy.conn.execute_batch(
+            "INSERT INTO tracks(id,path,raw_samples) VALUES(1,'local.mp3',44100);
+             INSERT INTO cues(track_id,kind,slot,start) VALUES(1,0,1,0.25);
+             INSERT INTO grids(track_id,json) VALUES(1,'[]');")?;
         let archive = dir.path().join("legacy.zip");
         crate::backup::write_backup(&path, &dir.path().join("artwork"), &archive, false, &|_, _, _| {}, &cancel)?;
         assert_eq!(crate::backup::read_manifest(&archive)?.format, 1);
@@ -108,7 +111,10 @@ mod mp3_timeline_tests {
             .args(["--exact", "db::mp3_timeline_tests::opt_in_collection_and_backups_are_isolated", "--nocapture"])
             .env("PREPDECK_DATA", dir.path()).env("RECORDBOX_TEST_MP3_TIMELINE_CHILD", "1").output()?;
         assert!(result.status.success(), "{}{}", String::from_utf8_lossy(&result.stdout), String::from_utf8_lossy(&result.stderr));
-        assert_eq!(legacy.setting("test-cue").as_deref(), Some("original collection"));
+        let original: (i64, f64, String) = legacy.conn.query_row(
+            "SELECT raw_samples,start,json FROM tracks JOIN cues ON tracks.id=cues.track_id JOIN grids ON tracks.id=grids.track_id",
+            [], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+        assert_eq!(original, (44100, 0.25, "[]".to_owned()));
         assert!(Db::open(&dir.path().join("mp3-timeline-rekordbox/library.db")).err().unwrap().to_string().contains("--mp3-timeline rekordbox"));
         assert!(crate::backup::read_manifest(&dir.path().join("alternate.zip")).unwrap_err().to_string().contains("--mp3-timeline rekordbox"));
         Ok(())

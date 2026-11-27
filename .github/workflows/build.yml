@@ -293,16 +293,22 @@ jobs:
           cache-on-failure: true
       - name: Compile the release executable
         run: cargo build --manifest-path app/Cargo.toml --release --locked
-      - name: Database, backup and import integrity regressions
+      - name: Collection, import and MP3 timeline regressions
         shell: bash
         run: |
-          for test_filter in backup::tests collection_cleanup:: db::sqlcipher_tests:: export::device_import::tests:: \
+          for test_filter in backup::tests collection_cleanup:: db::sqlcipher_tests:: mp3_timeline_tests export::device_import::tests:: \
             export::pdb::tests:: export::anlz::tests:: export::usb_target::tests:: \
             rbimport::snapshot_tests:: rbimport::schema_tests:: rbimport::merge::tests:: rbimport::writeback:: \
             export::usb_fix_test::a1_a_row_too_big_for_a_page_is_an_error_not_a_panic \
             export::usb_fix_test::a1_aligned_rows_paginate_at_row_group_boundaries_without_overlap; do
             cargo test --manifest-path app/Cargo.toml --release --locked "$test_filter" -- --test-threads=1
           done
+      - name: Check the macOS encoder and supported Metal tensor operations
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          cargo test --manifest-path app/Cargo.toml --release --locked edit_render::tests::m4a_is_written_by_the_system_encoder_when_it_is_there -- --exact
+          cargo test --manifest-path app/Cargo.toml --release --locked tensor_gemm_matches_reference_on_apple10 -- --nocapture
       - name: Create macOS app bundle
         if: runner.os == 'macOS'
         run: python packaging/build_archive.py --binary app/target/release/recordbox --platform macos --arch ${{ matrix.arch }} --source-commit ${{ github.sha }} --output dist
