@@ -280,6 +280,82 @@ fn groove_packets_update_app_gain_slots_capture_and_led_feedback() {
     assert!(replay.click(&mut app, 0, 0x00).is_empty());
     assert!(!app.groove_is_played(0, 0));
     assert!(!Path::new(&app.prefs.groove.capture_dir).exists());
+    check_successful_capture(&mut app, &replay, Path::new(&profile));
+}
+
+fn check_successful_capture(app: &mut App, replay: &Replay, profile: &Path) {
+    const RATE: usize = 8000;
+    const START: usize = 1024;
+    const FRAMES: usize = 2 * RATE; // Four beats at 120 BPM.
+    app.deck_options = crate::DeckOptions::default();
+    app.prefs.groove.capture_stem = 2; // Capture the full mix from the armed deck.
+    for (n, title, sign) in [(0, "Decoy", -1.0), (1, "Source", 1.0)] {
+        let path = profile.join(format!("{title}.wav"));
+        let stereo: Vec<f32> = (0..3 * RATE)
+            .flat_map(|frame| {
+                let level = sign * (0.25 + (frame % 257) as f32 / 1024.0);
+                [level, -level / 2.0]
+            })
+            .collect();
+        crate::demo::write_wav(&path, RATE as u32, &stereo).unwrap();
+        let audio = Arc::new(crate::audio::decode_file(path.to_str().unwrap()).unwrap());
+        let id = app
+            .db
+            .insert_track(&Track {
+                title: title.into(),
+                path: path.to_str().unwrap().into(),
+                duration: audio.duration(),
+                ..Default::default()
+            })
+            .unwrap();
+        let deck = app.deck_of_mut(n);
+        deck.track = Some(id);
+        deck.duration = audio.duration();
+        deck.audio = Some(audio.clone());
+        let mut player = app.player.decks[usize::from(n)].lock();
+        player.audio = Some(audio);
+        player.pos = START as f64;
+    }
+    app.reload_tracks();
+    let dir = Path::new(&app.prefs.groove.capture_dir).to_owned();
+    assert_eq!(replay.click(app, 1, 0x08), [[0x91, 0x08, 127]]);
+    assert_eq!(replay.click(app, 0, 0x02), [[0x90, 0x02, 127]]);
+    assert!(app.groove_is_played(0, 2));
+    assert_eq!(app.gc.capture_on, Some(1));
+    assert!(!dir.exists());
+
+    assert_eq!(replay.click(app, 1, 0x02), [[0x91, 0x08, 0]]);
+    assert_eq!(app.gc.capture_on, None);
+    let path = dir.join("Source_capture.wav");
+    assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1);
+    let captured = crate::audio::decode_file(path.to_str().unwrap()).unwrap();
+    assert_eq!((captured.sr, captured.frames()), (RATE as u32, FRAMES));
+    let source = crate::audio::decode_file(profile.join("Source.wav").to_str().unwrap()).unwrap();
+    let expected = &source.samples[2 * START..2 * (START + FRAMES)];
+    for (i, (&actual, &original)) in captured.samples.iter().zip(expected).enumerate() {
+        assert!(
+            (actual - original).abs() <= 1.0 / 32768.0,
+            "sample {i}: {actual} vs {original}"
+        );
+    }
+    // Only deck 2, bank B, slot 3 gains an assignment, including after reading the saved XML.
+    let saved = crate::groove::Settings::load();
+    let assigned: Vec<_> = saved
+        .decks
+        .iter()
+        .enumerate()
+        .flat_map(|(n, deck)| {
+            deck.slots
+                .iter()
+                .enumerate()
+                .filter_map(move |(i, slot)| slot.as_ref().map(|info| (n, i, info)))
+        })
+        .collect();
+    assert_eq!(assigned.len(), 1);
+    let (deck, slot, info) = assigned[0];
+    assert_eq!((deck, slot, info.length), (1, 6, FRAMES as i64));
+    assert_eq!(Path::new(&info.url), path);
+    assert_eq!(app.groove_slot(1, 6).unwrap().url, info.url);
 }
 
 #[test]

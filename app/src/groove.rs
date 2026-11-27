@@ -280,7 +280,7 @@ pub struct Engine {
     rows: [Row; ROWS],
     deck: usize,
     /// DRUM SWAP GAIN of the deck, as a gain.
-    gain: f32,
+    pub gain: f32,
     /// SINGLE: a clip that starts stops the other rows.
     pub single: bool,
     /// The DRUMS part is to stay muted while a swap plays in SINGLE mode (dropped when the
