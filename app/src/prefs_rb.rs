@@ -694,7 +694,12 @@ mod tests {
         assert_eq!(q.rb, p.rb);
         // A prefs.json written before these settings existed, and one with only some of them.
         let old: crate::app::Prefs = serde_json::from_str(r#"{"key_alnum":true,"app_mode":1,"eq_isolator":true}"#).unwrap();
-        assert_eq!(old.rb, RbPrefs::default());
+        // This library predates the folder checkboxes and had no configured search roots.
+        assert!(relocate_roots(&old).is_empty());
+        assert_eq!(old.rb, RbPrefs {
+            relocate_music: false, relocate_video: false, relocate_desktop: false, relocate_user: true,
+            ..RbPrefs::default()
+        });
         assert!(old.key_alnum && old.eq_isolator && old.app_mode == 1);
         let part: crate::app::Prefs = serde_json::from_str(r#"{"rb":{"needle_lock":false,"snap":{"on":false,"beat":3},"unknown_later_setting":5}}"#).unwrap();
         assert!(!part.rb.needle_lock && !part.rb.snap.on && part.rb.snap.beat == 3);
