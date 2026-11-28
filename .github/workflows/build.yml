@@ -291,8 +291,8 @@ jobs:
           shared-key: package-${{ github.run_attempt == '2' && matrix.retry_os || matrix.os }}-${{ matrix.arch }}-1.100.0
           env-vars: ${{ runner.os == 'Windows' && 'VCPKG_COMMIT OPENSSL_' || '' }}
           cache-on-failure: true
-      - name: Compile the release executable
-        run: cargo build --manifest-path app/Cargo.toml --release --locked
+      - name: Compile the release application and its native test executable
+        run: python packaging/native_checks.py build
       - name: Fetch the public mixed USB export for OneLibrary verification
         if: runner.os == 'Linux'
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -307,7 +307,7 @@ jobs:
         if: runner.os == 'Linux'
         env:
           RECORDBOX_TEST_RBOX: ${{ github.workspace }}/fixtures/rbox
-          RECORDBOX_TEST_BINARY: ${{ github.workspace }}/app/target/release/recordbox
+          RECORDBOX_TEST_BINARY: ${{ env.RECORDBOX_STANDARD_APP }}
           RECORDBOX_ONELIBRARY_PYTHON: ${{ runner.temp }}/onelibrary-test/bin/python
         run: |
           python -m venv "$RUNNER_TEMP/onelibrary-test"
@@ -315,93 +315,82 @@ jobs:
           "$RECORDBOX_ONELIBRARY_PYTHON" packaging/test_public_onelibrary_roundtrip.py -v
       - name: Collection, import, phrase analysis and controller regressions
         shell: bash
-        run: |
-          for test_filter in backup::tests collection_cleanup:: db::sqlcipher_tests:: db::track_ids::tests:: mp3_timeline_tests export::device_import::tests:: \
-            export::pdb::tests:: export::anlz::tests:: export::usb_target::tests:: \
-            phrase_rb::unit:: midi::routing::tests:: sampler_ext::tests::concurrent_captures_preserve_all_three_files \
-            rbimport::snapshot_tests:: rbimport::schema_tests:: rbimport::merge::tests:: rbimport::writeback:: \
-            export::usb_fix_test::a1_a_row_too_big_for_a_page_is_an_error_not_a_panic \
-            export::usb_fix_test::a1_aligned_rows_paginate_at_row_group_boundaries_without_overlap; do
-            cargo test --manifest-path app/Cargo.toml --release --locked "$test_filter" -- --test-threads=1
-          done
+        run: >-
+          python packaging/native_checks.py test
+          backup::tests collection_cleanup:: db::sqlcipher_tests:: db::track_ids::tests:: mp3_timeline_tests export::device_import::tests::
+          export::pdb::tests:: export::anlz::tests:: export::usb_target::tests::
+          phrase_rb::unit:: midi::routing::tests:: sampler_ext::tests::concurrent_captures_preserve_all_three_files
+          rbimport::snapshot_tests:: rbimport::schema_tests:: rbimport::merge::tests:: rbimport::writeback::
+          export::usb_fix_test::a1_a_row_too_big_for_a_page_is_an_error_not_a_panic
+          export::usb_fix_test::a1_aligned_rows_paginate_at_row_group_boundaries_without_overlap
       - name: Check portable MIDI input, feedback and diagnostics
         shell: bash
-        run: |
-          for suite in midi::universal_tests:: midi::browser_transport_tests:: midi::tempo_tests:: midi::ports:: \
-            midi_map::tests:: ui_midi::tests:: midi::trace::tests:: midi::diagnostics::tests::; do
-            cargo test --manifest-path app/Cargo.toml --release --locked --bin recordbox "$suite" -- --test-threads=1 | tee "$RUNNER_TEMP/midi-tests.log"
-            grep -Eq '^test result: ok\. [1-9][0-9]* passed;' "$RUNNER_TEMP/midi-tests.log"
-          done
+        run: >-
+          python packaging/native_checks.py test
+          midi::universal_tests:: midi::browser_transport_tests:: midi::tempo_tests:: midi::ports::
+          midi_map::tests:: ui_midi::tests:: midi::trace::tests:: midi::diagnostics::tests::
       - name: Check native Linux MIDI loopback when the runner has an ALSA sequencer
         if: runner.os == 'Linux'
         shell: bash
         run: |
           if [ -c /dev/snd/seq ]; then
-            cargo test --manifest-path app/Cargo.toml --release --locked --bin recordbox midi::diagnostics::linux::tests::alsa_duplex_port_routes_both_directions_at_one_address -- --exact --ignored
+            python packaging/native_checks.py test --exact --ignored midi::diagnostics::linux::tests::alsa_duplex_port_routes_both_directions_at_one_address
           else
             echo "::notice::Native ALSA loopback unavailable on this runner (/dev/snd/seq)."
           fi
       - name: Check hardware setup, STEMS deck and cache behavior, and track matching
         shell: bash
-        run: |
-          for test_filter in app::hardware_setup::tests:: ui_prefs_adv::hardware_preferences_tests:: \
-            stems::backend::inventory::tests:: stems::hardware::tests:: stems::cache_tests:: disk_space::tests:: \
-            app::stem_cache_tests:: stems::vocal_summary_tests:: waiting_for_a_shared_gpu \
-            model_download_reports_progress_across_installed_and_missing_checkpoints \
-            browser_ext::matching::tests:: app::match_enrichment::tests:: onetagger::tests:: \
-            ui_dialogs::match_lookup_dialog_tests:: unchanged_match_panels_reuse_rows ui_sync::tests::; do
-            cargo test --manifest-path app/Cargo.toml --release --locked --bin recordbox "$test_filter" -- --test-threads=1 | tee "$RUNNER_TEMP/hardware-tests.log"
-            grep -Eq '^test result: ok\. [1-9][0-9]* passed;' "$RUNNER_TEMP/hardware-tests.log"
-          done
+        run: >-
+          python packaging/native_checks.py test
+          app::hardware_setup::tests:: ui_prefs_adv::hardware_preferences_tests::
+          stems::backend::inventory::tests:: stems::hardware::tests:: stems::cache_tests:: disk_space::tests::
+          app::stem_cache_tests:: stems::vocal_summary_tests:: waiting_for_a_shared_gpu
+          model_download_reports_progress_across_installed_and_missing_checkpoints
+          browser_ext::matching::tests:: app::match_enrichment::tests:: onetagger::tests::
+          ui_dialogs::match_lookup_dialog_tests:: unchanged_match_panels_reuse_rows ui_sync::tests::
       - name: Check changing-tempo grids, controller mappings and effect preparation
         if: runner.os == 'Linux'
         shell: bash
-        run: |
-          for test_filter in opus_quad midi::grv6_groove_tests:: midi::performance::tests:: \
-            midi::tests::hires_feedback midi::tests::channel_meter_segments analysis::rb_hp::tempo::tests:: \
-            artwork_thumbs::tests:: motion::tests:: ui_feel::tests:: \
-            ui_browser::collection_render_tests:: fx_echo_plus::tests:: fx::tests::prepared_rack \
-            fx::tests::first_use_allocation; do
-            cargo test --manifest-path app/Cargo.toml --release --locked --bin recordbox "$test_filter" -- --test-threads=1 | tee "$RUNNER_TEMP/integration-tests.log"
-            grep -Eq '^test result: ok\. [1-9][0-9]* passed;' "$RUNNER_TEMP/integration-tests.log"
-          done
+        run: >-
+          python packaging/native_checks.py test
+          opus_quad midi::grv6_groove_tests:: midi::performance::tests::
+          midi::tests::hires_feedback midi::tests::channel_meter_segments analysis::rb_hp::tempo::tests::
+          artwork_thumbs::tests:: motion::tests:: ui_feel::tests::
+          ui_browser::collection_render_tests:: fx_echo_plus::tests:: fx::tests::prepared_rack
+          fx::tests::first_use_allocation
       - name: Check beat grids, audio export, effect history and output routing on the native package target
         shell: bash
-        run: |
-          for test_filter in analysis::rb_hp::net::tests:: analysis::rb_hp::focus2::tests:: analysis::rb_hp::class::tests:: \
-            analysis::rb_hp::model_grid_tests:: export::anlz::grid_pair::tests:: b1_a_device_track_is_imported_with_cues_grid_tags_and_analysis \
-            edit_render::tests:: stem_export::tests:: audio::deck_mix_tests:: ui_fx::tests:: \
-            dry_history_matches_stereo_frame_writes idle_slot_changes_preserve \
-            resetting_jet_and_mobius pitch_reset_clears forward_and_reverse_line_cursors_wrap; do
-            cargo test --manifest-path app/Cargo.toml --release --locked --bin recordbox "$test_filter" -- --test-threads=1 | tee "$RUNNER_TEMP/encode-tests.log"
-            grep -Eq '^test result: ok\. [1-9][0-9]* passed;' "$RUNNER_TEMP/encode-tests.log"
-          done
+        run: >-
+          python packaging/native_checks.py test
+          analysis::rb_hp::net::tests:: analysis::rb_hp::focus2::tests:: analysis::rb_hp::class::tests::
+          analysis::rb_hp::model_grid_tests:: export::anlz::grid_pair::tests:: b1_a_device_track_is_imported_with_cues_grid_tags_and_analysis
+          edit_render::tests:: stem_export::tests:: audio::deck_mix_tests:: ui_fx::tests::
+          dry_history_matches_stereo_frame_writes idle_slot_changes_preserve
+          resetting_jet_and_mobius pitch_reset_clears forward_and_reverse_line_cursors_wrap
       - name: Check bulk collection analysis on Windows
         if: runner.os == 'Windows'
         shell: bash
-        run: |
-          for test_name in app::hot_cue_persistence_tests::first_analysis::bulk_missing_analysis_queues_only_unique_incomplete_tracks \
-            jobs::analysis_pool_tests::batch_budget_bounds_active_tracks_independently_of_dsp_threads \
-            jobs::analysis_pool_tests::underestimated_duration_retries_once_and_oversize_tracks_report_an_error \
-            audio::mp3_timeline_tests::batch_decode_uses_actual_frames_and_never_truncates; do
-            cargo test --manifest-path app/Cargo.toml --release --locked --bin recordbox "$test_name" -- --exact | tee "$RUNNER_TEMP/bulk-analysis-tests.log"
-            grep -Fq 'test result: ok. 1 passed;' "$RUNNER_TEMP/bulk-analysis-tests.log"
-          done
+        run: >-
+          python packaging/native_checks.py test --exact
+          app::hot_cue_persistence_tests::first_analysis::bulk_missing_analysis_queues_only_unique_incomplete_tracks
+          jobs::analysis_pool_tests::batch_budget_bounds_active_tracks_independently_of_dsp_threads
+          jobs::analysis_pool_tests::underestimated_duration_retries_once_and_oversize_tracks_report_an_error
+          audio::mp3_timeline_tests::batch_decode_uses_actual_frames_and_never_truncates
       - name: Check macOS CoreMIDI loopback and supported Metal tensor operations
         if: runner.os == 'macOS'
         shell: bash
         env:
           RECORDBOX_REQUIRE_MIDI_LOOPBACK: "1"
         run: |
-          cargo test --manifest-path app/Cargo.toml --release --locked midi::tests::a_virtual_controller_plays_a_deck_moves_the_mixer_and_gets_its_leds -- --exact
-          cargo test --manifest-path app/Cargo.toml --release --locked tensor_gemm_matches_reference_on_apple10 -- --nocapture
+          python packaging/native_checks.py test --exact midi::tests::a_virtual_controller_plays_a_deck_moves_the_mixer_and_gets_its_leds
+          python packaging/native_checks.py test --nocapture tensor_gemm_matches_reference_on_apple10
       - name: Create macOS app bundle
         if: runner.os == 'macOS'
-        run: python packaging/build_archive.py --binary app/target/release/recordbox --platform macos --arch ${{ matrix.arch }} --source-commit ${{ github.sha }} --output dist
+        run: python packaging/build_archive.py --binary "$RECORDBOX_STANDARD_APP" --platform macos --arch ${{ matrix.arch }} --source-commit ${{ github.sha }} --output dist
       - name: Create Linux archive
         if: runner.os == 'Linux'
         run: >-
-          python packaging/build_archive.py --binary app/target/release/recordbox
+          python packaging/build_archive.py --binary "$RECORDBOX_STANDARD_APP"
           --platform linux --arch x86_64 --source-commit ${{ github.sha }} --output dist
           --runtime-notice /usr/share/doc/libssl3/copyright
           --runtime-notice /usr/share/doc/libasound2/copyright
@@ -409,7 +398,7 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: >-
-          python packaging/build_archive.py --binary app/target/release/recordbox.exe
+          python packaging/build_archive.py --binary "$env:RECORDBOX_STANDARD_APP"
           --platform windows --arch x86_64 --source-commit ${{ github.sha }} --output dist
           --runtime-dir "$env:RECORDBOX_VCPKG/installed/x64-windows/bin"
           --runtime-dir "$env:RECORDBOX_VC_CRT"
@@ -457,7 +446,10 @@ jobs:
         with:
           path: ${{ runner.temp }}/recordbox-radeon-test/models/*.th
           key: recordbox-htdemucs-8726e21a-ba3fe64a-e57c48e6-ef3bcb9c-f3cf25b2
-      - name: Build and test the Windows Radeon DirectML preview
+      - name: Compile the Radeon DirectML application and its native test executable
+        if: runner.os == 'Windows'
+        run: python packaging/native_checks.py build --variant directml
+      - name: Verify Radeon DirectML inference and package the Windows application
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
@@ -473,11 +465,7 @@ jobs:
             Invoke-WebRequest 'https://dl.fbaipublicfiles.com/demucs/hybrid_transformer/955717e8-8726e21a.th' -OutFile $env:RECORDBOX_TEST_CHECKPOINT
           }
           if ((Get-FileHash $env:RECORDBOX_TEST_CHECKPOINT).Hash.ToLowerInvariant() -ne '8726e21a993978c7ba086d3872e7608d7d5bfca646ca4aca459ffda844faa8b4') { throw 'HTDemucs checkpoint checksum mismatch' }
-          $messages = cargo test --manifest-path app/Cargo.toml --release --locked --features directml --no-run --message-format=json
-          if ($LASTEXITCODE) { exit $LASTEXITCODE }
-          $testExe = @($messages | ForEach-Object { ConvertFrom-Json $_ } | Where-Object { $_.reason -eq 'compiler-artifact' -and $_.target.name -eq 'recordbox' -and $_.profile.test -and $_.executable } | ForEach-Object { $_.executable })
-          if ($testExe.Count -ne 1) { throw 'Expected one native Recordbox test executable' }
-          $testDir = Split-Path $testExe[0]
+          $testDir = Split-Path $env:RECORDBOX_DIRECTML_TEST
           Copy-Item (Join-Path $runtime '*.dll') -Destination $testDir -Force
           # Use Microsoft's maintained software driver only for headless DirectML tests.
           $warp = Join-Path $env:RUNNER_TEMP 'recordbox-warp.zip'
@@ -486,19 +474,17 @@ jobs:
           $warpDir = Join-Path $env:RUNNER_TEMP 'recordbox-warp'
           Expand-Archive -LiteralPath $warp -DestinationPath $warpDir
           Copy-Item (Join-Path $warpDir 'build/native/bin/x64/d3d10warp.dll') -Destination $testDir
-          & $testExe[0] 'idle_radeon_assessment_does_not_open_a_compute_backend' --ignored --test-threads=1
+          python packaging/native_checks.py test --variant directml --ignored idle_radeon_assessment_does_not_open_a_compute_backend
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
-          & $testExe[0] 'stems::directml::device::tests' --include-ignored --test-threads=1
+          python packaging/native_checks.py test --variant directml --include-ignored stems::directml::device::tests
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
-          & $testExe[0] 'stems::directml::tests' --include-ignored --test-threads=1 --nocapture
+          python packaging/native_checks.py test --variant directml --include-ignored --nocapture stems::directml::tests
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
-          & $testExe[0] 'deck_separates_with_both_radeon_models_and_releases_the_gpu_graph' --ignored --test-threads=1 --nocapture
+          python packaging/native_checks.py test --variant directml --ignored --nocapture deck_separates_with_both_radeon_models_and_releases_the_gpu_graph
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
-          & $testExe[0] 'driver_failure_on_second_segment' --test-threads=1
+          python packaging/native_checks.py test --variant directml driver_failure_on_second_segment
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
-          cargo build --manifest-path app/Cargo.toml --release --locked --features directml
-          if ($LASTEXITCODE) { exit $LASTEXITCODE }
-          python packaging/build_archive.py --binary app/target/release/recordbox.exe --directml-runtime "$runtime" --platform windows --arch x86_64 --source-commit ${{ github.sha }} --output dist --runtime-dir "$env:RECORDBOX_VCPKG/installed/x64-windows/bin" --runtime-dir "$env:RECORDBOX_VC_CRT" --runtime-notice "$env:RECORDBOX_VCPKG/installed/x64-windows/share/openssl/copyright"
+          python packaging/build_archive.py --binary "$env:RECORDBOX_DIRECTML_APP" --directml-runtime "$runtime" --platform windows --arch x86_64 --source-commit ${{ github.sha }} --output dist --runtime-dir "$env:RECORDBOX_VCPKG/installed/x64-windows/bin" --runtime-dir "$env:RECORDBOX_VC_CRT" --runtime-notice "$env:RECORDBOX_VCPKG/installed/x64-windows/share/openssl/copyright"
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
       - name: Check the extracted Radeon ZIP and CPU selection
         if: runner.os == 'Windows'
