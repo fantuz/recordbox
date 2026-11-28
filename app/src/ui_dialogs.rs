@@ -12,10 +12,118 @@ use egui::{vec2, Context, RichText, Ui};
 pub fn library_dialogs(app: &mut App, ctx: &Context) {
     crate::ui_prefs::extra_windows(app, ctx);
     crate::ui_sync::show(app, ctx);
+    match_lookup_window(app, ctx);
     info_window(app, ctx);
     smart_window(app, ctx);
     export_window(app, ctx);
     confirm_windows(app, ctx);
+}
+
+pub enum MatchLookupDialog {
+    Selection { ids: Vec<i64>, analyze_audio: bool },
+    TooMany(usize),
+    Progress,
+}
+
+impl MatchLookupDialog {
+    fn for_selection(ids: &[i64]) -> Self {
+        match ids.len() {
+            0 => Self::Progress,
+            n if n > MATCH_LOOKUP_LIMIT => Self::TooMany(n),
+            _ => Self::Selection { ids: ids.to_vec(), analyze_audio: false },
+        }
+    }
+}
+
+pub fn open_match_lookup(app: &mut App, ids: &[i64]) {
+    app.dialogs.match_lookup = Some(MatchLookupDialog::for_selection(ids));
+}
+
+fn match_lookup_window(app: &mut App, ctx: &Context) {
+    let Some(mut dialog) = app.dialogs.match_lookup.take() else { return };
+    let mut open = true;
+    let mut close = false;
+    let mut start = false;
+    let running = app.match_enrichment_running();
+    kit::dialog(ctx, "Related track metadata").open(&mut open).default_width(440.0).show(ctx, |ui| {
+        kit::apply_style(ui);
+        match &mut dialog {
+            MatchLookupDialog::Selection { ids, analyze_audio } => {
+                let provider = crate::onetagger::PROVIDER;
+                let count = ids.len();
+                let noun = if count == 1 { "track" } else { "tracks" };
+                ui.label(format!("{count} selected {noun}"));
+                ui.label(format!("OneTagger sends the catalog artist and title, including the mix name, to {provider}. recordbox saves the recording’s available genres for matching."));
+                ui.separator();
+                ui.horizontal_wrapped(|ui| {
+                    if ui.button("Choose OneTagger CLI…").clicked() {
+                        let picker = rfd::FileDialog::new().set_title("Choose the OneTagger CLI executable");
+                        #[cfg(windows)]
+                        let picker = picker.add_filter("Executable", &["exe"]);
+                        if let Some(path) = picker.pick_file() {
+                            if path.is_absolute() && path.is_file() {
+                                app.dialogs.onetagger_cli = Some(path);
+                            } else {
+                                app.toast("Select the installed OneTagger CLI executable.");
+                            }
+                        }
+                    }
+                    if let Some(path) = &app.dialogs.onetagger_cli {
+                        ui.label(path.file_name().unwrap_or_default().to_string_lossy().as_ref()).on_hover_text(path.display().to_string());
+                    }
+                });
+                ui.label("Requires a OneTagger CLI build with the lookup --json command.");
+                ui.hyperlink_to("OneTagger CLI downloads", "https://github.com/fantuz/onetagger/releases");
+                ui.checkbox(analyze_audio, "Also run local track analysis")
+                    .on_hover_text("Queues Analyze Track using your current analysis settings. The lookup runs separately.");
+            }
+            MatchLookupDialog::TooMany(n) => {
+                ui.label(format!("{n} tracks selected. Choose up to {MATCH_LOOKUP_LIMIT} tracks for each lookup."));
+            }
+            MatchLookupDialog::Progress => {}
+        }
+        let status = app.match_enrichment_status();
+        if !status.is_empty() {
+            ui.separator();
+            ui.label(status);
+        }
+        ui.horizontal(|ui| {
+            if let MatchLookupDialog::Selection { analyze_audio, .. } = &dialog {
+                let label = if *analyze_audio { "Look up and analyze" } else { "Look up tags" };
+                start = ui.add_enabled(!running && app.dialogs.onetagger_cli.is_some(), btn(label)).clicked();
+            }
+            if running && ui.add(btn("Cancel lookup")).clicked() {
+                app.cancel_match_enrichment();
+            }
+            close = ui.add(btn("Close")).clicked();
+        });
+    });
+    if start {
+        if let (MatchLookupDialog::Selection { ids, analyze_audio }, Some(cli)) = (&dialog, app.dialogs.onetagger_cli.clone()) {
+            app.queue_match_enrichment(ids, &cli);
+            if *analyze_audio {
+                app.reanalyze(ids);
+            }
+            dialog = MatchLookupDialog::Progress;
+        }
+    }
+    if open && !close {
+        app.dialogs.match_lookup = Some(dialog);
+    }
+}
+
+#[cfg(test)]
+mod match_lookup_dialog_tests {
+    use super::*;
+
+    #[test]
+    fn every_selection_starts_metadata_only_and_large_requests_are_never_truncated() {
+        assert!(matches!(MatchLookupDialog::for_selection(&[]), MatchLookupDialog::Progress));
+        let ids: Vec<_> = (1..=MATCH_LOOKUP_LIMIT as i64).collect();
+        assert!(matches!(MatchLookupDialog::for_selection(&ids), MatchLookupDialog::Selection {ids: saved, analyze_audio: false} if saved == ids));
+        let too_many = vec![0; MATCH_LOOKUP_LIMIT + 1];
+        assert!(matches!(MatchLookupDialog::for_selection(&too_many), MatchLookupDialog::TooMany(n) if n == too_many.len()));
+    }
 }
 
 fn info_window(app: &mut App, ctx: &Context) {

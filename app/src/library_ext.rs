@@ -290,6 +290,25 @@ pub struct SourceState {
 pub const SRC_ITUNES: u8 = 0;
 pub const SRC_RBXML: u8 = 1;
 
+#[derive(Clone, PartialEq)]
+pub enum MatchPanelQuery {
+    Related(Option<i64>, i64, RelatedRules),
+    Suggest(Option<i64>, i64, u8),
+}
+
+pub struct MatchPanelRows {
+    pub query: MatchPanelQuery,
+    pub revision: (u64, u64),
+    pub built_at: f64,
+    pub rows: Arc<Vec<(i64, f64)>>,
+}
+
+impl MatchPanelRows {
+    pub fn reusable(&self, query: &MatchPanelQuery, revision: (u64, u64), now: f64) -> bool {
+        self.query == *query && (self.revision == revision || now - self.built_at < 1.0)
+    }
+}
+
 pub struct LibExt {
     pub edit: Option<CellEdit>,
     /// The editor was drawn this frame (a row scrolled out of view commits its edit).
@@ -336,8 +355,8 @@ pub struct LibExt {
     pub sub: Option<Box<crate::ui_browser_ext::SubState>>,
     /// Right-hand panels shown last frame (a panel switched on closes the others).
     pub right_prev: [bool; 5],
-    /// Cached rows of the Related Tracks and Track Suggestion windows: (key, time, rows).
-    pub panel_cache: [Option<(String, f64, std::sync::Arc<Vec<(i64, f64)>>)>; 2],
+    /// Cached rankings for the right-hand library panels.
+    pub panel_cache: [Option<MatchPanelRows>; 2],
     pub panel_sel: [Option<i64>; 2],
     /// New My Tag being typed in the My Tag window: (category, text).
     pub cv_scroll_end: bool,
@@ -485,6 +504,7 @@ impl Db {
 impl App {
     /// Load the tables this module keeps in memory.
     pub fn reload_library_ext(&mut self) {
+        self.ext.panel_cache = [None, None];
         self.ext.histories = self.db.histories().unwrap_or_default();
         self.ext.tag_list = self.db.tag_list().unwrap_or_default();
         self.ext.tag_set = self.ext.tag_list.iter().copied().collect();
@@ -1923,6 +1943,17 @@ mod tests {
 
     fn track(bpm: f64, key: i32, rating: u8, color: u8) -> Track {
         Track { bpm, key, rating, color, ..Default::default() }
+    }
+
+    #[test]
+    fn unchanged_match_panels_reuse_rows_and_active_edits_refresh_within_one_second() {
+        let q = MatchPanelQuery::Related(Some(3), 0, RelatedRules::default());
+        let rows = MatchPanelRows { query: q.clone(), revision: (2, 7), built_at: 8.0, rows: Arc::default() };
+        assert!(rows.reusable(&q, (2, 7), 20_000.0));
+        assert!(rows.reusable(&q, (2, 8), 8.9));
+        assert!(!rows.reusable(&q, (2, 8), 9.0));
+        assert!(!rows.reusable(&q, (3, 7), 9.0));
+        assert!(!rows.reusable(&MatchPanelQuery::Suggest(Some(3), 0, 0), (2, 7), 8.1));
     }
 
     #[test]

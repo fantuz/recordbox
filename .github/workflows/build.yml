@@ -324,11 +324,13 @@ jobs:
             export::usb_fix_test::a1_aligned_rows_paginate_at_row_group_boundaries_without_overlap; do
             cargo test --manifest-path app/Cargo.toml --release --locked "$test_filter" -- --test-threads=1
           done
-      - name: Check hardware setup and STEMS disk policy on the native package target
+      - name: Check hardware setup, STEMS storage and track matching on the native package target
         shell: bash
         run: |
           for test_filter in app::hardware_setup::tests:: ui_prefs_adv::hardware_preferences_tests:: \
-            stems::backend::inventory::tests:: stems::hardware::tests:: stems::cache_tests:: disk_space::tests::; do
+            stems::backend::inventory::tests:: stems::hardware::tests:: stems::cache_tests:: disk_space::tests:: \
+            browser_ext::matching::tests:: app::match_enrichment::tests:: onetagger::tests:: \
+            ui_dialogs::match_lookup_dialog_tests:: unchanged_match_panels_reuse_rows; do
             cargo test --manifest-path app/Cargo.toml --release --locked --bin recordbox "$test_filter" -- --test-threads=1 | tee "$RUNNER_TEMP/hardware-tests.log"
             grep -Eq '^test result: ok\. [1-9][0-9]* passed;' "$RUNNER_TEMP/hardware-tests.log"
           done

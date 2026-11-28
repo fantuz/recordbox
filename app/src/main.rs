@@ -21,6 +21,7 @@ mod demo;
 mod dupes;
 mod device_ext;
 mod onelibrary;
+mod onetagger;
 mod edit_audio;
 mod edit_model;
 mod edit_project;
@@ -376,6 +377,7 @@ impl eframe::App for Gui {
         }
         step!(app.poll_import());
         step!(app.poll_analysis());
+        step!(app.poll_match_enrichment());
         step!(app.poll_load());
         step!(midi::poll(app));
         step!(prefs_bridge::frame(app));

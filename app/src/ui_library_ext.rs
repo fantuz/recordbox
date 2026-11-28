@@ -621,6 +621,10 @@ pub fn track_menu(app: &mut App, ui: &mut Ui, sel: &[i64]) {
         app.reanalyze(sel);
         ui.close_menu();
     }
+    if ui.button("Look up related track tags…").clicked() {
+        crate::ui_dialogs::open_match_lookup(app, sel);
+        ui.close_menu();
+    }
     let locked = sel.iter().all(|id| app.track(*id).map(|t| t.grid_locked).unwrap_or(false));
     let unlocked = sel.iter().all(|id| app.track(*id).map(|t| !t.grid_locked).unwrap_or(false));
     ui.menu_button("Analysis Lock", |ui| {
@@ -1389,6 +1393,9 @@ pub fn related_criteria(app: &mut App, ui: &mut Ui) {
         app.related_store();
         app.list_dirty = true;
         app.save_prefs();
+    }
+    if app.match_enrichment_running() && ui.button("View lookup progress…").clicked() {
+        crate::ui_dialogs::open_match_lookup(app, &[]);
     }
 }
 

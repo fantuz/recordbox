@@ -14,6 +14,8 @@ use std::sync::Arc;
 use std::time::Instant;
 
 mod hardware_setup;
+mod match_enrichment;
+pub(crate) use match_enrichment::MATCH_LOOKUP_LIMIT;
 #[cfg(test)]
 mod stem_cache_tests;
 #[cfg(test)]
@@ -1484,6 +1486,9 @@ pub struct Toast {
 #[derive(Default)]
 pub struct Dialogs {
     pub prefs_open: bool,
+    pub match_lookup: Option<crate::ui_dialogs::MatchLookupDialog>,
+    /// Chosen by the user in this session. An imported library cannot supply an executable.
+    pub onetagger_cli: Option<std::path::PathBuf>,
     pub confirm_clear_stems: bool,
     pub library_sync_review: Option<crate::ui_sync::Review>,
     pub prefs_tab: u8,
@@ -1637,6 +1642,8 @@ pub struct App {
     pub(crate) collection_categories: CollectionCategories,
     pub index: HashMap<i64, usize>,
     pub previews: HashMap<i64, Vec<u8>>,
+    /// Computed once per preview on demand. Preview replacements invalidate their entry.
+    pub(crate) match_audio: std::cell::RefCell<HashMap<i64, Option<[f64; 4]>>>,
     pub cue_counts: HashMap<i64, (usize, usize)>,
     pub hot_positions: HashMap<i64, Vec<(f64, i32, u8)>>,
     pub nodes: Vec<PlaylistNode>,
@@ -1648,7 +1655,7 @@ pub struct App {
     pub expanded: HashSet<i64>,
     pub list: Vec<i64>,
     pub(crate) list_totals: Option<(u64, String)>,
-    track_metadata_revision: u64,
+    pub(crate) track_metadata_revision: u64,
     pub list_dirty: bool,
     pub selected: HashSet<i64>,
     pub anchor: Option<usize>,
@@ -1771,6 +1778,7 @@ pub struct App {
     /// EDIT mode: the open project and the editor's state (ui_edit.rs).
     pub edit: crate::ui_edit::EditState,
     pub stemx: crate::stem_export::StemExport,
+    match_enrichment: match_enrichment::Enrichment,
 }
 
 impl App {
@@ -1828,6 +1836,7 @@ impl App {
             collection_categories: CollectionCategories::default(),
             index: HashMap::new(),
             previews: HashMap::new(),
+            match_audio: Default::default(),
             cue_counts: HashMap::new(),
             hot_positions: HashMap::new(),
             nodes: vec![],
@@ -1918,6 +1927,7 @@ impl App {
             midi: Default::default(),
             edit: Default::default(),
             stemx: Default::default(),
+            match_enrichment: Default::default(),
         }
     }
 
@@ -2347,8 +2357,11 @@ impl App {
 
     // ------------------------------------------------------------------ loading
     pub fn reload_all(&mut self) {
+        self.ext.panel_cache = [None, None];
         self.reload_tracks();
+        self.reload_match_evidence();
         self.previews = self.db.previews().unwrap_or_default();
+        self.match_audio.get_mut().clear();
         self.cue_counts = self.db.tracks_with_cues().unwrap_or_default();
         self.hot_positions = self.db.hot_positions().unwrap_or_default();
         self.reload_playlists();
@@ -2574,55 +2587,7 @@ impl App {
 
     /// The same for any source track.
     pub fn related_tracks_of(&self, src: i64) -> Vec<i64> {
-        let Some(src) = self.track(src).cloned() else { return vec![] };
-        let r = &self.prefs.related;
-        let mut out: Vec<(i64, i64)> = self
-            .tracks
-            .iter()
-            .filter(|t| t.id != src.id && !t.missing)
-            .filter_map(|t| {
-                let mut score = 0i64;
-                if r.matching && !self.is_match(src.id, t.id) {
-                    return None;
-                }
-                if r.key > 0 {
-                    let d = key_distance(src.key, t.key)?;
-                    if d > r.key as i32 - 1 {
-                        return None;
-                    }
-                    score += (4 - d as i64) * 100;
-                }
-                if r.bpm {
-                    if src.bpm <= 0.0 || t.bpm <= 0.0 {
-                        return None;
-                    }
-                    let best = [t.bpm, t.bpm * 2.0, t.bpm / 2.0].iter().map(|b| ((b - src.bpm) / src.bpm * 100.0).abs()).fold(f64::MAX, f64::min);
-                    if best > r.bpm_pct {
-                        return None;
-                    }
-                    score += (100.0 - best * 10.0).max(0.0) as i64;
-                }
-                let same = |a: &str, b: &str| !a.trim().is_empty() && a.trim().eq_ignore_ascii_case(b.trim());
-                if r.genre && !same(&src.genre, &t.genre) {
-                    return None;
-                }
-                if r.artist && !same(&src.artist, &t.artist) {
-                    return None;
-                }
-                if r.label && !same(&src.label, &t.label) {
-                    return None;
-                }
-                if r.color && (src.color == 0 || src.color != t.color) {
-                    return None;
-                }
-                if r.rating && t.rating < src.rating {
-                    return None;
-                }
-                Some((t.id, score))
-            })
-            .collect();
-        out.sort_by(|a, b| b.1.cmp(&a.1));
-        out.into_iter().map(|x| x.0).collect()
+        self.related_for(src, 0)
     }
 
     fn folder_tracks(&self, id: i64, out: &mut Vec<i64>, seen: &mut HashSet<i64>) {
@@ -3090,7 +3055,7 @@ impl App {
         if self.view != v {
             self.view = v;
             self.colbrowse = Default::default();
-            let manual = matches!(self.view, View::History(_) | View::TagList | View::Suggest(_)) || matches!(self.view, View::Playlist(id) if self.node(id).map(|n| n.kind == NodeKind::Playlist).unwrap_or(false));
+            let manual = matches!(self.view, View::History(_) | View::TagList | View::Related | View::Suggest(_)) || matches!(self.view, View::Playlist(id) if self.node(id).map(|n| n.kind == NodeKind::Playlist).unwrap_or(false));
             // Switch to the other column set and sort when moving between playlists and the
             // rest; each keeps the user's own choices.
             if manual != self.prefs.columns_for_playlist {
@@ -3952,6 +3917,7 @@ impl App {
                 let preview: Vec<u8> = res.wave.columns(400).iter().flat_map(|c| c.iter().copied()).collect();
                 let _ = self.db.save_wave(id, &res.wave, &preview);
                 self.previews.insert(id, preview);
+                self.match_audio.get_mut().remove(&id);
                 if let Some(v) = &res.vocal {
                     let _ = self.db.save_vocal(id, v);
                     if self.deck.track == Some(id) && self.deck.vocal.is_none() {

@@ -162,6 +162,7 @@ impl Review {
                 app.selected.retain(|id| !removed.contains(id));
                 app.sub_sel.retain(|id| !removed.contains(id));
                 app.previews.retain(|id, _| !removed.contains(id));
+                app.match_audio.get_mut().retain(|id, _| !removed.contains(id));
                 app.cue_counts.retain(|id, _| !removed.contains(id));
                 app.hot_positions.retain(|id, _| !removed.contains(id));
                 app.list_dirty = true;

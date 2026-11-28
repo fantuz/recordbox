@@ -81,7 +81,8 @@ const CHAPTERS: [(&str, &str, &str); 15] = [
 <h3>My Tag</h3>
 <p><i>View &gt; My Tag Configuration Window</i> shows your tag categories; tick tags for the selected tracks. With Preferences &gt; Advanced &gt; Browse &gt; Add "My Tag" to the "Comments", a track's tags are also written at the end of its comment as <code>/* Tag / Tag */</code>.</p>
 <h3>Related Tracks</h3>
-<p>The Related Tracks source lists tracks that go with the loaded track by the rules you tick: BPM range, same or related key, genre, colour, rating, My Tag.</p>
+<p>Choose a source track and a collection or playlist. BPM range, harmonic key, genre and the other checked criteria filter the results. Registered matching pairs lead eligible tracks. Track Suggestion also ranks by waveform, credits, era and shared My Tags. Hover over a panel result to see which details contributed.</p>
+<p>To add recording genres, select up to 100 tracks and choose <i>Look up related track tags…</i>. Choose a OneTagger CLI that supports <kbd>lookup --json</kbd>. OneTagger sends the catalog artist and title, including any mix name, to MusicBrainz. An unambiguous match can add genre information to the private recordbox catalog. Check <i>Also run local track analysis</i> to queue audio analysis alongside the lookup.</p>
 "#),
     ("player", "The player", r#"
 <ul>
