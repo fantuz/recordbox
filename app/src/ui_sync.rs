@@ -603,6 +603,7 @@ mod tests {
     #[test]
     fn completed_writeback_only_labels_a_retained_backup_as_a_backup() {
         let ctx = Context::default();
+        crate::theme::apply(&ctx);
         let path = PathBuf::from(r"\\?\C:\DJ/conflict");
         for (retain, dir, expected) in [
             (true, Some(path.clone()), "Recovery backup"),

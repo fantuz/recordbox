@@ -1520,6 +1520,11 @@ pub(crate) fn stem_model_card(app: &mut App, ui: &mut Ui) {
             let cpu = if hw.cpu.is_empty() { String::new() } else { format!("{} · ", hw.cpu) };
             note(ui, &format!("{cpu}{}{fma}", hw.simd));
             note(ui, &format!("Automatic model · {}", app.automatic_stem_model(hw).name));
+        } else if let Some(reason) = app.stem_hardware_error() {
+            note(ui, reason);
+            if kit::block(ui, |ui| ui.add(btn("Retry hardware check")).clicked()) {
+                app.stems_init();
+            }
         } else {
             note(ui, "Reading CPU and system memory information…");
         }
@@ -1529,14 +1534,18 @@ pub(crate) fn stem_model_card(app: &mut App, ui: &mut Ui) {
                 Some(false) => "weights missing",
                 None => "checking weights",
             };
-            note(ui, &format!("{}{} · {files}. {}", m.name, if cur == m.id { " (active model)" } else { "" }, m.about));
+            note(ui, &format!("{}{} · {files}. {}", m.name, if cur == m.id { " (selected model)" } else { "" }, m.about));
         }
         toggle(ui, &mut app.prefs.stems_auto_download, "Download the model automatically at launch");
         if !app.stem.model_ready && app.stem.downloading.is_none() && kit::block(ui, |ui| ui.add(btn("Download now")).clicked()) {
             app.stems_download();
         }
-        if let Some((d, t)) = app.stem.downloading {
-            kit::line(ui, &if t > 0 { format!("Downloading… {:.0}%", d as f64 / t as f64 * 100.0) } else { "Downloading…".into() });
+        if let Some(status) = app.stem.download_status() {
+            kit::line(ui, &status);
+            if app.unrequested_stem_download() && !app.stem.download_cancel.load(std::sync::atomic::Ordering::Relaxed)
+                && kit::block(ui, |ui| ui.add(btn("Cancel model download")).clicked()) {
+                app.stem.download_cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+            }
         }
         let preview_reason = match (app.stem.hw.as_ref(), crate::stems::spec(&cur)) {
             (Some(hw), Some(model)) => crate::stems::Live::preference_unavailable(hw, model, app.manual_stem_device()),
@@ -1558,11 +1567,11 @@ pub(crate) fn stem_model_card(app: &mut App, ui: &mut Ui) {
             capability_toggle(ui, &mut app.prefs.stems_auto_cpu, "Allow automatic separation on CPU", cpu_reason);
         }
         note(ui, "Saved parts load automatically. New manual CPU separations can occupy several cores for minutes.");
-        if let Some(status) = app.stem.separation_status() {
-            kit::line(ui, &status);
-            if app.stem.separating.map(|(id, _)| id) == app.deck.track
-                && kit::block(ui, |ui| ui.add(btn("Stop separation")).clicked()) {
-                app.stop_separation();
+        if let Some((id, status)) = app.stem.separating.map(|(id, _)| id).zip(app.stem.separation_status()) {
+            let title = app.track(id).map(|t| t.display_title()).unwrap_or_default();
+            kit::line(ui, &format!("{status} · {title}"));
+            if app.separating_stems() && kit::block(ui, |ui| ui.add(btn("Stop separation")).clicked()) {
+                app.stop_deck_stems();
             }
         } else if !app.prefs.show_stems {
             note(ui, "Enable the STEMS Function above to separate a track from the active deck.");

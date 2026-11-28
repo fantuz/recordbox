@@ -463,12 +463,12 @@ pub fn footer(app: &mut App, ui: &mut Ui) {
         }
     } else if app.importing.is_some() {
         p.text(pos2(mid.min.x + 8.0, mid.center().y), Align2::LEFT_CENTER, format!("Importing… {}", app.import_count), rb(11.5), TEXT.c());
-    } else if let Some((id, progress)) = app.stem.separating {
+    } else if let Some((id, _)) = app.stem.separating {
         let title = app.track(id).map(|t| t.display_title()).unwrap_or_default();
         let text = if app.stem.cancel.load(std::sync::atomic::Ordering::Relaxed) {
             format!("Stopping stem separation · {title}")
         } else {
-            format!("Stem separation · {:.0}% · {title}", progress * 100.0)
+            format!("{} · {title}", app.stem.separation_status().unwrap_or_else(|| "Preparing stems".into()))
         };
         p.with_clip_rect(mid).text(mid.left_center(), Align2::LEFT_CENTER, text, rb(11.5), TEXT.c());
     } else if let Some((done, total)) = app.stem.downloading {

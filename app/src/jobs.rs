@@ -279,7 +279,8 @@ pub fn spawn_load(track_id: i64, path: String, ctx: egui::Context, cancel: Arc<A
     std::thread::spawn(move || {
         let r = decode_until(&path, || cancel.load(Ordering::Relaxed)).map(Arc::new).map_err(|e| e.to_string());
         let _ = tx.send((track_id, r));
-        ctx.request_repaint();
+        // The root frame drains deck results even when the library is detached or closing.
+        ctx.request_repaint_of(egui::ViewportId::ROOT);
     });
     rx
 }

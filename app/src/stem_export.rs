@@ -2,6 +2,7 @@
 use crate::app::*;
 use crate::edit_render::{self as render, Encode, Mp3Rate};
 use crate::model::*;
+use eframe::egui;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashSet, VecDeque};
 use std::path::{Path, PathBuf};
@@ -619,7 +620,7 @@ pub fn stop(app: &mut App) {
         if let Some(token) = &a.owned_separation {
             token.store(true, Ordering::Relaxed);
         }
-        app.ctx.request_repaint();
+        app.ctx.request_repaint_of(egui::ViewportId::ROOT);
     }
 }
 
@@ -631,14 +632,21 @@ pub fn busy_for(app: &App, track: Option<i64>) -> bool {
         app.stemx.active.as_ref().is_some_and(|a| a.req.track == id) || app.stemx.queue.iter().any(|r| r.track == id)
     })
 }
+pub fn status_for(app: &App, track: i64) -> Option<String> {
+    if app.stemx.active.as_ref().is_some_and(|a| a.req.track == track) {
+        return status(app);
+    }
+    app.stemx.queue.iter().find(|r| r.track == track)
+        .map(|r| format!("Queued for export · {}", r.part.suffix()))
+}
 pub fn status(app: &App) -> Option<String> {
     let a = app.stemx.active.as_ref()?;
     let stage = if a.cancel.load(Ordering::Relaxed) {
         "Stopping export".into()
     } else if a.rx.is_some() {
         "Encoding and checking audio".into()
-    } else if let Some((_, p)) = app.stem.separating.filter(|s| s.0 == a.req.track) {
-        format!("Separating {:.0}%", p * 100.0)
+    } else if app.stem.separating.is_some_and(|s| s.0 == a.req.track) {
+        app.stem.separation_status().unwrap_or_else(|| "Preparing stems".into())
     } else {
         "Waiting for completed stems".into()
     };
@@ -713,7 +721,7 @@ pub fn poll(app: &mut App) {
         return;
     }
     app.stemx.active = Some(a);
-    app.ctx.request_repaint_after(std::time::Duration::from_millis(250));
+    app.ctx.request_repaint_after_for(std::time::Duration::from_millis(250), egui::ViewportId::ROOT);
 }
 
 fn complete_result(app: &mut App, a: &Active, result: Result<audio_export::Staged, String>) {
@@ -740,7 +748,7 @@ fn complete(app: &mut App, result: Result<String, String>) {
             app.stemx.failed, app.stemx.finished, app.stemx.last_error
         ));
     }
-    app.ctx.request_repaint();
+    app.ctx.request_repaint_of(egui::ViewportId::ROOT);
 }
 
 fn start_or_wait(app: &mut App, a: &mut Active) -> Result<(), String> {
@@ -750,15 +758,20 @@ fn start_or_wait(app: &mut App, a: &mut Active) -> Result<(), String> {
         .ok_or("The source track changed during export.")?;
     let kbps = t.bitrate;
     let cache = crate::stems::cache_path(&a.path, a.model.id);
-    let deck = (0..4).find(|&n| app.deck_of(n).track == Some(a.req.track) && app.deck_of(n).audio.is_some());
-    let parts = deck.and_then(|n| {
+    let mut loaded = (0..4).filter(|&n| app.deck_of(n).track == Some(a.req.track) && app.deck_of(n).audio.is_some());
+    let first = loaded.clone().next();
+    let completed = loaded.find_map(|n| {
         let key = app.deck_of(n).stem_cache_key.as_ref()?;
         if key.model != a.model.id || key.path != cache {
             return None;
         }
         // Live windows are kept separately in stem_preview. Only immutable, completed stems qualify.
-        app.player.decks[usize::from(n)].lock().stems.clone()
+        app.player.decks[usize::from(n)].lock().stems.clone().map(|parts| (n, parts))
     });
+    let (deck, parts) = match completed {
+        Some((n, parts)) => (Some(n), Some(parts)),
+        None => (first, None),
+    };
     if parts.is_none() && crate::stems::existing_cache_path(&cache).is_none() {
         let Some(n) = deck else {
             return Err("Load this track into a deck and separate it with the selected model, then export.".into());
@@ -808,7 +821,7 @@ fn start_or_wait(app: &mut App, a: &mut Active) -> Result<(), String> {
         .name("rb-stem-export".into())
         .spawn(move || {
             let _ = tx.send(audio_export::stage(work, &cancel));
-            ctx.request_repaint();
+            ctx.request_repaint_of(egui::ViewportId::ROOT);
         })
         .map_err(|e| format!("Cannot start the stem export worker: {e}"))?;
     a.rx = Some(rx);

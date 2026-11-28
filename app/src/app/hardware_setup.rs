@@ -77,7 +77,7 @@ struct Record {
 
 #[derive(Default)]
 pub(super) struct Setup {
-    status: Option<String>,
+    pub(super) status: Option<String>,
     pub(super) extensions: Option<Extensions>,
 }
 
@@ -148,6 +148,10 @@ pub(super) fn startup_model(automatic: &'static stems::ModelSpec, active: Option
 }
 
 impl super::App {
+    pub(crate) fn stem_hardware_error(&self) -> Option<&str> {
+        if self.stem.hw.is_none() { self.hardware_setup.status.as_deref() } else { None }
+    }
+
     pub(crate) fn restored_hardware_preferences(&mut self) {
         self.pool.set_threads(self.prefs.analysis_threads);
         self.stem.model = None;

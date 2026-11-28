@@ -117,6 +117,14 @@ animation**. Export mode releases idle audio output after two seconds and
 reopens it on demand. Performance mode and an initialized sampler keep their
 output clock ready; library preview releases its own output on Stop or completion.
 
+## STEMS across decks and windows
+
+In **Export → 2 Players** and **Dual Player**, use **STEMS · SEPARATE** on one deck and **STEMS · QUEUE** on the other. Enable the STEMS button in the player layout options if the controls are hidden. Each deck has its own part switches. In Performance, hover the deck overview for its separation status. The footer identifies the active track.
+
+recordbox runs one full deck separation at a time. The deck reports when it is reading audio, checking the device, waiting for another GPU job, loading the model or saving. The first segment can take some time on older hardware. The percentage begins when the model reports measured progress. A queued track can play its original audio. Canceling that request leaves the running track alone. If both decks request the same track and model, they share one job.
+
+Switching layouts, entering Edit or Full Browser, and detaching or closing the library window let an existing job continue while its track stays on a deck. Ejecting or replacing the last copy requests cancellation. Completed parts load from cache on later deck loads and application launches, subject to the storage limits in Preferences. The Linux Vulkan build requires a manual request to start a new separation. [STEMS storage and backups](LIBRARY-SYNC.md#how-much-separation-is-saved)
+
 ## Hardware setup
 
 On the first GUI launch of a new recordbox version or acceleration build, recordbox reads the CPU architecture and available instructions, usable logical CPUs, system memory and the GPU information available to that build. It checks for local beat-model and STEMS files. The setup record belongs to the active recordbox library. Changing the adapter or its reported driver can refresh the recommendation. On a later launch with the same hardware and version, recordbox reuses the saved setup and checks current eligibility. Running an actual separation exercises the selected backend.

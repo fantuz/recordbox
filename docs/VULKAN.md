@@ -14,7 +14,7 @@ The Linux x64 Vulkan preview runs HTDemucs transformer linear layers on a physic
    ```
 
    The first command lists detected hardware and installed checkpoints. The second runs a small calculation and reports the selected backend. A successful GPU probe identifies **Vulkan + CPU** and the adapter name. A CPU result gives the reason. A full-model test exercises much more of the driver than the probe does.
-4. In **Preferences → Extensions → STEMS**, enable STEMS, select **Prioritize speed** and download **HTDemucs**. Load a track and choose **STEMS → Separate**. In this preview, loading a track can load cached parts. Starting a new deck separation requires pressing **Separate**, including when earlier versions saved an automatic-separation preference.
+4. In **Preferences → Extensions → STEMS**, enable STEMS, select **Prioritize speed** and download **HTDemucs**. Load a track and choose **STEMS → Separate**. In this preview, loading a track can load cached parts. Starting a new deck separation requires pressing **Separate**, including when earlier versions saved an automatic-separation preference. In Export Dual Player, choose **STEMS · SEPARATE** on one deck and **STEMS · QUEUE** on the other to prepare both. The second job starts after the first one finishes.
 
 ## Reuse a quality separation
 

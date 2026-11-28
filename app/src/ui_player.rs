@@ -1373,34 +1373,23 @@ fn control_strip(app: &mut App, ui: &mut Ui, s: Rect, main: Rect) {
     }
 }
 
-/// Stem controls: VOCAL / INST / BASS / DRUMS (mute a part by switching it off), the model in
-/// use and separation progress.
-fn stems_strip(app: &mut App, ui: &mut Ui, s: Rect, main: Rect) {
-    let p = ui.painter().clone();
-    let y = s.min.y + 24.0;
-    let at = |x: f32, w: f32| Rect::from_center_size(pos2(sx(main, x), y), vec2(w, 26.0));
-    let (have, on, preview_frames) = {
-        let player = app.player.state.lock();
-        (player.stems.is_some(), player.stem_on, player.stem_preview.as_ref().map_or(0, |p| p.ready_frames()))
-    };
+pub(crate) fn stem_part_buttons(app: &mut App, ui: &mut Ui, rect_for: impl Fn(usize) -> Rect) {
     let loaded = app.deck.track.is_some();
+    let on = app.player.state.lock().stem_on;
+    let p = ui.painter().clone();
     // (label, source indices, colour). Three parts put bass with the instruments. Colours as
     // measured from rekordbox 7.2.19 (reference set, stems/13).
     const VOCAL: Color32 = Color32::from_rgb(0x02, 0xDA, 0x0C);
     const INST: Color32 = Color32::from_rgb(0xDA, 0x1B, 0x02);
     const BASS: Color32 = Color32::from_rgb(0xD2, 0x00, 0x90);
     const DRUMS: Color32 = Color32::from_rgb(0x46, 0x55, 0xFF);
-    let parts: Vec<(&str, Vec<usize>, Color32)> = if app.prefs.stem_parts == 3 {
-        vec![("VOCAL", vec![3], VOCAL), ("INST", vec![2, 1], INST), ("DRUMS", vec![0], DRUMS)]
+    let parts: &[(&str, &[usize], Color32)] = if app.prefs.stem_parts == 3 {
+        &[("VOCAL", &[3], VOCAL), ("INST", &[2, 1], INST), ("DRUMS", &[0], DRUMS)]
     } else {
-        vec![("VOCAL", vec![3], VOCAL), ("INST", vec![2], INST), ("BASS", vec![1], BASS), ("DRUMS", vec![0], DRUMS)]
+        &[("VOCAL", &[3], VOCAL), ("INST", &[2], INST), ("BASS", &[1], BASS), ("DRUMS", &[0], DRUMS)]
     };
-    // As rekordbox's deck strip (reference set, stems/14 and 30): the mode ("MUTE" or "SOLO")
-    // in grey, then one 44 x 17 pt button per part on a 50 pt pitch. A sounding part has its
-    // name and a 1 pt outline in its colour; a muted one is grey with no outline.
-    p.text(pos2(sx(main, 438.0), y), Align2::RIGHT_CENTER, if app.prefs.stem_solo { "SOLO" } else { "MUTE" }, FontId::proportional(10.0), gy(0x8C8C8C));
     for (i, (label, srcs, col)) in parts.iter().enumerate() {
-        let r = at(474.0 + i as f32 * 50.0, 44.0).shrink2(vec2(0.0, 4.5));
+        let r = rect_for(i);
         let resp = ui.interact(r, ui.id().with(("stem", i)), Sense::click());
         let lit = srcs.iter().all(|s| on[*s]);
         p.rect_filled(r, 1.0, crate::ui_feel::hl_if(&resp, loaded, gy(0x0F0F0F), gy(0x1E1E1E)));
@@ -1414,18 +1403,40 @@ fn stems_strip(app: &mut App, ui: &mut Ui, s: Rect, main: Rect) {
             crate::prefs_ext::stem_part_click(app, srcs);
         }
     }
+}
+
+/// Stem controls: VOCAL / INST / BASS / DRUMS (mute a part by switching it off), the model in
+/// use and separation progress.
+fn stems_strip(app: &mut App, ui: &mut Ui, s: Rect, main: Rect) {
+    let p = ui.painter().clone();
+    let y = s.min.y + 24.0;
+    let at = |x: f32, w: f32| Rect::from_center_size(pos2(sx(main, x), y), vec2(w, 26.0));
+    let (have, preview_frames) = {
+        let player = app.player.state.lock();
+        (player.stems.is_some(), player.stem_preview.as_ref().map_or(0, |p| p.ready_frames()))
+    };
+    let loaded = app.deck.track.is_some();
+    // As rekordbox's deck strip (reference set, stems/14 and 30): the mode ("MUTE" or "SOLO")
+    // in grey, then one 44 x 17 pt button per part on a 50 pt pitch. A sounding part has its
+    // name and a 1 pt outline in its colour; a muted one is grey with no outline.
+    p.text(pos2(sx(main, 438.0), y), Align2::RIGHT_CENTER, if app.prefs.stem_solo { "SOLO" } else { "MUTE" }, FontId::proportional(10.0), gy(0x8C8C8C));
+    stem_part_buttons(app, ui, |i| at(474.0 + i as f32 * 50.0, 44.0).shrink2(vec2(0.0, 4.5)));
     // Status and actions.
     let model_info = app.stem.status_model();
     let model = model_info.map_or("checking this computer…", |m| m.name);
     let exporting = crate::stem_export::busy_for(app, app.deck.track);
-    let busy = exporting || app.stem.separating.is_some() || app.stem.downloading.is_some();
+    let queued = app.queued_stems();
+    let model_download = app.unrequested_stem_download();
+    let busy = exporting || app.separating_stems() || queued || model_download;
     let loading = app.loading_stems();
     let error = app.stem.error_for(app.deck.track).filter(|_| !busy && !loading);
     let retry_cpu = error.is_some_and(|e| e.retry_model.is_some());
     let status = if let Some(s) = crate::ui_stem_export::strip_status(app) {
         s
-    } else if let Some((d, t)) = app.stem.downloading {
-        if t > 0 { format!("Downloading {model}: {:.0}%", d as f64 / t as f64 * 100.0) } else { format!("Downloading {model}…") }
+    } else if let Some(status) = app.stem.download_status() {
+        status
+    } else if queued {
+        "Queued for separation…".to_owned()
     } else if loading {
         "Loading saved stems…".to_owned()
     } else if let Some(status) = app.stem.separation_status() {
@@ -1471,8 +1482,10 @@ fn stems_strip(app: &mut App, ui: &mut Ui, s: Rect, main: Rect) {
         if tip(bold_button(ui, at(1165.0, 54.0), "stem_stop", "STOP"), app, "Stop").clicked() {
             if exporting {
                 crate::stem_export::stop(app);
+            } else if model_download {
+                app.stem.download_cancel.store(true, std::sync::atomic::Ordering::Relaxed);
             } else {
-                app.stop_separation();
+                app.stop_deck_stems();
             }
         }
     } else if !have && loaded && !loading {

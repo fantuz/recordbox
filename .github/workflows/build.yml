@@ -324,11 +324,13 @@ jobs:
             export::usb_fix_test::a1_aligned_rows_paginate_at_row_group_boundaries_without_overlap; do
             cargo test --manifest-path app/Cargo.toml --release --locked "$test_filter" -- --test-threads=1
           done
-      - name: Check hardware setup, STEMS storage and track matching on the native package target
+      - name: Check hardware setup, STEMS deck and cache behavior, and track matching
         shell: bash
         run: |
           for test_filter in app::hardware_setup::tests:: ui_prefs_adv::hardware_preferences_tests:: \
             stems::backend::inventory::tests:: stems::hardware::tests:: stems::cache_tests:: disk_space::tests:: \
+            app::stem_cache_tests:: stems::vocal_summary_tests:: waiting_for_a_shared_gpu \
+            model_download_reports_progress_across_installed_and_missing_checkpoints \
             browser_ext::matching::tests:: app::match_enrichment::tests:: onetagger::tests:: \
             ui_dialogs::match_lookup_dialog_tests:: unchanged_match_panels_reuse_rows ui_sync::tests::; do
             cargo test --manifest-path app/Cargo.toml --release --locked --bin recordbox "$test_filter" -- --test-threads=1 | tee "$RUNNER_TEMP/hardware-tests.log"

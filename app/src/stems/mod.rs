@@ -132,14 +132,14 @@ impl SeparationDevice {
         }
     }
 
-    fn reserve_gpu(self, progress: &mut dyn FnMut(f32) -> bool) -> Result<Option<parking_lot::MutexGuard<'static, ()>>> {
+    fn reserve_gpu(self, progress: &mut dyn FnMut(f32) -> bool, waiting: impl FnOnce()) -> Result<Option<parking_lot::MutexGuard<'static, ()>>> {
         if self == Self::Cpu { return Ok(None); }
         #[cfg(all(target_os = "linux", feature = "vulkan"))]
         let serialize = backend::vulkan_device().is_some();
         #[cfg(not(all(target_os = "linux", feature = "vulkan")))]
         let serialize = backend::gpu_uses_shared_memory();
         if serialize {
-            let guard = wait_for_shared_gpu(&SHARED_GPU_JOB, progress)?;
+            let guard = wait_for_shared_gpu(&SHARED_GPU_JOB, progress, waiting)?;
             self.check_hold()?;
             Ok(Some(guard))
         } else { Ok(None) }
@@ -149,7 +149,10 @@ impl SeparationDevice {
 // A deck, vocal detection and key analysis can request different checkpoints at the same time.
 static SHARED_GPU_JOB: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
 
-fn wait_for_shared_gpu<'a>(slot: &'a parking_lot::Mutex<()>, progress: &mut dyn FnMut(f32) -> bool) -> Result<parking_lot::MutexGuard<'a, ()>> {
+fn wait_for_shared_gpu<'a>(slot: &'a parking_lot::Mutex<()>, progress: &mut dyn FnMut(f32) -> bool, waiting: impl FnOnce()) -> Result<parking_lot::MutexGuard<'a, ()>> {
+    if !progress(0.0) { anyhow::bail!("stopped"); }
+    if let Some(guard) = slot.try_lock() { return Ok(guard); }
+    waiting();
     loop {
         let available = slot.try_lock_for(std::time::Duration::from_millis(100));
         if !progress(0.0) { anyhow::bail!("stopped"); }
@@ -403,21 +406,30 @@ fn sha_hex(path: &Path) -> Result<String> {
 /// Download any missing checkpoint of `m` into the models folder. Each file is written to a
 /// temporary name, checked against its SHA-256 prefix and only then renamed into place.
 pub fn download(m: &ModelSpec, progress: &mut dyn FnMut(u64, u64, &str), cancel: &std::sync::atomic::AtomicBool) -> Result<()> {
+    let agent = ureq::AgentBuilder::new()
+        .timeout_connect(std::time::Duration::from_secs(20))
+        .timeout_read(std::time::Duration::from_secs(30))
+        .build();
     download_to(m, &models_dir(), progress, cancel, |file| {
         let url = format!("{ROOT_URL}{file}");
-        ureq::get(&url).call().with_context(|| format!("downloading {url}"))
+        agent.get(&url).call().with_context(|| format!("downloading {url}"))
     })
 }
 
 fn download_to(m: &ModelSpec, dir: &Path, progress: &mut dyn FnMut(u64, u64, &str),
                cancel: &std::sync::atomic::AtomicBool, fetch: impl Fn(&str) -> Result<ureq::Response>) -> Result<()> {
+    let total = m.checkpoint_bytes * m.files.len() as u64;
     for (k, f) in m.files.iter().enumerate() {
+        let previous = m.checkpoint_bytes * k as u64;
+        if cancel.load(std::sync::atomic::Ordering::Relaxed) { anyhow::bail!("stopped"); }
         let dest = dir.join(f);
         if checkpoint_ready(&dest, m.checkpoint_bytes)? {
+            progress(previous + m.checkpoint_bytes, total, f);
             continue;
         }
+        let response = fetch(f);
         if cancel.load(std::sync::atomic::Ordering::Relaxed) { anyhow::bail!("stopped"); }
-        let resp = fetch(f)?;
+        let resp = response?;
         let mut tmp = tempfile::NamedTempFile::new_in(dir)?;
         let mut reader = resp.into_reader();
         let mut buf = vec![0u8; 1 << 16];
@@ -426,14 +438,16 @@ fn download_to(m: &ModelSpec, dir: &Path, progress: &mut dyn FnMut(u64, u64, &st
             if cancel.load(std::sync::atomic::Ordering::Relaxed) {
                 return Err(anyhow!("stopped"));
             }
-            let n = reader.read(&mut buf)?;
+            let read = reader.read(&mut buf);
+            if cancel.load(std::sync::atomic::Ordering::Relaxed) { anyhow::bail!("stopped"); }
+            let n = read?;
             if n == 0 {
                 break;
             }
             done += n as u64;
             anyhow::ensure!(done <= m.checkpoint_bytes, "{f} exceeds its expected model size");
             tmp.write_all(&buf[..n])?;
-            progress(done, m.checkpoint_bytes, f);
+            progress(previous + done, total, f);
         }
         anyhow::ensure!(done == m.checkpoint_bytes, "Incomplete model {f}: received {done} of {} bytes", m.checkpoint_bytes);
         tmp.as_file().sync_all()?;
@@ -489,29 +503,59 @@ pub fn separate(m: &ModelSpec, samples: &[f32], sr: u32, progress: &mut dyn FnMu
 }
 
 pub fn separate_with_device(m: &ModelSpec, samples: &[f32], sr: u32, progress: &mut dyn FnMut(f32) -> bool, execution: SeparationDevice) -> Result<Stems> {
-    separate_with_live(m, samples, sr, progress, execution, None)
+    separate_with_live(m, samples, sr, progress, execution, None, &mut |_| {})
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum SeparationPhase {
+    ReadingAudio,
+    CheckingDevice,
+    WaitingForGpu,
+    PreparingAudio,
+    LoadingModel,
+    Separating,
+    Saving,
+}
+
+impl SeparationPhase {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::ReadingAudio => "Reading audio",
+            Self::CheckingDevice => "Checking device",
+            Self::WaitingForGpu => "Waiting for GPU",
+            Self::PreparingAudio => "Preparing audio",
+            Self::LoadingModel => "Loading model",
+            Self::Separating => "First segment",
+            Self::Saving => "Saving stems",
+        }
+    }
 }
 
 /// A preview uses the same weighted segment results as the final cached output.
 /// All callers without a preview keep the completed-output path.
-pub fn separate_with_live(m: &ModelSpec, samples: &[f32], sr: u32, progress: &mut dyn FnMut(f32) -> bool, execution: SeparationDevice, live: Option<&Live>) -> Result<Stems> {
+pub fn separate_with_live(m: &ModelSpec, samples: &[f32], sr: u32, progress: &mut dyn FnMut(f32) -> bool, execution: SeparationDevice, live: Option<&Live>, phase: &mut dyn FnMut(SeparationPhase)) -> Result<Stems> {
     if !progress(0.0) { anyhow::bail!("stopped"); }
     anyhow::ensure!(sr > 0 && !samples.is_empty() && samples.len() % 2 == 0, "expected nonempty interleaved stereo and a positive sample rate");
+    phase(SeparationPhase::CheckingDevice);
     let device = execution.device()?;
-    let _job = execution.reserve_gpu(progress)?;
+    let _job = execution.reserve_gpu(progress, || phase(SeparationPhase::WaitingForGpu))?;
+    phase(SeparationPhase::PreparingAudio);
     let (planar, len) = planar_44k(samples, sr);
     let live = live.filter(|live| live.len() == len && execution != SeparationDevice::Cpu && !device.is_cpu());
     let n_models = m.files.len();
-    let run = |progress: &mut dyn FnMut(f32) -> bool| -> Result<Vec<f32>> {
+    let mut run = |progress: &mut dyn FnMut(f32) -> bool| -> Result<Vec<f32>> {
+        phase(SeparationPhase::LoadingModel);
         if !m.per_source {
             if !progress(0.0) { anyhow::bail!("stopped"); }
             let g = graph(m.files[0], execution)?;
+            phase(SeparationPhase::Separating);
             let mut cb = |done: usize, total: usize| progress(done as f32 / total as f32);
             let publish = live.map(|live| live::Publication { live, previous: &[] });
             return htdemucs::separate_publishing(&g, &device, &planar, len, &htdemucs::Options { overlap: OVERLAP, source: None }, &mut cb, publish);
         }
         if let (Some(live), Ok(files)) = (live, m.files.try_into()) {
             if let Some(graphs) = quality_graphs(files, execution, live, progress)? {
+                phase(SeparationPhase::Separating);
                 let parts = std::array::from_fn(|i| graphs[i].as_ref());
                 let mut cb = |done: usize, total: usize| progress(done as f32 / total as f32);
                 let publish = live::Publication { live, previous: &[] };
@@ -524,6 +568,7 @@ pub fn separate_with_live(m: &ModelSpec, samples: &[f32], sr: u32, progress: &mu
         for (k, f) in m.files.iter().enumerate() {
             if !progress(k as f32 / n_models as f32) { anyhow::bail!("stopped"); }
             let g = graph(f, execution)?;
+            if k == 0 { phase(SeparationPhase::Separating); }
             let mut cb = |done: usize, total: usize| progress((k as f32 + done as f32 / total as f32) / n_models as f32);
             let publish = live.filter(|_| k == 3).map(|live| live::Publication { live, previous: &out });
             let channel_pair = htdemucs::separate_publishing(&g, &device, &planar, len, &htdemucs::Options { overlap: OVERLAP, source: Some(k) }, &mut cb, publish)?;
@@ -549,7 +594,7 @@ pub fn separate_one(source: usize, samples: &[f32], sr: u32, progress: &mut dyn 
     let ft = &CATALOG[0];
     let file = if model_ready(ft) { ft.files[source] } else { CATALOG[1].files[0] };
     let device = SeparationDevice::Selected.device()?;
-    let _job = SeparationDevice::Selected.reserve_gpu(progress)?;
+    let _job = SeparationDevice::Selected.reserve_gpu(progress, || {})?;
     let (planar, len) = planar_44k(samples, sr);
     let g = graph(file, SeparationDevice::Selected)?;
     let mut cb = |done: usize, total: usize| progress(done as f32 / total as f32);
@@ -590,10 +635,57 @@ pub fn mono_44k(samples: &[f32], sr: u32) -> Vec<f32> {
 
 /// Vocal levels 0–4 per 2048 samples from mono 44.1 kHz vocal stem and mix.
 pub fn vocal_levels(vocal: &[f32], mix: &[f32]) -> Vec<u8> {
-    let v = frame_db(vocal);
-    let m = moving_mean(&frame_db(mix), 21);
-    let f: Vec<f32> = v.iter().enumerate().map(|(i, x)| 0.5 * x + 0.5 * (x - m.get(i).copied().unwrap_or(*x))).collect();
+    vocal_levels_from_frames(&frame_db(vocal), &frame_db(mix))
+}
+
+fn vocal_levels_from_frames(vocal_db: &[f32], mix_db: &[f32]) -> Vec<u8> {
+    let m = moving_mean(mix_db, 21);
+    let f: Vec<f32> = vocal_db.iter().enumerate().map(|(i, x)| 0.5 * x + 0.5 * (x - m.get(i).copied().unwrap_or(*x))).collect();
     moving_mean(&f, VOCAL_SMOOTH).iter().map(|x| VOCAL_THRESHOLDS.iter().filter(|t| x >= *t).count() as u8).collect()
+}
+
+/// Compute the same vocal overlay directly from the separated channels, retaining
+/// one energy value per 46.4 ms frame instead of two track-length PCM buffers.
+pub fn separated_vocal_levels(stems: &Stems) -> Vec<u8> {
+    let channels: [&[f32]; 8] = std::array::from_fn(|c| &stems.data[c * stems.len..(c + 1) * stems.len]);
+    let mut vocal_db = Vec::with_capacity(stems.len.div_ceil(VOCAL_HOP));
+    let mut mix_db = Vec::with_capacity(vocal_db.capacity());
+    for start in (0..stems.len).step_by(VOCAL_HOP) {
+        let end = (start + VOCAL_HOP).min(stems.len);
+        let mut vocal_energy = 0.0;
+        let mut mix_energy = 0.0;
+        for i in start..end {
+            let vocal = 0.5 * (channels[6][i] + channels[7][i]);
+            let mix = 0.5 * channels.iter().map(|c| c[i]).sum::<f32>();
+            vocal_energy += vocal * vocal;
+            mix_energy += mix * mix;
+        }
+        let db = |energy: f32| 10.0 * (energy / (end - start) as f32 + 1e-10).log10();
+        vocal_db.push(db(vocal_energy));
+        mix_db.push(db(mix_energy));
+    }
+    vocal_levels_from_frames(&vocal_db, &mix_db)
+}
+
+#[cfg(test)]
+mod vocal_summary_tests {
+    use super::*;
+
+    #[test]
+    fn planar_summary_matches_pcm_overlay_including_partial_frames_and_silence() {
+        for len in [0, 1, VOCAL_HOP, 53 * VOCAL_HOP + 17] {
+            let data = (0..8 * len).map(|n| {
+                let i = n % len;
+                let c = n / len;
+                let gain = if c >= 6 { (i / VOCAL_HOP % 11) as f32 * 0.04 } else { 0.1 };
+                if i < VOCAL_HOP { 0.0 } else { gain * ((c + i) as f32 * 0.13).sin() }
+            }).collect();
+            let s = Stems { len, data };
+            let vocal: Vec<_> = (0..len).map(|i| 0.5 * (s.data[6 * len + i] + s.data[7 * len + i])).collect();
+            let mix: Vec<_> = (0..len).map(|i| 0.5 * (0..8).map(|c| s.data[c * len + i]).sum::<f32>()).collect();
+            assert_eq!(separated_vocal_levels(&s), vocal_levels(&vocal, &mix));
+        }
+    }
 }
 
 #[cfg(test)]
@@ -982,6 +1074,23 @@ mod tests {
     }
 
     #[test]
+    fn model_download_reports_progress_across_installed_and_missing_checkpoints() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let m = ModelSpec {
+            files: &["first-ba7816bf.th", "second-ba7816bf.th", "third-ba7816bf.th"],
+            sha256: &[None; 3], checkpoint_bytes: 3, ..CATALOG[1]
+        };
+        std::fs::write(dir.path().join(m.files[0]), b"abc")?;
+        let mut updates = vec![];
+        download_to(&m, dir.path(), &mut |done, total, _| updates.push((done, total)), &Default::default(), |name| {
+            assert_ne!(name, m.files[0]);
+            Ok(ureq::Response::new(200, "OK", "abc")?)
+        })?;
+        assert_eq!(updates, [(3, 9), (6, 9), (9, 9)]);
+        Ok(())
+    }
+
+    #[test]
     fn incomplete_checkpoint_is_replaced_only_after_a_verified_download() -> Result<()> {
         let dir = tempfile::tempdir()?;
         let m = ModelSpec {
@@ -1010,13 +1119,15 @@ mod tests {
     fn waiting_for_a_shared_gpu_can_be_cancelled_and_the_next_job_can_run() {
         let slot = parking_lot::Mutex::new(());
         let first_job = slot.lock();
-        std::thread::scope(|s| {
-            let waiting = s.spawn(|| wait_for_shared_gpu(&slot, &mut |_| false).unwrap_err().to_string());
-            assert_eq!(waiting.join().unwrap(), "stopped");
-        });
+        let mut waited = false;
+        let mut polls = 0;
+        let blocked = wait_for_shared_gpu(&slot, &mut |_| { polls += 1; polls == 1 }, || waited = true);
+        assert_eq!(blocked.unwrap_err().to_string(), "stopped");
+        assert!(waited);
         drop(first_job);
-        assert_eq!(wait_for_shared_gpu(&slot, &mut |_| false).unwrap_err().to_string(), "stopped");
-        assert!(wait_for_shared_gpu(&slot, &mut |_| true).is_ok());
+        let unexpected_wait = || panic!("an available GPU was marked as waiting");
+        assert_eq!(wait_for_shared_gpu(&slot, &mut |_| false, unexpected_wait).unwrap_err().to_string(), "stopped");
+        assert!(wait_for_shared_gpu(&slot, &mut |_| true, unexpected_wait).is_ok());
     }
 
     #[test]
