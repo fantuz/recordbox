@@ -762,7 +762,10 @@ mod hardware_preferences_tests {
         let click = |label: &str, blocked| {
             let pos = find(label);
             let button = |pressed| Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed, modifiers: Default::default() };
-            draw(vec![Event::PointerMoved(pos), button(true)], blocked);
+            // egui hits widgets registered in the preceding pass. Let the new hardware state
+            // paint its enabled or disabled radio before the user presses it.
+            draw(vec![Event::PointerMoved(pos)], blocked);
+            draw(vec![button(true)], blocked);
             draw(vec![button(false)], blocked).1
         };
         assert!(click("Prioritize sound quality", true).is_none());
