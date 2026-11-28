@@ -361,8 +361,6 @@ pub fn toward(id: Id, target: f32, rise: f32, fall: f32, kind: Kind) -> f32 {
             let (cur, _) = sample(a, now);
             let d = if target > cur { scaled(rise, kind) } else { scaled(fall, kind) };
             *a = Anim { from: cur, to: target, t0: now - lead as f64, dur: d * (target - cur).abs().min(1.0), seen: frame };
-        } else if !on() || (kind == Kind::Move && !moves()) {
-            a.dur = 0.0;
         }
         let (v, done) = sample(a, now);
         if !done {
@@ -385,8 +383,6 @@ pub fn tween(id: Id, target: f32, dur: f32, kind: Kind) -> f32 {
         if a.to != target {
             let (cur, _) = sample(a, now);
             *a = Anim { from: cur, to: target, t0: now - lead as f64, dur: scaled(dur, kind), seen: frame };
-        } else if !on() || (kind == Kind::Move && !moves()) {
-            a.dur = 0.0;
         }
         let (v, done) = sample(a, now);
         if !done {
@@ -416,8 +412,6 @@ pub fn glide(id: Id, target: f32, jump: f32, dur: f32, kind: Kind) -> f32 {
                 // A small move while gliding: keep gliding, to the new place.
                 a.to = target;
             }
-        } else if !on() || (kind == Kind::Move && !moves()) {
-            a.dur = 0.0;
         }
         let (v, done) = sample(a, now);
         if !done {

@@ -533,6 +533,29 @@ pub fn old_loop_runs(prefs: &Prefs, action: &str) -> bool {
     !set.contains(action)
 }
 
+/// F11 normally controls the native windows. An explicitly assigned command in the
+/// active keyboard mapping gets first use, including deck-specific and EDIT rows.
+pub(crate) fn custom_f11_binding(prefs: &Prefs) -> bool {
+    let mode = Mode::of(prefs.app_mode);
+    let mapping = keys::current(prefs, mode);
+    if keys::is_preset(&mapping, mode) {
+        return false;
+    }
+    if mode != Mode::Edit && prefs.keymap.iter().any(|(action, key)| {
+        action != "fullscreen" && key == "F11" && old_loop_runs(prefs, action)
+            && (mode == Mode::Performance || !crate::sampler_ext::is_sampler_action(action))
+    }) {
+        return true;
+    }
+    let Some(rows) = prefs.rb.key_mappings.get(&mapping) else { return false };
+    if !rows.values().any(|key| key.trim().eq_ignore_ascii_case("F11")) {
+        return false;
+    }
+    keys::commands(mode).iter().any(|row| {
+        row.id != 0xb04e && acts(row.id, mode) && keys::key_of(prefs, mode, &mapping, row).trim().eq_ignore_ascii_case("F11")
+    })
+}
+
 /// Once a frame (from main.rs, before recordbox's own key loop): the keys of the mapping in
 /// use. Returns nothing; presses it ran are taken out of the frame's events.
 pub fn frame(app: &mut App, ctx: &egui::Context) {

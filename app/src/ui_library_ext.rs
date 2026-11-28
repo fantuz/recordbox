@@ -1039,7 +1039,7 @@ pub fn tree_top_rows(app: &mut App, ui: &mut Ui, drop: &mut Vec<(Rect, i64)>) {
         ui.painter().rect_filled(ir, 0.0, if app.view == View::TagList { ROW_SEL.c() } else { crate::ui_feel::hl(&r, BG2.c(), gy(0x262626)) });
         icon_tag_list(ui.painter(), ir.center() + vec2(0.0, 0.5), DIM2.c());
     }
-    drop.push((r.rect, -1));
+    crate::ui_browser::register_drop_target(ui, drop, r.interact_rect, -1);
     if r.clicked() {
         app.set_view(View::TagList);
     }
@@ -1070,7 +1070,7 @@ pub fn tree_top_rows(app: &mut App, ui: &mut Ui, drop: &mut Vec<(Rect, i64)>) {
                 let count = (node.kind == NodeKind::Playlist).then(|| app.node_counts.get(&id).copied().unwrap_or(0));
                 let r = tree_row(ui, 1, &node.name, count, false, icon, 15.0);
                 if node.kind == NodeKind::Playlist {
-                    drop.push((r.rect, id));
+                    crate::ui_browser::register_drop_target(ui, drop, r.interact_rect, id);
                 }
                 if r.clicked() {
                     app.jump_to_playlist(id);
@@ -1108,7 +1108,7 @@ pub fn palette_bar(app: &mut App, ui: &mut Ui, r: Rect, drop: &mut Vec<(Rect, i6
             Some(n) => {
                 clip.text(pos2(sr.min.x + 20.0, sr.center().y), Align2::LEFT_CENTER, &n.name, FontId::proportional(11.5), WHITE.c());
                 p.text(pos2(sr.max.x - 7.0, sr.center().y), Align2::RIGHT_CENTER, app.node_counts.get(&n.id).copied().unwrap_or(0).to_string(), FontId::proportional(11.0), WHITE.c());
-                drop.push((sr, n.id));
+                crate::ui_browser::register_drop_target(ui, drop, resp.interact_rect.intersect(r), n.id);
             }
             None => {
                 clip.text(pos2(sr.min.x + 20.0, sr.center().y), Align2::LEFT_CENTER, "not assigned", FontId::proportional(11.0), DIM.c());
@@ -1116,7 +1116,7 @@ pub fn palette_bar(app: &mut App, ui: &mut Ui, r: Rect, drop: &mut Vec<(Rect, i6
         }
         // A playlist dragged from the tree lands here.
         if let Some(dragged) = app.node_drag {
-            if ui.ctx().pointer_latest_pos().map(|pp| sr.contains(pp)).unwrap_or(false) && app.node(dragged).map(|n| n.kind == NodeKind::Playlist).unwrap_or(false) {
+            if ui.rect_contains_pointer(resp.interact_rect.intersect(r)) && app.node(dragged).map(|n| n.kind == NodeKind::Playlist).unwrap_or(false) {
                 p.rect_stroke(sr, 2.0, Stroke::new(1.5, BLUE), egui::StrokeKind::Inside);
                 if ui.input(|i| i.pointer.any_released()) {
                     app.palette_assign(slot, dragged);

@@ -1092,6 +1092,47 @@ mod tests {
     }
 
     #[test]
+    fn f11_preserves_user_assigned_native_commands_only_in_the_active_mode() {
+        use crate::prefs_rb::Mode;
+        use crate::ui_prefs_keys as keys;
+        let run = |prefs: &Prefs| {
+            let child = crate::DetachedLibrary::id();
+            let ctx = egui::Context::default();
+            ctx.set_embed_viewports(false);
+            let mut raw = egui::RawInput { viewport_id: child, focused: true, ..Default::default() };
+            raw.viewports.entry(child).or_default().focused = Some(true);
+            raw.events.push(egui::Event::Key {
+                key: egui::Key::F11, physical_key: Some(egui::Key::F11), pressed: true,
+                repeat: false, modifiers: egui::Modifiers::NONE,
+            });
+            let mut available = false;
+            let output = ctx.run(raw, |ctx| {
+                crate::window_fullscreen(prefs, ctx, None);
+                available = ctx.input(|i| i.events.iter().any(|e| matches!(e, egui::Event::Key { key: egui::Key::F11, pressed: true, .. })));
+            });
+            (available, !fullscreen_commands(output).is_empty())
+        };
+        let mut prefs = Prefs::default();
+        prefs.app_mode = 1;
+        keys::select(&mut prefs, Mode::Performance, "Custom FX");
+        let fx = keys::commands(Mode::Performance).into_iter().find(|r| r.id == 0xe000).unwrap();
+        keys::assign(&mut prefs, Mode::Performance, "Custom FX", &fx, "F11");
+        assert_eq!(run(&prefs), (true, false), "the performance FX command receives F11");
+        prefs.app_mode = 0;
+        assert_eq!(run(&prefs), (false, true), "this FX command is absent from Export");
+        prefs.app_mode = 2;
+        keys::select(&mut prefs, Mode::Edit, "Custom EDIT");
+        let play = keys::commands(Mode::Edit).into_iter().find(|r| r.id == 0xcc15).unwrap();
+        keys::assign(&mut prefs, Mode::Edit, "Custom EDIT", &play, "F11");
+        assert_eq!(run(&prefs), (true, false), "the editor receives its assigned key");
+        keys::assign(&mut prefs, Mode::Edit, "Custom EDIT", &play, "shift + F11");
+        assert_eq!(run(&prefs), (false, true), "modified keys leave plain F11 available");
+        prefs.app_mode = 1;
+        keys::select(&mut prefs, Mode::Performance, keys::PRESETS[0].0);
+        assert_eq!(run(&prefs), (false, true), "an inactive custom mapping does not claim F11");
+    }
+
+    #[test]
     fn paired_fullscreen_changes_the_peer_then_the_origin_only_while_the_pair_is_active() {
         let root = egui::ViewportId::ROOT;
         let library = crate::DetachedLibrary::id();

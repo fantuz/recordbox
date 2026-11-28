@@ -271,9 +271,21 @@ fn window_input(app: &mut App, ctx: &egui::Context) {
     }
 }
 
+/// A close confirmation applies to this quit attempt. If a live library write keeps
+/// the process open, future editor changes or recordings need a fresh confirmation.
+fn guard_library_write_close(ctx: &egui::Context, writing: bool, editor_quit_ok: &mut bool, recorder_quit_ok: &mut bool) {
+    if writing && ctx.viewport_id() == egui::ViewportId::ROOT && ctx.input(|i| i.viewport().close_requested()) {
+        *editor_quit_ok = false;
+        *recorder_quit_ok = false;
+        ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+    }
+}
+
 fn library_panel(app: &mut App, ctx: &egui::Context) {
     egui::CentralPanel::default().frame(egui::Frame::default().fill(theme::BG.c())).show(ctx, |ui| {
+        let rect = ui.max_rect();
         ui_browser::browser(app, ui);
+        ui_feel::watch_library(app, rect);
     });
 }
 
@@ -488,7 +500,6 @@ impl eframe::App for Gui {
                 }
             });
         }
-        collection_cleanup::ui::guard_app_close(app, ctx);
         app.update_transport(ctx, decks_visible);
         // Preferences rows of other files' features take effect (prefs_bridge.rs).
         if app.dialogs.prefs_open || app.ctx.cumulative_pass_nr() < 3 {
@@ -499,6 +510,9 @@ impl eframe::App for Gui {
         step!(cue_tools::windows(app, ctx));
         step!(ui_midi::window(app, ctx));
         step!(ui_rec::windows(app, ctx));
+        let library_writing = collection_cleanup::ui::applying(app)
+            || app.dialogs.library_sync_review.as_ref().is_some_and(ui_sync::Review::writing);
+        guard_library_write_close(ctx, library_writing, &mut app.edit.quit_ok, &mut app.rec.quit_ok);
         ui_feel::end_frame(app, ctx);
 
         if app.analysis_total > 0 || app.importing.is_some() || app.export_job.is_some() {
@@ -507,7 +521,7 @@ impl eframe::App for Gui {
 
         // PREPDECK_BENCH=<frames> (with --screenshot): play the loaded track muted for that many
         // frames before the picture and print how long building each frame took.
-        let bench: u32 = std::env::var("PREPDECK_BENCH").ok().and_then(|v| v.parse().ok()).unwrap_or(0);
+        let bench = feel_selftest::bench_frames();
         if bench > 0 {
             if let Some((_, frames)) = app.screenshot.clone() {
                 static TIMES: std::sync::Mutex<Vec<f32>> = std::sync::Mutex::new(Vec::new());
@@ -602,7 +616,7 @@ fn window_fullscreen(prefs: &app::Prefs, ctx: &egui::Context, library: Option<&m
         let mut toggle = false;
         i.events.retain(|event| {
             if let egui::Event::Key { key: egui::Key::F11, pressed: true, repeat, modifiers, .. } = event {
-                if modifiers.is_none() && !prefs.keymap.iter().any(|(action, key)| action != "fullscreen" && key == "F11") {
+                if modifiers.is_none() && !keycmd::custom_f11_binding(prefs) {
                     toggle |= !repeat;
                     return false;
                 }

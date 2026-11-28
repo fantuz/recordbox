@@ -644,14 +644,14 @@ pub fn browser(app: &mut App, panel: &mut Ui) {
     let sub_rect = if rp == 5 { Some(panel) } else { sub_below };
     if let Some(sr) = sub_rect {
         crate::ui_browser_ext::sub_browser(app, ui, sr, &mut drop_targets);
-        // Tracks dragged from the sub-browser can be dropped into the main playlist.
-        if app.sub_drag {
-            if let Some(pl) = app.is_manual_playlist() {
-                drop_targets.push((list, pl));
-            }
-        }
     }
     let list = crate::ui_automix::pane(app, ui, list);
+    // Tracks dragged from the sub-browser can be dropped into the main playlist.
+    if sub_rect.is_some() && app.sub_drag {
+        if let Some(pl) = app.is_manual_playlist() {
+            register_drop_target(ui, &mut drop_targets, list, pl);
+        }
+    }
     let mut lui = ui.new_child(egui::UiBuilder::new().max_rect(list));
     lui.set_clip_rect(list.intersect(ui.clip_rect()));
     list_for_view(app, &mut lui);
@@ -679,27 +679,25 @@ pub fn browser(app: &mut App, panel: &mut Ui) {
                 lp.rect_filled(rr, 3.0, ROW_SEL);
                 lp.text(rr.left_center() + vec2(4.0, 0.0), Align2::LEFT_CENTER, label, rb(11.0), WHITE.c());
             }
-            for (index, (r, id)) in drop_targets.iter().enumerate().filter(|(_, (r, _))| ui.is_rect_visible(*r)) {
-                if crate::ui_feel::drop_glow(ui, ui.id().with(("feel_tgt", index, id)), *r, r.contains(pp), 2.0) {
+            for (index, (r, id)) in drop_targets.iter().enumerate() {
+                if crate::ui_feel::drop_glow(ui, ui.id().with(("feel_tgt", index, id)), *r, ui.rect_contains_pointer(*r), 2.0) {
                     lp.rect_stroke(*r, 2.0, Stroke::new(1.5, BLUE), egui::StrokeKind::Inside);
                 }
             }
         }
         if ui.input(|i| i.pointer.any_released()) {
-            if let Some(pp) = ptr {
-                if let Some((_, id)) = drop_targets.iter().find(|(r, _)| r.contains(pp)) {
-                    match *id {
-                        // The Tag List row, and the Matching panel (link with its source track).
-                        -1 => app.tag_list_add(&ids),
-                        -2 => {
-                            if let Some(src) = app.related_source() {
-                                for t in &ids {
-                                    app.matching_set(src, *t, true);
-                                }
+            if let Some((_, id)) = drop_targets.iter().find(|(r, _)| ui.rect_contains_pointer(*r)) {
+                match *id {
+                    // The Tag List row, and the Matching panel (link with its source track).
+                    -1 => app.tag_list_add(&ids),
+                    -2 => {
+                        if let Some(src) = app.related_source() {
+                            for t in &ids {
+                                app.matching_set(src, *t, true);
                             }
                         }
-                        pl => app.add_to_playlist(pl, &ids),
                     }
+                    pl => app.add_to_playlist(pl, &ids),
                 }
             }
             app.drag = None;
@@ -1011,6 +1009,15 @@ fn collection_category_groups(ui: &mut Ui, categories: &mut CollectionCategories
     pick
 }
 
+/// Drop actions are resolved later by the enclosing browser, after each nested scroll
+/// area's clip is gone. Keep only the part of the target the user can actually see.
+pub(crate) fn register_drop_target(ui: &Ui, drop: &mut Vec<(Rect, i64)>, rect: Rect, id: i64) {
+    let visible = rect.intersect(ui.clip_rect());
+    if visible.is_positive() {
+        drop.push((visible, id));
+    }
+}
+
 pub(crate) fn tree_pane(app: &mut App, ui: &mut Ui, drop: &mut Vec<(Rect, i64)>) {
     match app.side {
         SideMode::Collection => {
@@ -1087,6 +1094,8 @@ pub(crate) fn tree_pane(app: &mut App, ui: &mut Ui, drop: &mut Vec<(Rect, i64)>)
             if app.ext.tree_search_open {
                 crate::ui_library_ext::tree_search_field(app, ui);
             }
+            // Do not let the ScrollArea's paint margin extend into the fixed controls above it.
+            ui.set_clip_rect(ui.clip_rect().intersect(ui.available_rect_before_wrap()));
             egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
                 ui.spacing_mut().item_spacing.y = 0.0;
                 let all_sel = app.view == View::Collection;
@@ -1125,7 +1134,7 @@ pub(crate) fn tree_pane(app: &mut App, ui: &mut Ui, drop: &mut Vec<(Rect, i64)>)
         SideMode::Related => {
             // Tracks dropped on the Matching panel are linked with its source track.
             if app.view == View::Matching {
-                drop.push((ui.max_rect(), -2));
+                register_drop_target(ui, drop, ui.max_rect(), -2);
             }
             crate::ui_library_ext::related_panel(app, ui)
         }
@@ -1184,7 +1193,7 @@ fn node_rows(app: &mut App, ui: &mut Ui, parent: i64, depth: usize, drop: &mut V
         let is_cue = n.kind == NodeKind::Playlist && app.cue_playlist() == Some(n.id);
         let resp = tree_row(ui, depth, &n.name, count.filter(|_| app.prefs.playlist_track_counts), sel, if is_cue { TreeIcon::CuePlaylist } else { icon }, 15.0);
         if n.kind == NodeKind::Playlist {
-            drop.push((resp.rect, n.id));
+            register_drop_target(ui, drop, resp.interact_rect, n.id);
         }
         crate::ui_browser_ext::node_row_extras(app, ui, &n, resp.rect, sel, is_cue);
         // Dragging playlists and folders: top third = before, bottom third = after, middle of a
@@ -1194,7 +1203,7 @@ fn node_rows(app: &mut App, ui: &mut Ui, parent: i64, depth: usize, drop: &mut V
         }
         if let Some(dragged) = app.node_drag {
             if dragged != n.id {
-                if let Some(pp) = ui.ctx().pointer_latest_pos().filter(|pp| resp.rect.contains(*pp)) {
+                if let Some(pp) = ui.ctx().pointer_latest_pos().filter(|_| ui.rect_contains_pointer(resp.interact_rect)) {
                     let h = resp.rect.height();
                     let rel = (pp.y - resp.rect.min.y) / h;
                     let zone: i8 = if n.kind == NodeKind::Folder && (0.3..0.7).contains(&rel) { 0 } else if rel < 0.5 { -1 } else { 1 };
@@ -1319,10 +1328,9 @@ fn devices_tree(app: &mut App, ui: &mut Ui) {
         // Tracks or a playlist dragged from the library and dropped on the device open the
         // export for them.
         if app.drag.is_some() || app.node_drag.is_some() {
-            if let Some(pp) = ui.ctx().pointer_latest_pos().filter(|p| resp.rect.contains(*p)) {
+            if ui.rect_contains_pointer(resp.interact_rect) {
                 ui.painter().rect_stroke(resp.rect, 2.0, Stroke::new(1.5, BLUE), egui::StrokeKind::Inside);
                 if ui.input(|i| i.pointer.any_released()) {
-                    let _ = pp;
                     let (lists, tracks) = (app.node_drag.take().into_iter().collect::<Vec<i64>>(), app.drag.take().unwrap_or_default());
                     open_export(app, lists, tracks);
                     app.dialogs.export_root = Some(root.clone());
@@ -2080,6 +2088,7 @@ pub(crate) fn track_list(app: &mut App, ui: &mut Ui) {
         }
         let n = app.list.len();
         let rh = row_height(app);
+        let track_rows_clip = ui.available_rect_before_wrap().intersect(ui.clip_rect());
         let mut sa = egui::ScrollArea::vertical().id_salt("vscroll").auto_shrink([false, false]).scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden);
         let scroll_id = track_scroll_id(ui);
         sa = crate::ui_feel::scroll_anim(ui, sa, scroll_id);
@@ -2275,16 +2284,15 @@ pub(crate) fn track_list(app: &mut App, ui: &mut Ui) {
                     }
                     let ids: Vec<i64> = app.list.iter().copied().filter(|t| app.selected.contains(t)).collect();
                     app.drag = Some(ids);
+                    app.sub_drag = app.ext.in_sub;
                 }
-                if app.drag.is_some() && manual.is_some() {
+                if app.drag.is_some() && manual.is_some() && app.sub_drag == app.ext.in_sub && ui.rect_contains_pointer(resp.interact_rect.intersect(track_rows_clip)) {
                     if let Some(pp) = ui.ctx().pointer_latest_pos() {
-                        if rr.contains(pp) {
-                            let idx = if pp.y < rr.center().y { i } else { i + 1 };
-                            drop_line = Some(idx);
-                            let y = if pp.y < rr.center().y { rr.min.y } else { rr.max.y };
-                            let y = crate::ui_feel::slide_y(ui.id().with("drop_line"), y);
-                            ui.painter().line_segment([pos2(rr.min.x, y), pos2(rr.max.x, y)], Stroke::new(2.0, BLUE));
-                        }
+                        let before = pp.y < rr.center().y;
+                        drop_line = Some(if before { i } else { i + 1 });
+                        let y = if before { rr.min.y } else { rr.max.y };
+                        let y = crate::ui_feel::slide_y(ui.id().with("drop_line"), y);
+                        ui.painter().line_segment([pos2(rr.min.x, y), pos2(rr.max.x, y)], Stroke::new(2.0, BLUE));
                     }
                 }
                 if resp.secondary_clicked() && !app.selected.contains(&id) {
@@ -2310,6 +2318,7 @@ pub(crate) fn track_list(app: &mut App, ui: &mut Ui) {
             if ui.input(|i| i.pointer.any_released()) && app.prefs.sort_col == Col::Num && app.prefs.sort_asc && app.search.is_empty() {
                 app.move_in_playlist(pl, &ids, to);
                 app.drag = None;
+                app.sub_drag = false;
             }
         }
     });
@@ -2699,6 +2708,40 @@ mod collection_render_tests {
 
     fn input() -> egui::RawInput {
         egui::RawInput { screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(300.0, 240.0))), ..Default::default() }
+    }
+
+    #[test]
+    fn scrolled_playlist_drop_targets_exclude_the_toolbar_and_partial_row_edges() {
+        let ctx = context();
+        for _ in 0..2 {
+            let _ = ctx.run(input(), |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    let (toolbar, _) = ui.allocate_exact_size(vec2(220.0, 24.0), Sense::hover());
+                    let area = ui.available_rect_before_wrap();
+                    ui.set_clip_rect(ui.clip_rect().intersect(area));
+                    let mut rows = Vec::new();
+                    let mut targets = Vec::new();
+                    let scroll = egui::ScrollArea::vertical().vertical_scroll_offset(156.0).max_height(89.0).show(ui, |ui| {
+                        ui.spacing_mut().item_spacing.y = 0.0;
+                        for id in 0..32 {
+                            let response = tree_row(ui, 1, "Playlist", None, false, TreeIcon::Playlist, 15.0);
+                            rows.push(response.rect);
+                            register_drop_target(ui, &mut targets, response.rect, id);
+                        }
+                    });
+                    let toolbar_point = toolbar.center();
+                    assert!(rows.iter().any(|r| r.contains(toolbar_point)), "a raw offscreen row overlaps the toolbar");
+                    assert!(!targets.iter().any(|(r, _)| r.contains(toolbar_point)));
+                    assert!(targets.len() < rows.len());
+                    let (first, id) = targets[0];
+                    let whole = rows[id as usize];
+                    assert!(first.top() > whole.top(), "the first row is partially scrolled out");
+                    assert_eq!(first.top(), scroll.inner_rect.top());
+                    assert!(targets.iter().any(|(r, target)| *target == id && r.contains(first.center())));
+                    assert!(!targets.iter().any(|(r, _)| r.contains(pos2(first.center().x, first.top() - 1.0))));
+                });
+            });
+        }
     }
 
     #[test]

@@ -752,7 +752,7 @@ pub fn column_view(app: &mut App, ui: &mut Ui, drop: &mut Vec<(Rect, i64)>) {
                     let on = *chosen == Some(n.id);
                     let resp = cv_row(ui, &n.name, icon, count.filter(|_| app.prefs.playlist_track_counts), n.kind == NodeKind::Folder, on);
                     if n.kind == NodeKind::Playlist {
-                        drop.push((resp.rect, n.id));
+                        crate::ui_browser::register_drop_target(ui, drop, resp.interact_rect, n.id);
                     }
                     if resp.clicked() {
                         app.set_view(View::Playlist(n.id));

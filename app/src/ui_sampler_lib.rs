@@ -127,7 +127,6 @@ pub fn tree(app: &mut App, ui: &mut Ui, _drop: &mut Vec<(Rect, i64)>) {
     app.smplib_ready();
     let mut map: Vec<(String, Rect)> = vec![];
     let released = ui.input(|i| i.pointer.any_released());
-    let ptr = ui.ctx().pointer_latest_pos();
     ui.add_space(2.0);
     egui::ScrollArea::vertical().id_salt("sampler_tree").auto_shrink([false, false]).show(ui, |ui| {
         ui.spacing_mut().item_spacing.y = 0.0;
@@ -164,12 +163,12 @@ pub fn tree(app: &mut App, ui: &mut Ui, _drop: &mut Vec<(Rect, i64)>) {
                 }
             });
         }
-        list_rows(app, ui, 0, 1, &mut map, released, ptr);
+        list_rows(app, ui, 0, 1, &mut map, released);
     });
     app.mixx.lib.ui = map;
 }
 
-fn list_rows(app: &mut App, ui: &mut Ui, parent: i64, depth: usize, map: &mut Vec<(String, Rect)>, released: bool, ptr: Option<egui::Pos2>) {
+fn list_rows(app: &mut App, ui: &mut Ui, parent: i64, depth: usize, map: &mut Vec<(String, Rect)>, released: bool) {
     for l in sorted_children(app, parent) {
         let folder = l.attribute == ATTR_FOLDER;
         let open = app.mixx.lib.open.contains(&l.id);
@@ -213,11 +212,12 @@ fn list_rows(app: &mut App, ui: &mut Ui, parent: i64, depth: usize, map: &mut Ve
             app.mixx.lib.rename = Some((l.id, l.name.clone()));
         }
         // Tracks dragged from a list and let go on a sampler list are added to it.
-        if !folder && app.drag.is_some() && crate::ui_feel::drop_glow(ui, ui.id().with(("sampler_list_drop", l.id)), r.rect, ptr.is_some_and(|pp| r.rect.contains(pp)), 2.0) {
-            ui.painter().rect_stroke(r.rect, 2.0, Stroke::new(1.5, BLUE), egui::StrokeKind::Inside);
-        }
-        if !folder && app.drag.is_some() && ptr.is_some_and(|pp| r.rect.contains(pp)) {
-            if released {
+        if !folder && app.drag.is_some() && r.interact_rect.is_positive() {
+            let over = ui.rect_contains_pointer(r.interact_rect);
+            if crate::ui_feel::drop_glow(ui, ui.id().with(("sampler_list_drop", l.id)), r.interact_rect, over, 2.0) {
+                ui.painter().rect_stroke(r.interact_rect, 2.0, Stroke::new(1.5, BLUE), egui::StrokeKind::Inside);
+            }
+            if released && over {
                 let ids = app.drag.clone().unwrap_or_default();
                 let samples = app.smplib_samples_for_tracks(&ids);
                 app.smplib_add(l.id, samples, false);
@@ -243,7 +243,7 @@ fn list_rows(app: &mut App, ui: &mut Ui, parent: i64, depth: usize, map: &mut Ve
             }
         });
         if folder && open {
-            list_rows(app, ui, l.id, depth + 1, map, released, ptr);
+            list_rows(app, ui, l.id, depth + 1, map, released);
         }
     }
 }

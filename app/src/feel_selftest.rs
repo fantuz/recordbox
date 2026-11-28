@@ -37,8 +37,10 @@ fn env(name: &str) -> Option<String> {
 
 fn scenario() -> Option<&'static str> {
     static S: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
-    let on = std::env::var("PREPDECK_SHOT_PLAYER").map(|v| v.split(',').any(|x| x.trim() == "feeltest")).unwrap_or(false);
-    S.get_or_init(|| if on { env("PREPDECK_FEEL") } else { None }).as_deref()
+    S.get_or_init(|| {
+        let on = env("PREPDECK_SHOT_PLAYER").is_some_and(|v| v.split(',').any(|x| x.trim() == "feeltest"));
+        if on { env("PREPDECK_FEEL") } else { None }
+    }).as_deref()
 }
 
 /// True while the idle probe runs: main.rs then does not ask for the next frame.
@@ -46,8 +48,10 @@ pub fn idle_probe() -> bool {
     IDLE_ON.load(Relaxed)
 }
 
-fn bench() -> u32 {
-    env("PREPDECK_BENCH").and_then(|v| v.parse().ok()).unwrap_or(0)
+/// Collect at most 36,000 frame samples per diagnostic run (ten minutes at 60 Hz).
+pub fn bench_frames() -> u32 {
+    static COUNT: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
+    *COUNT.get_or_init(|| env("PREPDECK_BENCH").and_then(|v| v.parse::<u32>().ok()).unwrap_or(0).min(36_000))
 }
 
 fn at_env(name: &str) -> Option<Pos2> {
@@ -74,7 +78,7 @@ pub fn frame_start(app: &mut App, ctx: &egui::Context) {
         }
     }
     if frame == 2 {
-        if bench() > 0 {
+        if bench_frames() > 0 {
             *STATS.lock().unwrap() = Some(Stats::default());
         }
     }
@@ -98,7 +102,7 @@ pub fn frame_end(app: &mut App) {
     let Some((_, frame)) = app.screenshot.as_ref() else { return };
     let frame = *frame;
     // Play steadiness: the drawn and the real position of the active deck.
-    if bench() > 0 && app.playing() {
+    if bench_frames() > 0 && app.playing() {
         let shown = crate::ui_feel::shown_pos(app);
         let real = app.pos();
         if let Some(st) = STATS.lock().unwrap().as_mut() {
@@ -111,11 +115,10 @@ pub fn frame_end(app: &mut App) {
             st.last_pos = Some((shown, real));
         }
     }
-    let b = bench();
+    let b = bench_frames();
     if b > 0 && frame == 119 + b {
         report_stats(app);
     }
-
 }
 
 fn report_stats(app: &App) {
@@ -208,7 +211,7 @@ fn scenario_state(app: &mut App, s: &str, frame: u32) {
             _ => {}
         }
     }
-    if frame == T0 && bench() > 0 {
+    if frame == T0 && bench_frames() > 0 {
         if let Some(st) = STATS.lock().unwrap().as_mut() {
             // The histogram covers the interaction only.
             st.window = Some((T0, T0 + span(s)));

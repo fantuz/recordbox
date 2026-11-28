@@ -250,9 +250,7 @@ pub fn shown(id: Id, value: f32, jumped: bool) -> f32 {
     motion::glide(id.with("feel_v"), value, jump, motion::GLIDE, Kind::Move)
 }
 
-/// The value a knob is drawn at: exact while dragged (and for small external steps such as
-/// a MIDI knob's), gliding for a double-click reset or a jump from elsewhere (a label click
-/// that kills the band).
+/// A double-click reset can glide. Every MIDI movement and direct drag appears immediately.
 pub fn knob_shown(resp: &Response, v: f32) -> f32 {
     let jump = if resp.double_clicked() { 0.0 } else { f32::INFINITY };
     motion::glide(resp.id.with("feel_v"), v, jump, motion::GLIDE, Kind::Move)
@@ -649,7 +647,6 @@ fn watch_app(app: &App, ctx: &egui::Context) {
     watch("mode", mode, below_header, bg, 0.85);
     let h = if app.prefs.browser_only && !perf { 0.0 } else { app.player_height() };
     let player = Rect::from_min_size(below_header.min, vec2(screen.width(), h));
-    let browser = Rect::from_min_max(pos2(screen.min.x, player.max.y), pos2(screen.max.x, screen.max.y - 26.0));
     if perf {
         let lay = crate::ui_perf_layouts::layout(app) as u64;
         let panels = (app.prefs.perf_fx as u64) | (app.prefs.rec.panel as u64) << 1;
@@ -658,14 +655,16 @@ fn watch_app(app: &App, ctx: &egui::Context) {
     } else if !edit {
         watch("player_layout", (app.prefs.player_layout as u64) << 1 | app.prefs.browser_only as u64, below_header, bg, 0.8);
     }
-    if !edit && app.library_window.is_none() {
-        let rp = crate::ui_browser_ext::right_panel(app) as u64;
-        let sub = (app.prefs.bx.sub_horizontal as u64) << 8 | (app.prefs.column_browser as u64) << 9;
-        watch("browser_panels", rp | sub | (mode << 16), browser, bg, 0.5);
-        // A new sort order: the rows fade in rather than jump.
-        let sort = (app.prefs.sort_col as u64) << 1 | app.prefs.sort_asc as u64;
-        watch("sort", sort, Rect::from_min_max(pos2(browser.min.x + app.prefs.bx.tree_w + 5.0, browser.min.y + 44.0), pos2(browser.max.x - 25.0, browser.max.y)), crate::theme::BG1.c(), 0.55);
-    }
+}
+
+/// Watch only the library area in the viewport that actually paints it.
+pub fn watch_library(app: &App, browser: Rect) {
+    let rp = crate::ui_browser_ext::right_panel(app) as u64;
+    let sub = (app.prefs.bx.sub_horizontal as u64) << 8 | (app.prefs.column_browser as u64) << 9;
+    watch("browser_panels", rp | sub, browser, crate::theme::BG.c(), 0.5);
+    // A new sort order: the rows fade in rather than jump.
+    let sort = (app.prefs.sort_col as u64) << 1 | app.prefs.sort_asc as u64;
+    watch("sort", sort, Rect::from_min_max(pos2(browser.min.x + app.prefs.bx.tree_w + 5.0, browser.min.y + 44.0), pos2(browser.max.x - 25.0, browser.max.y)), crate::theme::BG1.c(), 0.55);
 }
 
 // ------------------------------------------------------------------ waveforms: zoom
@@ -809,7 +808,7 @@ pub fn art_tint(path: &str) -> Color32 {
 /// main.rs, at the start of `update`.
 pub fn begin_frame(app: &mut App, ctx: &egui::Context) {
     let shot = app.screenshot.as_ref().map(|(_, f)| {
-        let bench: u32 = bench_frames();
+        let bench = crate::feel_selftest::bench_frames();
         let pic = 120 + bench;
         // From five frames before the picture is asked for, everything snaps to its target.
         (*f, *f + 5 >= pic && (app.rb_job.is_none() || *f + 5 >= 1200 + bench))
@@ -838,11 +837,6 @@ pub fn library_frame(app: &mut App, ctx: &egui::Context, draw: impl FnOnce(&mut 
         paint_veils(ctx);
         motion::end_frame(app, ctx);
     });
-}
-
-fn bench_frames() -> u32 {
-    static B: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
-    *B.get_or_init(|| std::env::var("PREPDECK_BENCH").ok().and_then(|v| v.parse().ok()).unwrap_or(0))
 }
 
 // ------------------------------------------------------------------ Preferences
