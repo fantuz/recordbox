@@ -265,9 +265,9 @@ fn project_bar(app: &mut App, ui: &mut Ui, bar: Rect) {
     // Project name and the recent projects.
     let combo = Rect::from_min_size(bar.min + vec2(18.0, 4.0), vec2(400.0, 22.0));
     let name = app.edit.project.as_ref().map(|p| p.name()).unwrap_or_else(|| "New Project".into());
-    let g = kit::galley(ui, &name, caps(em(16.0)), WHITE, 0.0);
-    p.with_clip_rect(Rect::from_min_max(combo.min, pos2(combo.max.x - 14.0, combo.max.y))).galley(pos2(combo.min.x + 6.1, cy - g.size().y / 2.0 - 0.5), g, WHITE);
-    crate::icons_player::chevron_down(&p, pos2(combo.max.x - 4.25, cy + 0.5), 1.0, WHITE);
+    let g = kit::galley(ui, &name, caps(em(16.0)), WHITE.c(), 0.0);
+    p.with_clip_rect(Rect::from_min_max(combo.min, pos2(combo.max.x - 14.0, combo.max.y))).galley(pos2(combo.min.x + 6.1, cy - g.size().y / 2.0 - 0.5), g, WHITE.c());
+    crate::icons_player::chevron_down(&p, pos2(combo.max.x - 4.25, cy + 0.5), 1.0, WHITE.c());
     let resp = ui.interact(combo, ui.id().with("edit_project"), Sense::click());
     app.edit.map.rects.insert("project".into(), combo);
     let resp = if app.prefs.tooltips { resp.on_hover_text("Recently used projects:\nOpens a recently used project.") } else { resp };
@@ -309,11 +309,11 @@ fn project_bar(app: &mut App, ui: &mut Ui, bar: Rect) {
     }
     p.rect_filled(Rect::from_min_size(pos2(c + 111.0, y + 10.0), vec2(1.0, 10.0)), 0.0, FRAME);
     p.text(pos2(c + 141.5, cy), Align2::CENTER_CENTER, "Q", rb(em(16.0)), hex(0xFF0000));
-    p.text(pos2(c + 159.5, cy + 0.5), Align2::CENTER_CENTER, ":", rb(em(16.0)), WHITE);
+    p.text(pos2(c + 159.5, cy + 0.5), Align2::CENTER_CENTER, ":", rb(em(16.0)), WHITE.c());
     let q = Rect::from_min_size(pos2(c + 162.0, y + 6.0), vec2(100.0, 18.0));
     let cur = app.edit.project.as_ref().map(|p| p.session.quantize).unwrap_or(Quantize::Auto);
-    p.text(pos2(q.min.x + 6.0, cy), Align2::LEFT_CENTER, cur.label(), caps(em(13.0)), WHITE);
-    crate::icons_player::chevron_down(&p, pos2(q.max.x - 4.25, cy + 0.5), 1.0, WHITE);
+    p.text(pos2(q.min.x + 6.0, cy), Align2::LEFT_CENTER, cur.label(), caps(em(13.0)), WHITE.c());
+    crate::icons_player::chevron_down(&p, pos2(q.max.x - 4.25, cy + 0.5), 1.0, WHITE.c());
     let qresp = ui.interact(q, ui.id().with("edit_quantize"), Sense::click());
     app.edit.map.rects.insert("quantize".into(), q);
     let qresp = if app.prefs.tooltips {
@@ -354,7 +354,7 @@ fn player_panel(app: &mut App, ui: &mut Ui, r: Rect) {
     let art_path = app.edit.project.as_ref().map(|p| p.track.artwork.clone()).unwrap_or_default();
     let own = crate::ui_browser::artwork_texture(app, &art_path);
     match own.or_else(|| skin(app, "p0510_artwork50_.png")) {
-        Some(t) => paint_tex(&p, &t, art, WHITE),
+        Some(t) => paint_tex(&p, &t, art, WHITE.c()),
         None => {
             p.rect_filled(art, 0.0, hex(0x181818));
             crate::icons::vinyl(&p, art);
@@ -367,7 +367,7 @@ fn player_panel(app: &mut App, ui: &mut Ui, r: Rect) {
             p.rect_filled(art, 0.0, Color32::from_black_alpha(120));
             let er = Rect::from_center_size(art.center(), vec2(19.0, 19.0));
             match skin(app, "p10522_eject.png") {
-                Some(t) => paint_tex(&p, &t, er, WHITE),
+                Some(t) => paint_tex(&p, &t, er, WHITE.c()),
                 None => {
                     p.add(egui::Shape::convex_polygon(vec![pos2(er.min.x, er.center().y + 2.0), pos2(er.center().x, er.min.y), pos2(er.max.x, er.center().y + 2.0)], WHITE, Stroke::NONE));
                     p.rect_filled(Rect::from_min_max(pos2(er.min.x, er.max.y - 4.0), er.max), 0.0, WHITE);
@@ -384,7 +384,7 @@ fn player_panel(app: &mut App, ui: &mut Ui, r: Rect) {
     let cy = r.min.y + hinfo / 2.0;
     let title_clip = Rect::from_min_max(pos2(r.min.x + 80.0, r.min.y), pos2(time_x - 8.0, r.min.y + hinfo));
     let (title, tcol, tip) = match &app.edit.project {
-        Some(pr) => (pr.track.display_title(), WHITE, format!("Track Title: {}\nArtist: {}\nAlbum: {}", pr.track.display_title(), pr.track.artist, pr.track.album)),
+        Some(pr) => (pr.track.display_title(), WHITE.c(), format!("Track Title: {}\nArtist: {}\nAlbum: {}", pr.track.display_title(), pr.track.artist, pr.track.album)),
         None => ("Not Loaded.".to_string(), hex(0x630000), String::new()),
     };
     if app.edit.loading.is_some() && !loaded {
@@ -402,20 +402,20 @@ fn player_panel(app: &mut App, ui: &mut Ui, r: Rect) {
         None => (0.0, String::new(), String::new()),
     };
     let (big, small) = fmt_len(len_ms);
-    let gb = kit::galley(ui, &big, rb(em(16.0)), WHITE, 0.0);
-    let gs = kit::galley(ui, &small, rb(em(12.0)), WHITE, 0.0);
+    let gb = kit::galley(ui, &big, rb(em(16.0)), WHITE.c(), 0.0);
+    let gs = kit::galley(ui, &small, rb(em(12.0)), WHITE.c(), 0.0);
     let tx = time_x + (50.0 - (gb.size().x + gs.size().x)) / 2.0 + 1.75;
     let base = cy + gb.size().y / 2.0 + 0.5;
     let (bw, sh) = (gb.size().x, gs.size().y);
-    p.galley(pos2(tx, base - gb.size().y), gb, WHITE);
+    p.galley(pos2(tx, base - gb.size().y), gb, WHITE.c());
     // (The tenths sit on the same baseline as the minutes and seconds.)
-    p.galley(pos2(tx + bw, base - sh - 0.6), gs, WHITE);
+    p.galley(pos2(tx + bw, base - sh - 0.6), gs, WHITE.c());
     for x in [w - 123.0, w - 72.0] {
         p.rect_filled(Rect::from_min_size(r.min + vec2(x, 5.0), vec2(1.0, 20.0)), 0.0, FRAME);
     }
     if loaded {
-        p.text(pos2(r.min.x + w - 97.0, cy - 0.5), Align2::CENTER_CENTER, key, rb(em(16.0)), WHITE);
-        p.text(pos2(r.min.x + w - 38.0, cy - 0.5), Align2::CENTER_CENTER, bpm, rb(em(16.0)), WHITE);
+        p.text(pos2(r.min.x + w - 97.0, cy - 0.5), Align2::CENTER_CENTER, key, rb(em(16.0)), WHITE.c());
+        p.text(pos2(r.min.x + w - 38.0, cy - 0.5), Align2::CENTER_CENTER, bpm, rb(em(16.0)), WHITE.c());
     }
     if !loaded {
         app.edit.map.wave = Rect::NOTHING;
@@ -440,8 +440,10 @@ fn player_panel(app: &mut App, ui: &mut Ui, r: Rect) {
 fn drop_target(app: &mut App, ui: &mut Ui, r: Rect) {
     let over = ui.ctx().pointer_latest_pos().map(|pp| r.contains(pp)).unwrap_or(false);
     if let Some(ids) = app.drag.clone() {
+        if !app.deck_options.disable_load && crate::ui_feel::drop_glow(ui, ui.id().with("edit_drop"), r, over, 0.0) {
+            ui.painter().rect_stroke(r.shrink(1.0), 0.0, st(1.0, WHITE.c()), egui::StrokeKind::Inside);
+        }
         if over {
-            ui.painter().rect_stroke(r.shrink(1.0), 0.0, st(1.0, WHITE), egui::StrokeKind::Inside);
             if ui.input(|i| i.pointer.any_released()) {
                 if let Some(id) = ids.first() {
                     load_track(app, *id);
@@ -578,11 +580,11 @@ fn whole_waveform(app: &mut App, ui: &mut Ui, r: Rect) {
         let (bar, beat) = s.bar_beat(b.floor() as i64);
         let (m, t) = fmt_len(b * s.beat_ms());
         let text = format!("{m}{t}   {bar}.{beat}");
-        let g = kit::galley(ui, &text, rb(em(12.0)), WHITE, 0.0);
+        let g = kit::galley(ui, &text, rb(em(12.0)), WHITE.c(), 0.0);
         let tx = (pp.x + 6.0).min(r.max.x - g.size().x - 4.0);
         let lp = ui.ctx().layer_painter(egui::LayerId::new(egui::Order::Tooltip, egui::Id::new("edit_hover")));
         lp.rect_filled(Rect::from_min_size(pos2(tx - 3.0, r.min.y - 15.0), g.size() + vec2(6.0, 2.0)), 2.0, Color32::from_black_alpha(200));
-        lp.galley(pos2(tx, r.min.y - 14.0), g, WHITE);
+        lp.galley(pos2(tx, r.min.y - 14.0), g, WHITE.c());
     }
     if resp.clicked() || resp.dragged() {
         if let Some(pp) = resp.interact_pointer_pos() {
@@ -699,7 +701,7 @@ fn detail(app: &mut App, ui: &mut Ui, d: Rect) {
                 for dxy in [vec2(-1.0, 0.0), vec2(1.0, 0.0), vec2(0.0, -1.0), vec2(0.0, 1.0)] {
                     p.text(pos2(cx, y) + dxy, Align2::CENTER_TOP, &text, rb(em(size)), Color32::BLACK);
                 }
-                p.text(pos2(cx, y), Align2::CENTER_TOP, &text, rb(em(size)), WHITE);
+                p.text(pos2(cx, y), Align2::CENTER_TOP, &text, rb(em(size)), WHITE.c());
                 y += size + 1.0;
             }
         }
@@ -722,10 +724,10 @@ fn detail(app: &mut App, ui: &mut Ui, d: Rect) {
         p.rect_filled(b, 0.0, Color32::from_black_alpha(153));
         let whole = format!("{}.", s.bpm.floor() as i64);
         let frac = format!("{:02}", ((s.bpm - s.bpm.floor()) * 100.0).round() as i64 % 100);
-        let g = kit::galley(ui, &whole, rb(em(18.0)), WHITE, 0.0);
+        let g = kit::galley(ui, &whole, rb(em(18.0)), WHITE.c(), 0.0);
         let gw = g.size().x;
-        p.galley(pos2(b.min.x + 5.0, b.center().y - g.size().y / 2.0), g, WHITE);
-        p.text(pos2(b.min.x + 5.0 + gw, b.center().y + 2.0), Align2::LEFT_CENTER, frac, rb(em(13.0)), WHITE);
+        p.galley(pos2(b.min.x + 5.0, b.center().y - g.size().y / 2.0), g, WHITE.c());
+        p.text(pos2(b.min.x + 5.0 + gw, b.center().y + 2.0), Align2::LEFT_CENTER, frac, rb(em(13.0)), WHITE.c());
     }
     wave_input(app, ui, d, ruler, wave, &s, v0, ppb);
     zoom_control(app, ui, Rect::from_min_size(pos2(d.min.x, d.max.y - 38.0), vec2(116.0, 30.0)));
@@ -915,7 +917,7 @@ fn zoom_control(app: &mut App, ui: &mut Ui, r: Rect) {
         }
         let rst = Rect::from_min_size(r.min + vec2(35.0, 11.0), vec2(19.0, 8.0));
         let resp = ui.interact(rst.expand(4.0), ui.id().with("edit_rst"), Sense::click());
-        p.text(rst.center(), Align2::CENTER_CENTER, "RST", caps(em(10.0)), if resp.is_pointer_button_down_on() { ICON_DOWN } else if resp.hovered() { ICON_OVER } else { ICON });
+        p.text(rst.center(), Align2::CENTER_CENTER, "RST", caps(em(10.0)), if resp.is_pointer_button_down_on() { ICON_DOWN } else { crate::ui_feel::hl(&resp, ICON, ICON_OVER) });
         app.edit.map.rects.insert("zoom_rst".into(), rst);
         if resp.on_hover_text("Reset Zoom").clicked() {
             app.edit.queue.push(Cmd::ZoomReset);
@@ -926,7 +928,7 @@ fn zoom_control(app: &mut App, ui: &mut Ui, r: Rect) {
     }
     let ar = Rect::from_center_size(arrow.center(), vec2(10.0, 6.0));
     let resp = ui.interact(arrow, ui.id().with("edit_zoom_fold"), Sense::click());
-    let col = if resp.hovered() { ICON_OVER } else { hex(0x646464) };
+    let col = crate::ui_feel::hl(&resp, hex(0x646464), ICON_OVER);
     match skin(app, if open { "downArrow.svg" } else { "upArrow.svg" }) {
         Some(t) => paint_tex(&p, &t, ar, col),
         None => {
@@ -945,7 +947,7 @@ fn pad(app: &mut App, ui: &mut Ui, r: Rect, name: &str, asset: &str, label: &str
     let enabled = can(app, &cmd);
     let resp = ui.interact(r, ui.id().with(("edit_pad", name)), if enabled { Sense::click() } else { Sense::hover() });
     let p = ui.painter().clone();
-    let dim = if enabled { WHITE } else { WHITE.gamma_multiply(0.4) };
+    let dim = if enabled { WHITE.c() } else { WHITE.gamma_multiply(0.4) };
     match skin(app, asset) {
         Some(t) => paint_tex(&p, &t, r, dim),
         None => {
@@ -958,8 +960,8 @@ fn pad(app: &mut App, ui: &mut Ui, r: Rect, name: &str, asset: &str, label: &str
     }
     if enabled && resp.is_pointer_button_down_on() {
         p.rect_filled(r, 0.0, Color32::from_black_alpha(140));
-    } else if enabled && resp.hovered() {
-        p.rect_filled(r, 0.0, Color32::from_white_alpha(26));
+    } else if let Some(c) = crate::ui_feel::hover_fill_if(&resp, enabled, Color32::from_white_alpha(26)) {
+        p.rect_filled(r, 0.0, c);
     }
     app.edit.map.rects.insert(name.to_string(), r);
     let resp = if app.prefs.tooltips { resp.on_hover_text(tip) } else { resp };
@@ -1051,7 +1053,7 @@ fn tool_panel(app: &mut App, ui: &mut Ui, r: Rect, glyph_y: f32) {
     let strip = Rect::from_min_max(r.min, pos2(r.min.x + 22.0, r.max.y));
     let sresp = ui.interact(strip, ui.id().with("edit_tool_strip"), Sense::click());
     p.rect_filled(strip, 0.0, FRAME);
-    p.text(pos2(strip.center().x, glyph_y), Align2::CENTER_CENTER, if open { ">" } else { "<" }, rb(em(13.0)), if sresp.hovered() { WHITE } else { hex(0xC8C8C8) });
+    p.text(pos2(strip.center().x, glyph_y), Align2::CENTER_CENTER, if open { ">" } else { "<" }, rb(em(13.0)), crate::ui_feel::hl(&sresp, hex(0xC8C8C8), WHITE.c()));
     app.edit.map.rects.insert("tool_strip".into(), strip);
     let sresp = if app.prefs.tooltips { sresp.on_hover_text("Shows/hides the tool area.") } else { sresp };
     if sresp.clicked() {
@@ -1077,7 +1079,7 @@ fn tool_panel(app: &mut App, ui: &mut Ui, r: Rect, glyph_y: f32) {
     let count = app.edit.project.as_ref().map(|p| p.session.palettes.len()).unwrap_or(0);
     let del = app.edit.palette_delete && count > 0;
     let trash = Rect::from_min_size(pos2(r.max.x - 34.0, r.min.y + 9.0), vec2(14.0, 17.0));
-    if icon_btn(app, ui, trash, "trash", "edit/trashBox.svg", count > 0, del.then_some(BLUE), "Show/hide the palette delete button:\nShows/hides the delete button of each waveform.").clicked() {
+    if icon_btn(app, ui, trash, "trash", "edit/trashBox.svg", count > 0, del.then_some(BLUE.c()), "Show/hide the palette delete button:\nShows/hides the delete button of each waveform.").clicked() {
         app.edit.palette_delete = !del;
     }
     // Rows, then the "+" button; scrolls when there are more than fit.
@@ -1096,7 +1098,7 @@ fn tool_panel(app: &mut App, ui: &mut Ui, r: Rect, glyph_y: f32) {
         let p = ui.painter().clone();
         p.rect_filled(add, 0.0, BAR);
         let can_add = can(app, &Cmd::AddToPalette);
-        let col = if !can_add { ICON.gamma_multiply(0.4) } else if resp.is_pointer_button_down_on() { ICON_DOWN } else if resp.hovered() { ICON_OVER } else { ICON };
+        let col = if !can_add { ICON.gamma_multiply(0.4) } else if resp.is_pointer_button_down_on() { ICON_DOWN } else { crate::ui_feel::hl(&resp, ICON, ICON_OVER) };
         let c = add.center();
         p.rect_filled(Rect::from_center_size(c, vec2(7.0, 1.0)), 0.0, col);
         p.rect_filled(Rect::from_center_size(c, vec2(1.0, 7.0)), 0.0, col);
@@ -1110,7 +1112,7 @@ fn tool_panel(app: &mut App, ui: &mut Ui, r: Rect, glyph_y: f32) {
     if app.edit.gesture == Gesture::DragSelection {
         let over = ui.ctx().pointer_latest_pos().map(|pp| r.contains(pp)).unwrap_or(false);
         if over {
-            ui.painter().rect_stroke(body, 0.0, st(1.0, WHITE), egui::StrokeKind::Inside);
+            ui.painter().rect_stroke(body, 0.0, st(1.0, WHITE.c()), egui::StrokeKind::Inside);
         }
         if ui.input(|i| i.pointer.any_released()) {
             if over {
@@ -1224,10 +1226,10 @@ fn drag_ghost(app: &mut App, ui: &mut Ui) {
     };
     let (Some(label), Some(pp)) = (label, ui.ctx().pointer_latest_pos()) else { return };
     let lp = ui.ctx().layer_painter(egui::LayerId::new(egui::Order::Tooltip, egui::Id::new("edit_drag")));
-    let g = lp.layout_no_wrap(label, rb(11.0), WHITE);
+    let g = lp.layout_no_wrap(label, rb(11.0), WHITE.c());
     let rr = Rect::from_min_size(pp + vec2(12.0, 6.0), g.size() + vec2(10.0, 6.0));
     lp.rect_filled(rr, 2.0, Color32::from_rgba_unmultiplied(0x40, 0xA0, 0xFF, 178));
-    lp.galley(rr.min + vec2(5.0, 3.0), g, WHITE);
+    lp.galley(rr.min + vec2(5.0, 3.0), g, WHITE.c());
     if !ui.input(|i| i.pointer.any_down()) {
         app.edit.gesture = Gesture::None;
     }

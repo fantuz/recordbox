@@ -3,6 +3,7 @@ from pathlib import Path
 import json
 import os
 import plistlib
+import shutil
 import stat
 import struct
 import subprocess
@@ -63,6 +64,30 @@ class Archives(unittest.TestCase):
             self.assertTrue(all(name.startswith("Recordbox.app/") for name in archive.namelist()))
             self.assertFalse(any(private in name for name in archive.namelist() for private in ("master.db", ".mp3", ".th", "token", "target")))
         self.assertEqual(package.sha256(Path(result["archive"])), result["sha256"])
+
+    def test_locked_mp3_codec_sources_licenses_and_rebuild_instructions_ship_offline(self):
+        sources = self.source / "packaging/lame"
+        shutil.copytree(Path(package.__file__).parent / "lame", sources)
+        archives = sorted(sources.glob("*.crate"))
+        self.assertEqual(len(archives), 2)
+        with (self.source / "app/Cargo.lock").open("a", encoding="utf-8") as lock:
+            for archive in archives:
+                name, version = archive.stem.rsplit("-", 1)
+                lock.write(f'\n[[package]]\nname="{name}"\nversion="{version}"\n'
+                           f'source="registry+https://github.com/rust-lang/crates.io-index"\nchecksum="{package.sha256(archive)}"\n')
+        result = self.build()
+        with zipfile.ZipFile(result["archive"]) as package_zip:
+            location = "Recordbox.app/Contents/Resources/runtime-notices/LAME/"
+            self.assertEqual(package_zip.read(location + "recordbox-source.txt").decode().strip(),
+                             f"https://github.com/fantuz/recordbox/archive/{self.commit}.tar.gz")
+            for archive in archives:
+                self.assertEqual(package_zip.read(location + archive.name), archive.read_bytes())
+            for notice in ("GPL-3.0.txt", "LGPL-3.0.txt", "LAME-COPYING.txt", "LAME-LICENSE.txt", "README.md"):
+                self.assertTrue(package_zip.read(location + notice))
+        archives[0].write_bytes(b"fixture substituted after compiling")
+        self.output = self.root / "bad-output"
+        with self.assertRaisesRegex(package.PackageError, "mismatched locked codec source"):
+            self.build()
         self.assertEqual(Path(result["archive"] + ".sha256").read_text(), result["sha256"] + "  Recordbox-0.1.0-macos-arm64.zip\n")
 
     def test_macos_x86_64_is_a_separate_archive(self):

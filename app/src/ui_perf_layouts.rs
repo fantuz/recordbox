@@ -301,17 +301,10 @@ pub(crate) fn capture_mode() -> bool {
 /// a press on the running loop or on the slicer's domain picks it up to be dropped on a
 /// sampler slot (`WidgetWaveView::startCaptureDragging`). Called after the waveform has been
 /// drawn, so that this takes the drag before the waveform's own scrubbing.
-pub(crate) fn capture_pick(app: &mut App, ui: &mut Ui, lane: Rect, n: u8, vertical: bool) {
+fn capture_pick(app: &mut App, ui: &mut Ui, lane: Rect, n: u8, vertical: bool, pos: f64, pps: f64) {
     if !capture_mode() || app.deck.audio.is_none() {
         return;
     }
-    let Some((r, pos, pps)) = (if vertical { None } else { app.deck.detail_map }) .or_else(|| {
-        let span = span(app)?;
-        Some((lane, app.pos(), lane.height() as f64 / span))
-    }) else { return };
-    let along = |t: f64| -> f32 {
-        if vertical { lane.center().y + ((t - pos) * pps) as f32 } else { r.center().x + ((t - pos) * pps) as f32 }
-    };
     let ni = (n as usize).min(3);
     let slicer = app.pads.deck[ni].slicer.active;
     let region = if slicer {
@@ -327,8 +320,7 @@ pub(crate) fn capture_pick(app: &mut App, ui: &mut Ui, lane: Rect, n: u8, vertic
         }
         return;
     };
-    let (u0, u1) = (along(a), along(b));
-    let rr = if vertical { Rect::from_min_max(pos2(lane.min.x, u0.min(u1)), pos2(lane.max.x, u0.max(u1))) } else { Rect::from_min_max(pos2(u0.min(u1), lane.min.y), pos2(u0.max(u1), lane.max.y)) }.intersect(lane);
+    let rr = capture_region(lane, vertical, pos, pps, a, b);
     if rr.width() <= 0.0 || rr.height() <= 0.0 {
         return;
     }
@@ -342,6 +334,18 @@ pub(crate) fn capture_pick(app: &mut App, ui: &mut Ui, lane: Rect, n: u8, vertic
         let pp = ui.input(|i| i.pointer.press_origin()).unwrap_or(rr.center());
         CAPTURE_DRAG.with(|c| c.set(Some((n, slicer, pp))));
     }
+}
+
+/// Project the selected loop or slicer range using the transform already painted this frame.
+fn capture_region(lane: Rect, vertical: bool, pos: f64, pps: f64, a: f64, b: f64) -> Rect {
+    let center = if vertical { lane.center().y } else { lane.center().x };
+    let px = |t| center + ((t - pos) * pps) as f32;
+    let (lo, hi) = (px(a.min(b)), px(a.max(b)));
+    if vertical {
+        Rect::from_min_max(pos2(lane.min.x, lo), pos2(lane.max.x, hi))
+    } else {
+        Rect::from_min_max(pos2(lo, lane.min.y), pos2(hi, lane.max.y))
+    }.intersect(lane)
 }
 
 /// The capture being dragged: drawn under the pointer, and dropped on a sampler slot when the
@@ -368,7 +372,7 @@ pub(crate) fn capture_drop(app: &mut App, ui: &mut Ui, full: Rect) {
             let g = Rect::from_center_size(pp, vec2(90.0, 22.0));
             let lp = ui.ctx().layer_painter(egui::LayerId::new(egui::Order::Tooltip, egui::Id::new("capdrag")));
             lp.rect_filled(g, 2.0, Color32::from_rgba_unmultiplied(20, 115, 235, 160));
-            lp.text(g.center(), Align2::CENTER_CENTER, if slicer { "SLICER" } else { "LOOP" }, arial_b(11.0), WHITE);
+            lp.text(g.center(), Align2::CENTER_CENTER, if slicer { "SLICER" } else { "LOOP" }, arial_b(11.0), WHITE.c());
             if let Some(pad) = slot_at(pp) {
                 ui.ctx().set_cursor_icon(egui::CursorIcon::Copy);
                 let _ = pad;
@@ -399,9 +403,15 @@ pub(crate) fn skin(ctx: &egui::Context, name: &str) -> Option<egui::TextureHandl
         if let Some(t) = s.borrow().get(name) {
             return t.clone();
         }
-        let path = format!("{SKINS}/{name}");
+        // "<file>#light": the file with its greys in their Light values (see `recolour_svg`);
+        // "<file>#swap:<from>><to>,…": with the colours listed replaced.
+        let (file, how) = name.split_once('#').unwrap_or((name, ""));
+        let path = format!("{SKINS}/{file}");
         let tex = std::fs::read(&path).ok().and_then(|b| {
-            let img = if name.ends_with(".svg") {
+            let img = if file.ends_with(".svg") && !how.is_empty() {
+                let b = recolour_svg(&String::from_utf8_lossy(&b), how).into_bytes();
+                egui_extras::image::load_svg_bytes_with_size(&b, Some(egui::SizeHint::Scale(4.0.into()))).ok()?
+            } else if file.ends_with(".svg") {
                 // (Glyphs drawn in black are made white, so that every glyph can be tinted.)
                 let b = String::from_utf8_lossy(&b).replace("fill=\"black\"", "fill=\"white\"").replace("stroke=\"black\"", "stroke=\"white\"").into_bytes();
                 egui_extras::image::load_svg_bytes_with_size(&b, Some(egui::SizeHint::Scale(4.0.into()))).ok()?
@@ -414,6 +424,63 @@ pub(crate) fn skin(ctx: &egui::Context, name: &str) -> Option<egui::TextureHandl
         s.borrow_mut().insert(name.to_string(), tex.clone());
         tex
     })
+}
+
+/// rekordbox's artwork in the Light appearance: the code recolours each SVG with
+/// `Drawable::replaceColour` from a fixed colour to a colour id's value (e.g. the panel tiles
+/// in `MainComponent::lookAndFeelChanged` 0x100979750: #282828 -> 0x03000005, white ->
+/// 0x03000006). `how` is "light" (every grey to its `theme::ramp` value, "white" and "black"
+/// included) or "swap:RRGGBB>RRGGBB,…" (the pairs traced for that image).
+fn recolour_svg(s: &str, how: &str) -> String {
+    let swaps: Vec<(u32, u32)> = how.strip_prefix("swap:").map(|l| l.split(',').filter_map(|p| {
+        let (a, b) = p.split_once('>')?;
+        Some((u32::from_str_radix(a, 16).ok()?, u32::from_str_radix(b, 16).ok()?))
+    }).collect()).unwrap_or_default();
+    let map = |v: u32| -> u32 {
+        if how == "light" { crate::theme::ramp(v) } else { swaps.iter().find(|(a, _)| *a == v).map(|(_, b)| *b).unwrap_or(v) }
+    };
+    // Only literal paint values are colours. Gradients and masks may have six-digit
+    // hexadecimal IDs; rewriting their href or url(#...) would disconnect the artwork.
+    let mut out = String::with_capacity(s.len());
+    let mut copied = 0;
+    for (start, _) in s.match_indices(['#', 'w', 'b']) {
+        let before = s[..start].trim_end();
+        let (property, end) = if let Some(quote) = before.chars().next_back().filter(|c| matches!(c, '\'' | '"')) {
+            let Some(name) = before[..before.len() - 1].trim_end().strip_suffix('=') else { continue };
+            (name, Some(quote))
+        } else if let Some(name) = before.strip_suffix(':') {
+            (name, None)
+        } else {
+            continue;
+        };
+        let property = property.trim_end().rsplit(|c: char| !c.is_ascii_alphanumeric() && c != '-').next();
+        if !matches!(property, Some("fill" | "stroke" | "color" | "stop-color" | "flood-color" | "lighting-color")) {
+            continue;
+        }
+        let value = &s[start..];
+        let (len, rgb) = if let Some(hex) = value.strip_prefix('#').and_then(|v| v.get(..6)) {
+            let Ok(rgb) = u32::from_str_radix(hex, 16) else { continue };
+            (7, rgb)
+        } else if value.starts_with("white") {
+            (5, 0xFFFFFF)
+        } else if value.starts_with("black") {
+            (5, 0)
+        } else {
+            continue;
+        };
+        let terminator = value[len..].trim_start().chars().next();
+        if end.is_some() && terminator != end || end.is_none() && !matches!(terminator, Some(';' | '}' | '\'' | '"' | '!')) {
+            continue;
+        }
+        if map(rgb) != rgb {
+            use std::fmt::Write;
+            out.push_str(&s[copied..start]);
+            write!(out, "#{:06X}", map(rgb)).unwrap();
+            copied = start + len;
+        }
+    }
+    out.push_str(&s[copied..]);
+    out
 }
 
 /// Draw a skin image into `r`, tinted. Returns false when it is not available.
@@ -776,7 +843,7 @@ pub(crate) fn overview(app: &mut App, ui: &mut Ui, o: Pos2, w: f32, g: &DeckGeo,
     let x_of = |t: f64| x0 + (t / dur) as f32 * width;
     let area = Rect::from_min_max(pos2(x0, base - full_h), pos2(x1, base));
     if !crate::ui_player::paint_deck_overview(app, &p, area, dur, pos) && app.deck.track.is_some() {
-        p.text(pos2((x0 + x1) / 2.0, base - full_h / 2.0), Align2::CENTER_CENTER, "Analyzing…", FontId::proportional(11.0), DIM);
+        p.text(pos2((x0 + x1) / 2.0, base - full_h / 2.0), Align2::CENTER_CENTER, "Analyzing…", FontId::proportional(11.0), DIM.c());
     }
     // Separation progress: rekordbox's thin blue line under the waveform.
     if let (Some((sid, pr)), Some(tid)) = (app.stem.separating, app.deck.track) {
@@ -850,7 +917,7 @@ pub(crate) fn overview(app: &mut App, ui: &mut Ui, o: Pos2, w: f32, g: &DeckGeo,
         }
         // Playhead: a 1 pt line over the waveform's height.
         let px = x_of(pos);
-        p.rect_filled(Rect::from_min_max(pos2(px - 0.5, top), pos2(px + 0.5, base)), 0.0, hex(0xC8C8C8));
+        p.rect_filled(Rect::from_min_max(pos2(px - 0.5, top), pos2(px + 0.5, base)), 0.0, gy(0xC8C8C8));
         // The current cue (rekordbox's `CurrentCueImageUp`): 10.7 pt wide, from 4.5 pt above
         // the base line to 4 pt under it.
         let cx = x_of(app.deck.cue_point);
@@ -886,7 +953,7 @@ pub(crate) fn tab_column(ui: &mut Ui, r: Rect, grid_on: bool) -> Option<bool> {
     for (i, (rr, name)) in [(top, "padIcon.svg"), (bot, "gridIcon.svg")].into_iter().enumerate() {
         let resp = ui.interact(rr, ui.id().with(("decktab", i)), Sense::click());
         let on = (i == 1) == grid_on;
-        let col = if on { WHITE } else if resp.hovered() { hex(0x969696) } else { hex(0x646464) };
+        let col = if on { WHITE.c() } else { crate::ui_feel::hl(&resp, gy(0x646464), gy(0x969696)) };
         let ir = Rect::from_center_size(rr.center() + vec2(0.0, 0.5), vec2(12.0, 13.0));
         if !skin_at(&p, name, ir, col) {
             if i == 0 {
@@ -919,14 +986,14 @@ pub(crate) fn tab_column(ui: &mut Ui, r: Rect, grid_on: bool) -> Option<bool> {
 /// (read from the installed app); labels Arial 12 #969696, buttons Arial 14 #969696 on #191919.
 pub(crate) fn grid_panel(app: &mut App, ui: &mut Ui, area: Rect, n: u8, right: bool, d: Dk) {
     let p = ui.painter().with_clip_rect(area.intersect(ui.clip_rect()));
-    p.rect_filled(area, 0.0, hex(0x1E1E1E));
+    p.rect_filled(area, 0.0, gy(0x1E1E1E));
     let loaded = app.deck.track.is_some();
     let locked = app.deck.track.and_then(|t| app.track(t)).map(|t| t.grid_locked).unwrap_or(false);
     let has_grid = !app.deck.grid.is_empty();
     let x0 = if right { 16.0 } else { 0.0 } - 45.0 + if d == Dk::V4 { -10.0 } else { 0.0 };
     let y0 = if d == Dk::H4 { -253.0 } else { -248.0 };
     let at = |x: f32, y: f32, w: f32, h: f32| Rect::from_min_size(area.min + vec2(x0 + x, y0 + y), vec2(w, h));
-    let grey = hex(0x969696);
+    let grey = gy(0x969696);
     let label = |p: &Painter, r: Rect, t: &str| {
         p.text(pos2(r.min.x, r.center().y), Align2::LEFT_CENTER, t, arial(12.0 * 0.87), grey);
     };
@@ -938,10 +1005,10 @@ pub(crate) fn grid_panel(app: &mut App, ui: &mut Ui, area: Rect, n: u8, right: b
         let resp = ui.interact(r, ui.id().with(("gridp", n, id)), Sense::click());
         let tint = if on { Color32::WHITE } else { Color32::from_white_alpha(77) };
         if !skin_at(&p, name, r, tint) {
-            p.rect_filled(r, 2.0, hex(0x191919));
+            p.rect_filled(r, 2.0, gy(0x191919));
         }
-        if resp.hovered() && on {
-            p.rect_filled(r, 2.0, Color32::from_white_alpha(25));
+        if let Some(c) = crate::ui_feel::hover_fill_if(&resp, on, Color32::from_white_alpha(25)) {
+            p.rect_filled(r, 2.0, c);
         }
         let held = on && resp.is_pointer_button_down_on() && {
             let now = ui.input(|i| i.time);
@@ -961,8 +1028,8 @@ pub(crate) fn grid_panel(app: &mut App, ui: &mut Ui, area: Rect, n: u8, right: b
     // Column 1: Set (the 1.1 Bars), A-GAIN, PLAY/PAUSE.
     let tb = |ui: &mut Ui, p: &Painter, r: Rect, id: &str, t: &str, on: bool| -> egui::Response {
         let resp = ui.interact(r, ui.id().with(("gridt", n, id)), Sense::click());
-        p.rect_filled(r, 2.0, if resp.hovered() && on { lighten(hex(0x191919)) } else { hex(0x191919) });
-        p.text(r.center(), Align2::CENTER_CENTER, t, arial(14.0 * 0.87), if on { grey } else { hex(0x505050) });
+        p.rect_filled(r, 2.0, crate::ui_feel::hl_if(&resp, on, gy(0x191919), lighten(gy(0x191919))));
+        p.text(r.center(), Align2::CENTER_CENTER, t, arial(14.0 * 0.87), if on { grey } else { gy(0x505050) });
         resp
     };
     if tb(ui, &p, at(50.0, 273.0, 50.0, 26.0), "set11", "Set", enabled && has_grid).on_hover_text("Set the 1.1 Bars position to the current position.").clicked() && enabled && has_grid {
@@ -981,7 +1048,18 @@ pub(crate) fn grid_panel(app: &mut App, ui: &mut Ui, area: Rect, n: u8, right: b
     let pr = at(62.0, 335.0, 26.0, 26.0);
     let playing = app.playing();
     let presp = ui.interact(pr, ui.id().with(("gridplay", n)), Sense::click());
-    if !skin_at(&p, if playing { "pauseBtn.svg" } else if loaded { "playBtn.svg" } else { "playBtn_off.svg" }, pr, Color32::WHITE) {
+    // (Light: `PlayCuePanel::replaceColorTheme` 0x10000d404 swaps #282828 -> 0x03000090 and
+    // white -> 0x0300008E on the lit images, #1E1E1E -> 0x03000091 and #323232 -> 0x0300008F
+    // on the off one.)
+    let img = match (playing, loaded, is_light()) {
+        (true, _, false) => "pauseBtn.svg",
+        (false, true, false) => "playBtn.svg",
+        (false, false, false) => "playBtn_off.svg",
+        (true, _, true) => "pauseBtn.svg#swap:282828>C8C8C8,FFFFFF>000000",
+        (false, true, true) => "playBtn.svg#swap:282828>C8C8C8,FFFFFF>000000",
+        (false, false, true) => "playBtn_off.svg#swap:1E1E1E>F0F0F0,323232>787878",
+    };
+    if !skin_at(&p, img, pr, Color32::WHITE) {
         p.circle_stroke(pr.center(), 12.0, Stroke::new(1.0_f32, hex(0x2DD728)));
     }
     if tip(presp, app, "Play/Pause").clicked() && loaded {
@@ -992,7 +1070,7 @@ pub(crate) fn grid_panel(app: &mut App, ui: &mut Ui, area: Rect, n: u8, right: b
         app.grid_center();
     }
     let br = at(105.0, 304.0, 50.0, 26.0);
-    p.rect_filled(br, 2.0, hex(0x0F0F0F));
+    p.rect_filled(br, 2.0, gy(0x0F0F0F));
     if !app.deck.x.bpm_editing {
         let b = app.current_bpm();
         app.deck.bpm_text = if loaded && b > 0.0 { format!("{b:.2}") } else { String::new() };
@@ -1054,7 +1132,7 @@ pub(crate) fn grid_panel(app: &mut App, ui: &mut Ui, area: Rect, n: u8, right: b
     }
     let lr = at(381.0, 304.0, 50.0, 26.0);
     let lresp = ui.interact(lr, ui.id().with(("gridlock", n)), Sense::click());
-    p.rect_filled(lr, 2.0, hex(0x191919));
+    p.rect_filled(lr, 2.0, gy(0x191919));
     skin_at(&p, if locked { "grid_key_lockbtn_on.svg" } else { "grid_key_lockbtn_off.svg" }, Rect::from_center_size(lr.center(), vec2(12.0, 16.0)), Color32::WHITE);
     if tip(lresp, app, if locked { "Track Analysis, Key Analysis, and Beatgrid Adjustment are locked." } else { "Enable/Disable Track Analysis, Key Analysis, and Beatgrid Adjustment." }).clicked() && loaded {
         if let Some(id) = app.deck.track {
@@ -1072,10 +1150,10 @@ pub(crate) fn grid_panel(app: &mut App, ui: &mut Ui, area: Rect, n: u8, right: b
     let vol = app.prefs.metronome_vol.clamp(1, 3);
     let vr = at(407.0, 335.0, 24.0, 26.0);
     let vresp = ui.interact(vr, ui.id().with(("gridmetvol", n)), Sense::click());
-    p.rect_filled(vr, 2.0, hex(0x191919));
+    p.rect_filled(vr, 2.0, gy(0x191919));
     for k in 0..3u8 {
         let h = 4.0 + 3.0 * k as f32;
-        p.rect_filled(Rect::from_min_size(pos2(vr.center().x - 6.0 + 4.5 * k as f32, vr.center().y + 6.0 - h), vec2(3.0, h)), 0.0, if k < vol { grey } else { hex(0x3C3C3C) });
+        p.rect_filled(Rect::from_min_size(pos2(vr.center().x - 6.0 + 4.5 * k as f32, vr.center().y + 6.0 - h), vec2(3.0, h)), 0.0, if k < vol { grey } else { gy(0x3C3C3C) });
     }
     if tip(vresp, app, "Metronome Volume").clicked() {
         app.set_metronome_volume(vol % 3 + 1);
@@ -1090,11 +1168,11 @@ pub(crate) fn grid_panel(app: &mut App, ui: &mut Ui, area: Rect, n: u8, right: b
         app.phrase_cut();
     }
     let lresp = ui.interact(list_r, ui.id().with(("gridphkind", n)), Sense::click());
-    p.rect_filled(list_r, 2.0, hex(0x191919));
+    p.rect_filled(list_r, 2.0, gy(0x191919));
     if let Some((mood, kind)) = cur {
         p.with_clip_rect(list_r.shrink(2.0)).text(pos2(list_r.min.x + 5.0, list_r.center().y), Align2::LEFT_CENTER, crate::phrase::label(mood, kind), arial(12.0 * 0.87), grey);
     }
-    skin_at(&p, "pullDown.svg", Rect::from_center_size(pos2(list_r.max.x - 9.0, list_r.center().y), vec2(11.0, 10.0)), if has { grey } else { hex(0x505050) });
+    skin_at(&p, "pullDown.svg", Rect::from_center_size(pos2(list_r.max.x - 9.0, list_r.center().y), vec2(11.0, 10.0)), if has { grey } else { gy(0x505050) });
     if let Some((mood, kind)) = cur {
         crate::ui_browser::dropdown(ui, &lresp, "gridphkindpop", |ui: &mut Ui| {
             for (k, name) in crate::phrase::kinds(mood) {
@@ -1128,14 +1206,14 @@ pub(crate) fn control_strip(app: &mut App, ui: &mut Ui, area: Rect, vertical: bo
     let at = |x: f32, y: f32, bw: f32, bh: f32| Rect::from_min_size(r.min + vec2(x, y), vec2(bw, bh));
     let icon = |ui: &mut Ui, br: Rect, id: &str, name: &str, tipt: &str| -> egui::Response {
         let resp = ui.interact(br.expand(2.0), ui.id().with(("wctl", id)), Sense::click());
-        let col = if resp.hovered() { WHITE } else { hex(0xF0F0F0) };
+        let col = if resp.hovered() { WHITE } else { TEXT };
         let img = Rect::from_center_size(br.center(), if name.contains("zoom") { vec2(14.0, 14.0) } else if name.starts_with("wave_m") || name.starts_with("wave_c") { vec2(15.0, 15.0) } else { vec2(10.0, 10.0) });
-        if !skin_at(ui.painter(), name, img, col) {
+        if !skin_at(ui.painter(), name, img, col.c()) {
             let c = br.center();
             let pt = ui.painter();
             match name {
-                "wave_zoom_in.svg" => crate::icons_player::zoom(pt, c, 1.0, col, true),
-                "wave_zoom_out.svg" => crate::icons_player::zoom(pt, c, 1.0, col, false),
+                "wave_zoom_in.svg" => crate::icons_player::zoom(pt, c, 1.0, col.c(), true),
+                "wave_zoom_out.svg" => crate::icons_player::zoom(pt, c, 1.0, col.c(), false),
                 "wave_up.svg" => { pt.add(egui::Shape::line(vec![c + vec2(4.0, 1.5), c + vec2(0.0, -2.5), c + vec2(-4.0, 1.5)], Stroke::new(1.0_f32, col))); }
                 "wave_down.svg" => { pt.add(egui::Shape::line(vec![c + vec2(4.0, -1.5), c + vec2(0.0, 2.5), c + vec2(-4.0, -1.5)], Stroke::new(1.0_f32, col))); }
                 "wave_left.svg" => { pt.add(egui::Shape::line(vec![c + vec2(2.0, -4.0), c + vec2(-2.0, 0.0), c + vec2(2.0, 4.0)], Stroke::new(1.0_f32, col))); }
@@ -1180,7 +1258,7 @@ pub(crate) fn control_strip(app: &mut App, ui: &mut Ui, area: Rect, vertical: bo
                 zoom_step(app, -1);
             }
             let rresp = ui.interact(rst, ui.id().with(("wctl", "rst")), Sense::click());
-            p.text(rst.center(), Align2::CENTER_CENTER, "RST", arial(9.5), WHITE);
+            p.text(rst.center(), Align2::CENTER_CENTER, "RST", arial(9.5), WHITE.c());
             if tip(rresp, app, "Reset Zoom").clicked() {
                 zoom_step(app, 0);
             }
@@ -1272,10 +1350,8 @@ pub(crate) fn beat_count_text(app: &App, pos: f64) -> String {
 /// and y exchanged: what the horizontal one has along its top edge (beat marks, hot cue
 /// letters) is along the left edge here, what it has along its bottom (the current cue,
 /// memory cues, phrases) along the right. The waveform is one mesh, as `ui_kit::Bars`.
-pub(crate) fn draw_detail_vertical(app: &mut App, ui: &mut Ui, lane: Rect, pos: f64) {
+fn draw_detail_vertical(app: &mut App, ui: &mut Ui, lane: Rect, pos: f64, pps: f64, transport_pps: f64) {
     let p = ui.painter_at(lane);
-    let span = span(app).unwrap_or(2.0);
-    let pps = lane.height() as f64 / span;
     let cy = lane.center().y;
     // The beat marks' outer ends: 1 pt in from the left, 2.5 pt in from the right.
     let (xl, xr) = (lane.min.x + 1.0, lane.max.x - 2.5);
@@ -1308,7 +1384,7 @@ pub(crate) fn draw_detail_vertical(app: &mut App, ui: &mut Ui, lane: Rect, pos: 
         let mut lines = crate::ui_kit::Bars::new();
         for b in app.deck.beats[i0..].iter().take_while(|b| b.time <= tb) {
             let y = (y_of(b.time) - 0.5).round() + 0.5;
-            lines.rect(Rect::from_min_max(pos2(xl + 5.0, y - 0.5), pos2(xr - 5.0, y + 0.5)), hex(0x4C4C4C));
+            lines.rect(Rect::from_min_max(pos2(xl + 5.0, y - 0.5), pos2(xr - 5.0, y + 0.5)), gy(0x4C4C4C));
         }
         lines.paint(&p);
     }
@@ -1366,7 +1442,7 @@ pub(crate) fn draw_detail_vertical(app: &mut App, ui: &mut Ui, lane: Rect, pos: 
         }
         rows.paint(&p);
     } else if app.deck.track.is_some() {
-        p.text(pos2(xc, cy + 20.0), Align2::CENTER_CENTER, if app.deck.loading.is_some() { "Loading…" } else { "Analyzing…" }, arial(11.0), DIM);
+        p.text(pos2(xc, cy + 20.0), Align2::CENTER_CENTER, if app.deck.loading.is_some() { "Loading…" } else { "Analyzing…" }, arial(11.0), DIM.c());
     }
     // Vocal positions: a thin band just inside the beat marks (left); phrases: a band along
     // the right edge, each with its name at its start.
@@ -1425,11 +1501,11 @@ pub(crate) fn draw_detail_vertical(app: &mut App, ui: &mut Ui, lane: Rect, pos: 
             cap(&p, xl, y, 1.0, BAR_RED, true);
             cap(&p, xr, y, -1.0, BAR_RED, true);
             if app.deck.wave.is_some() {
-                p.rect_filled(Rect::from_min_max(pos2(xl + 5.0, y - 0.5), pos2(xr - 5.0, y + 0.5)), 0.0, WHITE);
+                p.rect_filled(Rect::from_min_max(pos2(xl + 5.0, y - 0.5), pos2(xr - 5.0, y + 0.5)), 0.0, ON_ACCENT);
             }
         } else {
-            cap(&p, xl, y, 1.0, hex(0x7C7C7C), false);
-            cap(&p, xr, y, -1.0, hex(0x7C7C7C), false);
+            cap(&p, xl, y, 1.0, gy(0x7C7C7C), false);
+            cap(&p, xr, y, -1.0, gy(0x7C7C7C), false);
         }
     }
     // Cues: hot cues as a line with the letter box at the left, memory cues as a triangle at
@@ -1482,7 +1558,7 @@ pub(crate) fn draw_detail_vertical(app: &mut App, ui: &mut Ui, lane: Rect, pos: 
         app.play_pause();
     }
     if !click_mode || alt || resp.context_menu_opened() {
-        let t = app.deck.x.menu_time.unwrap_or(pos);
+        let t = app.deck.x.menu_time.unwrap_or_else(|| app.pos());
         resp.context_menu(|ui| crate::ui_player2::wave_menu(app, ui, t));
     }
     // Cue markers can be dragged along the lane as on the horizontal waveforms (hot cues by
@@ -1519,7 +1595,7 @@ pub(crate) fn draw_detail_vertical(app: &mut App, ui: &mut Ui, lane: Rect, pos: 
             let start = app.deck.cues.iter().find(|c| c.id == id).map(|c| c.start).unwrap_or(0.0);
             app.deck.cue_drag = Some((id, app.deck.cues.clone(), t_of(pp.y) - start));
         } else {
-            app.deck.drag_origin = Some((pp.map(|p| p.y).unwrap_or(cy), pos));
+            app.deck.drag_origin = Some((pp.map(|p| p.y).unwrap_or(cy), app.pos()));
         }
     }
     if let Some((id, _, grab)) = app.deck.cue_drag.clone() {
@@ -1539,14 +1615,14 @@ pub(crate) fn draw_detail_vertical(app: &mut App, ui: &mut Ui, lane: Rect, pos: 
         }
     } else if let Some((y0, t0)) = app.deck.x.adjust_drag {
         if let (true, Some(pp)) = (resp.dragged(), resp.interact_pointer_pos()) {
-            app.loop_adjust_to(t0 + (pp.y - y0) as f64 / pps);
+            app.loop_adjust_to(t0 + (pp.y - y0) as f64 / transport_pps);
         }
         if resp.drag_stopped() || !resp.dragged() {
             app.deck.x.adjust_drag = None;
         }
     } else if resp.dragged() {
         if let (Some((y0, p0)), Some(pp)) = (app.deck.drag_origin, resp.interact_pointer_pos()) {
-            let t = p0 - (pp.y - y0) as f64 / pps;
+            let t = p0 - (pp.y - y0) as f64 / transport_pps;
             app.deck.x.scrub += t.clamp(0.0, dur.max(0.0)) - app.pos();
             app.seek(t);
         }
@@ -1565,8 +1641,9 @@ pub(crate) fn draw_detail_vertical(app: &mut App, ui: &mut Ui, lane: Rect, pos: 
             zoom_step(app, if scroll.y > 0.0 { -1 } else { 1 });
         } else if scroll.y.abs() > 0.5 || scroll.x.abs() > 0.5 {
             let d = if scroll.y.abs() >= scroll.x.abs() { scroll.y } else { scroll.x };
-            let t = pos - d as f64 / pps;
-            app.deck.x.scrub += t.clamp(0.0, dur.max(0.0)) - app.pos();
+            let current = app.pos();
+            let t = current - d as f64 / transport_pps;
+            app.deck.x.scrub += t.clamp(0.0, dur.max(0.0)) - current;
             app.seek(t);
         }
     }
@@ -1588,11 +1665,13 @@ pub(crate) fn h_lane(app: &mut App, ui: &mut Ui, lane: Rect, n: u8) {
     let mut child = ui.new_child(egui::UiBuilder::new().max_rect(lane).id_salt(("perfwave", n)));
     child.set_clip_rect(lane.intersect(ui.clip_rect()));
     app.with_deck(n, |app| {
-        let pos = app.pos();
+        let pos = if app.deck.x.dk.grid_tab { app.pos() } else { crate::ui_feel::shown_pos(app) };
         // (Cmd / Ctrl + wheel changes `prefs.zoom` in there: taken as a Performance zoom step.)
         let z = app.prefs.zoom;
         crate::ui_player::draw_detail_at(app, &mut child, r, pos, 0.0, crate::ui_player::DetailMode::Full);
-        capture_pick(app, &mut child, r, n, false);
+        if let Some((rect, shown, pps)) = app.deck.detail_map {
+            capture_pick(app, &mut child, rect, n, false, shown, pps);
+        }
         if app.prefs.zoom != z {
             let dir = if app.prefs.zoom < z { -1 } else { 1 };
             app.prefs.zoom = z;
@@ -1616,7 +1695,7 @@ pub(crate) fn h_lane(app: &mut App, ui: &mut Ui, lane: Rect, n: u8) {
         }
         // The beat count: ends 2 pt left of the playhead, at the top of the lane.
         let label = beat_count_text(app, pos);
-        child.painter().text(pos2(r.center().x - 2.0, lane.min.y + 8.0), Align2::RIGHT_CENTER, label, arial_b(16.4), BEAT_BLUE);
+        child.painter().text(pos2(r.center().x - 2.0, lane.min.y + 8.0), Align2::RIGHT_CENTER, label, arial_b(16.4), BEAT_BLUE.c());
     });
 }
 
@@ -1705,6 +1784,7 @@ fn vertical(app: &mut App, ui: &mut Ui) {
     // from 18 pt under its top (4 decks: the deck numbers' row) to 14 pt above its bottom (the
     // beat counts' row).
     let wa = fr.waves;
+    p.rect_filled(wa, 0.0, WAVE_BG);
     let ord = crate::prefs_bridge::wave_order(app, true, fr.count);
     let order: &[u8] = if four { &ord } else { &[0, 1] };
     let lane_w = wa.width() / fr.count as f32;
@@ -1717,15 +1797,21 @@ fn vertical(app: &mut App, ui: &mut Ui) {
         let mut child = ui.new_child(egui::UiBuilder::new().max_rect(lane).id_salt(("perfvwave", *n)));
         child.set_clip_rect(lane.intersect(ui.clip_rect()));
         let label = app.with_deck(*n, |app| {
-            let pos = app.pos();
-            draw_detail_vertical(app, &mut child, lane, pos);
-            capture_pick(app, &mut child, lane, *n, true);
+            let selected_span = span(app).unwrap_or(2.0);
+            let (pos, shown_span) = if app.deck.x.dk.grid_tab {
+                (app.pos(), selected_span)
+            } else {
+                (crate::ui_feel::shown_pos(app), crate::ui_feel::zoom_span(&child, lane, selected_span))
+            };
+            let pps = lane.height() as f64 / shown_span;
+            draw_detail_vertical(app, &mut child, lane, pos, pps, lane.height() as f64 / selected_span);
+            capture_pick(app, &mut child, lane, *n, true, pos, pps);
             beat_count_text(app, pos)
         });
         // The beat count under the lane: rekordbox's labels are 64 pt wide at 31 and 153 pt
         // (2 decks), 55 pt wide at 0, 58, 124 and 182 pt (4 decks), 12 pt above the bottom.
         let (lx, lw) = if four { ([0.0, 58.0, 124.0, 182.0][i], 55.0) } else { ([31.0, 153.0][i], 64.0) };
-        p.text(pos2(wa.min.x + lx + lw / 2.0, wa.max.y - 6.5), Align2::CENTER_CENTER, label, arial_b(if four { 8.5 } else { 9.0 }), BEAT_BLUE);
+        p.text(pos2(wa.min.x + lx + lw / 2.0, wa.max.y - 6.5), Align2::CENTER_CENTER, label, arial_b(if four { 8.5 } else { 9.0 }), BEAT_BLUE.c());
         if four && (i == 0 || i == 3) {
             // Deck numbers above the outer lanes (the control strip's buttons are over the inner ones).
             let loaded = app.deck_of(*n).track.is_some();
@@ -1770,6 +1856,8 @@ fn simple(app: &mut App, ui: &mut Ui) {
 /// The horizontal waveforms of a layout: one lane per deck, the deck numbers (4 decks) and
 /// the control strip over their left end. Returns the lanes.
 pub(crate) fn waves_h(app: &mut App, ui: &mut Ui, fr: &Frame) -> Vec<(u8, Rect)> {
+    // rekordbox's PlayerWaveView fills its area black in both appearances.
+    ui.painter().rect_filled(fr.waves, 0.0, WAVE_BG);
     let ls = h_lanes(fr.waves, fr.count);
     let mut lanes = vec![];
     // (View > Layout > Enlarged Waveform: the decks' order, top to bottom.)
@@ -1796,8 +1884,8 @@ pub(crate) fn lane_numbers(app: &App, ui: &Ui, wa: Rect, lanes: &[Rect]) {
         let n = order[i] as usize;
         let loaded = app.deck_of(n as u8).track.is_some();
         let col = if loaded { hex(0x969696) } else { hex(0x323232) };
-        p.rect_filled(Rect::from_min_max(pos2(wa.min.x, lane.min.y), pos2(lane.min.x, lane.max.y)), 0.0, BG);
-        p.rect_filled(Rect::from_min_max(pos2(lane.max.x, lane.min.y), pos2(wa.max.x, lane.max.y)), 0.0, BG);
+        p.rect_filled(Rect::from_min_max(pos2(wa.min.x, lane.min.y), pos2(lane.min.x, lane.max.y)), 0.0, WAVE_BG);
+        p.rect_filled(Rect::from_min_max(pos2(lane.max.x, lane.min.y), pos2(wa.max.x, lane.max.y)), 0.0, WAVE_BG);
         for x in [wa.min.x + 6.0, wa.max.x - 6.0] {
             p.text(pos2(x, lane.center().y), Align2::CENTER_CENTER, format!("{}", n + 1), arial_b(13.0), col);
         }
@@ -1935,12 +2023,12 @@ pub(crate) fn layout_selector(app: &mut App, ui: &mut Ui, bar: Rect) {
     let p = ui.painter().clone();
     let r = Rect::from_min_size(bar.min + vec2(130.0, 3.0), vec2(50.0, 22.0));
     let resp = ui.interact(r, ui.id().with("perflayout"), Sense::click());
-    if resp.hovered() {
-        p.rect_filled(r, 2.0, hex(0x1E1E1E));
+    if let Some(c) = crate::ui_feel::hover_fill(&resp, gy(0x1E1E1E)) {
+        p.rect_filled(r, 2.0, c);
     }
     let row = layout(app).row();
     let mark = |p: &Painter, row: usize, c: Pos2| {
-        if !skin_at(p, LAYOUT_MARKS[row], Rect::from_center_size(c, vec2(18.0, 18.0)), WHITE) {
+        if !skin_at(p, LAYOUT_MARKS[row], Rect::from_center_size(c, vec2(18.0, 18.0)), WHITE.c()) {
             // The marks as rekordbox draws them: 2 pt bars on an 18 pt square.
             let bar = |x: f32, y: f32, w: f32, h: f32| p.rect_filled(Rect::from_min_size(c + vec2(x - 9.0, y - 9.0), vec2(w, h)), 0.0, WHITE);
             match row {
@@ -1953,7 +2041,7 @@ pub(crate) fn layout_selector(app: &mut App, ui: &mut Ui, bar: Rect) {
         }
     };
     mark(&p, row, bar.min + vec2(145.0, 14.0));
-    crate::icons_player::chevron_down(&p, bar.min + vec2(170.75, 14.5), 1.0, WHITE);
+    crate::icons_player::chevron_down(&p, bar.min + vec2(170.75, 14.5), 1.0, WHITE.c());
     let tips_on = app.prefs.tooltips;
     crate::ui_browser::dropdown(ui, &resp, "perflayoutpop", |ui| {
         for (i, name) in LAYOUT_NAMES.iter().enumerate() {
@@ -1985,15 +2073,20 @@ pub(crate) fn layout_selector(app: &mut App, ui: &mut Ui, bar: Rect) {
 pub(crate) fn panel_tile(app: &App, ui: &Ui, i: usize, tr: Rect, lit: bool) {
     let name = ["FX", "mix_point_link", "sampler", "mixer", "rec"][i.min(4)];
     let on = lit && panel_enabled(app, i);
-    let file = format!("globalsection/glb_{name}_{}.svg", if on { "ON" } else { "OFF" });
+    let mut file = format!("globalsection/glb_{name}_{}.svg", if on { "ON" } else { "OFF" });
+    // (Light: the OFF tile's #282828 face and white glyph become ids 0x03000005 and
+    // 0x03000006, `MainComponent::lookAndFeelChanged`.)
+    if !on && is_light() {
+        file.push_str("#swap:282828>C8C8C8,FFFFFF>000000");
+    }
     // (Mix Point Link's tile is dim while its function is switched off in Preferences.)
-    let tint = if panel_enabled(app, i) && (i != 1 || crate::app_hooks::mpl_available(app)) { WHITE } else { Color32::from_white_alpha(90) };
+    let tint = if panel_enabled(app, i) && (i != 1 || crate::app_hooks::mpl_available(app)) { ON_ACCENT.c() } else { Color32::from_white_alpha(90) };
     let p = ui.painter();
     if skin(p.ctx(), &file).is_some() {
-        p.rect_filled(tr.expand(0.5), 0.0, BG1);
+        p.rect_filled(tr.expand(0.5), 0.0, HEADER);
         skin_at(p, &file, tr, tint);
     } else if !panel_enabled(app, i) {
-        p.rect_filled(tr, 2.0, BG1.gamma_multiply(0.7));
+        p.rect_filled(tr, 2.0, HEADER.gamma_multiply(0.7));
     }
 }
 
@@ -2012,8 +2105,8 @@ pub(crate) fn link_button(ui: &mut Ui, bar: Rect, last_right: f32) {
     let p = ui.painter().clone();
     let r = Rect::from_min_size(pos2(last_right + 35.0, bar.min.y + 4.0), vec2(40.0, 19.0));
     let resp = ui.interact(r, ui.id().with("ablink"), Sense::click());
-    p.text(pos2(r.center().x + 0.25, bar.min.y + 11.0), Align2::CENTER_CENTER, "LINK", arial_b(14.0), if resp.hovered() { WHITE } else { hex(0xF0F0F0) });
-    p.rect_filled(Rect::from_min_size(pos2(r.min.x, bar.min.y + 20.0), vec2(40.0, 2.0)), 0.0, hex(0x292929));
+    p.text(pos2(r.center().x + 0.25, bar.min.y + 11.0), Align2::CENTER_CENTER, "LINK", arial_b(14.0), if resp.hovered() { WHITE.c() } else { gy(0xF0F0F0) });
+    p.rect_filled(Rect::from_min_size(pos2(r.min.x, bar.min.y + 20.0), vec2(40.0, 2.0)), 0.0, gy(0x292929));
     let _ = resp.on_hover_text("Ableton Link: not built in recordbox yet.");
 }
 
@@ -2027,7 +2120,7 @@ pub(crate) fn performance_tools(app: &mut App, ui: &mut Ui, bar: Rect) {
         let r = Rect::from_center_size(pos2(rx - 482.0, ty + 16.0), vec2(30.0, 16.0));
         let resp = ui.interact(r, ui.id().with(("top", "PAD")), Sense::click());
         let on = app.pads.editor_open;
-        p.text(pos2(rx - 482.0, ty + 15.75), Align2::CENTER_CENTER, "PAD", arial_b(12.0), if on { WHITE } else if resp.hovered() { hex(0x8C8C8C) } else { hex(0x646464) });
+        p.text(pos2(rx - 482.0, ty + 15.75), Align2::CENTER_CENTER, "PAD", arial_b(12.0), if on { WHITE.c() } else { crate::ui_feel::hl(&resp, gy(0x646464), gy(0x8C8C8C)) });
         if resp.on_hover_text("Open/Close the PAD EDITOR window.").clicked() {
             app.pads.editor_open = !on;
         }
@@ -2036,9 +2129,9 @@ pub(crate) fn performance_tools(app: &mut App, ui: &mut Ui, bar: Rect) {
     // Information: rekordbox's hexagon (12 x 14); here it opens About.
     let ir = Rect::from_min_size(pos2(rx - 404.0, ty + 9.0), vec2(12.0, 14.0));
     let iresp = ui.interact(ir.expand(5.0), ui.id().with("topinfo"), Sense::click());
-    if !skin_at(&p, "globalArea_header_info.svg", ir, WHITE) {
+    if !skin_at(&p, "globalArea_header_info.svg", ir, WHITE.c()) {
         p.circle_filled(ir.center(), 7.0, WHITE);
-        p.text(ir.center(), Align2::CENTER_CENTER, "i", bold(10.0), BG1);
+        p.text(ir.center(), Align2::CENTER_CENTER, "i", bold(10.0), HEADER.c());
     }
     if iresp.on_hover_text("Display information window.").clicked() {
         app.dialogs.about = true;
@@ -2318,6 +2411,19 @@ mod tests {
     use super::*;
 
     #[test]
+    fn capture_hit_region_uses_the_rendered_playhead_and_scale_on_each_axis() {
+        let lane = Rect::from_min_max(pos2(10.0, 20.0), pos2(210.0, 140.0));
+        // Rendered head time 10.25 s, rendered scale 80 pt/s. The capture spans
+        // 9.75–10.5 s. Both marker endpoints must lie inside the capture target.
+        assert_eq!(capture_region(lane, false, 10.25, 80.0, 9.75, 10.5),
+                   Rect::from_min_max(pos2(70.0, 20.0), pos2(130.0, 140.0)));
+        assert_eq!(capture_region(lane, true, 10.25, 80.0, 9.75, 10.5),
+                   Rect::from_min_max(pos2(10.0, 40.0), pos2(210.0, 100.0)));
+        assert_eq!(capture_region(lane, true, 10.25, 80.0, 9.0, 11.0), lane);
+        assert!(capture_region(lane, false, 10.25, 80.0, 12.0, 13.0).width() <= 0.0);
+    }
+
+    #[test]
     fn layout_modes_and_selector_rows_are_rekordboxs() {
         let mut l = LayoutPrefs::default();
         let mut four = false;
@@ -2397,5 +2503,21 @@ mod tests {
             assert!(f.windows(2).all(|w| w[0] < w[1]));
         }
         assert_eq!((zoom_family(Layout::H4), zoom_family(Layout::Simple2), zoom_family(Layout::V2), zoom_family(Layout::V4)), (0, 0, 1, 2));
+    }
+}
+
+#[cfg(test)]
+mod light_tests {
+    #[test]
+    fn recolour_svg_swaps_and_ramps() {
+        let s = r##"<rect fill="#282828"/><path fill="white" stroke="#2DD728"/><use href="#abcdef1"/>"##;
+        let sw = super::recolour_svg(s, "swap:282828>C8C8C8,FFFFFF>000000");
+        assert!(sw.contains(r##"fill="#C8C8C8""##) && sw.contains(r##"fill="#000000""##) && sw.contains("#2DD728") && sw.contains("#abcdef1"));
+        let l = super::recolour_svg(s, "light");
+        assert!(l.contains(r##"fill="#C8C8C8""##) && l.contains(r##"fill="#000000""##) && l.contains("#2DD728"));
+        let gradient = r##"<linearGradient id="FFFFFF"><stop style="stop-color: white;" /></linearGradient><use href="#FFFFFF" fill="url(#FFFFFF)" stroke='black'/>"##;
+        let themed = super::recolour_svg(gradient, "light");
+        assert!(themed.contains(r##"href="#FFFFFF" fill="url(#FFFFFF)""##));
+        assert!(themed.contains("stop-color: #000000;") && themed.contains("stroke='#FFFFFF'"));
     }
 }

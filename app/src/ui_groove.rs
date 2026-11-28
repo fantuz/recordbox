@@ -37,9 +37,10 @@ use egui::{pos2, vec2, Align2, Color32, FontId, Painter, Pos2, Rect, Sense, Stro
 
 /// The panel's height (the player grows by one point more).
 pub const PANEL_H: f32 = 52.0;
-const PANEL: Color32 = hex(0x1E1E1E);
-const BTN_FILL: Color32 = hex(0x323232);
-const OUTLINE: Color32 = hex(0x969696);
+/// GROOVE CIRCUIT panel face: id not traced; the #1E1E1E pane colour 0x03000009 (D #1E1E1E L #F0F0F0).
+const PANEL: Tc = tc(0x1E1E1E, 0xF0F0F0);
+const BTN_FILL: Tc = gr(0x323232);
+const OUTLINE: Tc = gr(0x969696);
 const GREEN: Color32 = hex(0x00FF00);
 const SKINS: &str = "/Applications/rekordbox 7/rekordbox.app/Contents/Resources/skins";
 
@@ -161,8 +162,8 @@ fn outline_button(ui: &mut Ui, r: Rect, id: impl std::hash::Hash, label: &str, o
     let resp = ui.interact(r, ui.id().with(id), Sense::click());
     let (a, hot) = feedback(&resp, true);
     let p = ui.painter();
-    p.rect_stroke(r, 2.0, Stroke::new(1.0_f32, fade(if on { BLUE } else { OUTLINE }, a)), egui::StrokeKind::Inside);
-    p.text(r.center(), Align2::CENTER_CENTER, label, font, fade(WHITE, a));
+    p.rect_stroke(r, 2.0, Stroke::new(1.0_f32, fade(if on { BLUE.c() } else { OUTLINE.c() }, a)), egui::StrokeKind::Inside);
+    p.text(r.center(), Align2::CENTER_CENTER, label, font, fade(WHITE.c(), a));
     if hot {
         p.rect_filled(r, 2.0, Color32::from_white_alpha(26));
     }
@@ -174,8 +175,8 @@ fn icon_button(app: &mut App, ui: &mut Ui, r: Rect, id: impl std::hash::Hash, na
     let resp = ui.interact(r, ui.id().with(id), if enabled { sense } else { Sense::hover() });
     let (a, hot) = feedback(&resp, enabled);
     let p = ui.painter().clone();
-    p.rect_filled(r, 2.0, fade(BTN_FILL, a));
-    icon(app, &p, name, at.translate(r.min.to_vec2()), fade(WHITE, a));
+    p.rect_filled(r, 2.0, fade(BTN_FILL.c(), a));
+    icon(app, &p, name, at.translate(r.min.to_vec2()), fade(WHITE.c(), a));
     if hot {
         p.rect_filled(r, 2.0, Color32::from_white_alpha(26));
     }
@@ -207,16 +208,16 @@ fn small_knob(ui: &mut Ui, r: Rect, id: impl std::hash::Hash, value: f32, enable
     // 3.927 to 8.639 rad from 12 o'clock, clockwise (the slot knob's rotary range): 270 degrees.
     let ang = |x: f32| (-225.0 + 270.0 * x).to_radians();
     let pts: Vec<Pos2> = (0..=30).map(|i| c + vec2(ang(i as f32 / 30.0).cos(), ang(i as f32 / 30.0).sin()) * 7.0).collect();
-    p.add(egui::Shape::line(pts, Stroke::new(2.0_f32, fade(if resp.hovered() || resp.dragged() { hex(0x464646) } else { BTN_FILL }, a))));
+    p.add(egui::Shape::line(pts, Stroke::new(2.0_f32, fade(crate::ui_feel::hot_col(&resp, BTN_FILL.c(), gy(0x464646)), a))));
     let t = ang(v);
-    p.line_segment([c + vec2(t.cos(), t.sin()) * 3.5, c + vec2(t.cos(), t.sin()) * 8.0], Stroke::new(1.6_f32, fade(WHITE, a)));
+    p.line_segment([c + vec2(t.cos(), t.sin()) * 3.5, c + vec2(t.cos(), t.sin()) * 8.0], Stroke::new(1.6_f32, fade(WHITE.c(), a)));
     (out, resp)
 }
 
 /// The top bar's GROOVE CIRCUIT tile (rekordbox's `glb_gc_ON.svg` / `glb_gc_OFF.svg`).
 pub fn header_icon(app: &mut App, ui: &Ui, tile: Rect, lit: bool) {
     let p = ui.painter().clone();
-    icon(app, &p, if lit { "gc_on" } else { "gc_off" }, tile, WHITE);
+    icon(app, &p, if lit { "gc_on" } else { "gc_off" }, tile, WHITE.c());
 }
 
 /// The top bar's button pressed: show or hide the panel.
@@ -239,7 +240,7 @@ pub fn row(app: &mut App, ui: &mut Ui, decks: &[Rect]) {
     for (n, dr) in decks.iter().enumerate().take(DECKS) {
         let r = Rect::from_min_max(pos2(dr.min.x + 1.0, dr.max.y - PANEL_H), pos2(dr.max.x - 1.0, dr.max.y));
         // (The strip above the panel belongs to the deck: its pad area's colour.)
-        ui.painter().rect_filled(Rect::from_min_max(pos2(dr.min.x, r.min.y - 1.0), dr.max), 0.0, hex(0x141414));
+        ui.painter().rect_filled(Rect::from_min_max(pos2(dr.min.x, r.min.y - 1.0), dr.max), 0.0, gy(0x141414));
         let mut child = ui.new_child(egui::UiBuilder::new().max_rect(r).id_salt(("groove", n)));
         child.set_clip_rect(r.intersect(ui.clip_rect()));
         panel(app, &mut child, r, n);
@@ -289,7 +290,7 @@ fn panel(app: &mut App, ui: &mut Ui, r: Rect, deck: usize) {
     if tip(outline_button(ui, at(72, 30, 60, 18), "multi", "MULTI", set.multi, caps(9.0)), app, "DRUM SWAP MULTI MODE:\nPlays multiple DRUM SWAP SLOTs.").clicked() {
         app.groove_set_multi(deck, true);
     }
-    p.text(at(v9 + 132, 30, 33, 18).left_center(), Align2::LEFT_CENTER, "GAIN", caps(9.0), WHITE);
+    p.text(at(v9 + 132, 30, 33, 18).left_center(), Align2::LEFT_CENTER, "GAIN", caps(9.0), WHITE.c());
     let (gv, gresp) = small_knob(ui, at(v9 + 165, 30, 18, 18), "gain", app.gc.gain[deck], true);
     if let Some(v) = gv {
         app.groove_set_deck_gain(deck, v);
@@ -304,7 +305,7 @@ fn panel(app: &mut App, ui: &mut Ui, r: Rect, deck: usize) {
     for (rr, name) in [(lr, "load"), (sv, "save")] {
         let hovered = ui.rect_contains_pointer(rr);
         p.rect_filled(rr, 2.0, BTN_FILL);
-        icon(app, &p, name, icon_at.translate(rr.min.to_vec2()), WHITE);
+        icon(app, &p, name, icon_at.translate(rr.min.to_vec2()), WHITE.c());
         if hovered {
             p.rect_filled(rr, 2.0, Color32::from_white_alpha(26));
         }
@@ -325,14 +326,14 @@ fn panel(app: &mut App, ui: &mut Ui, r: Rect, deck: usize) {
     if lit {
         p.rect_stroke(name_r, round_l, Stroke::new(1.0_f32, BLUE), egui::StrokeKind::Inside);
     }
-    p.with_clip_rect(name_r).text(name_r.center(), Align2::CENTER_CENTER, groove::RFX_NAMES[kind], caps(9.0), WHITE);
+    p.with_clip_rect(name_r).text(name_r.center(), Align2::CENTER_CENTER, groove::RFX_NAMES[kind], caps(9.0), WHITE.c());
     if nresp.hovered() && !lit {
         p.rect_filled(name_r, round_l, Color32::from_white_alpha(26));
     }
     tip(nresp, app, "DRUM RELEASE FX On/Off button:\nEffects are applied on DRUMS Stem.");
     let aresp = ui.interact(arrow_r, ui.id().with("rfxsel"), Sense::click());
     p.rect_filled(arrow_r, round_r, BTN_FILL);
-    icon(app, &p, "pulldown", Rect::from_min_size(arrow_r.min + vec2(4.0, 7.0), vec2(8.0, 4.0)), WHITE);
+    icon(app, &p, "pulldown", Rect::from_min_size(arrow_r.min + vec2(4.0, 7.0), vec2(8.0, 4.0)), WHITE.c());
     if aresp.hovered() {
         p.rect_filled(arrow_r, round_r, Color32::from_white_alpha(26));
     }
@@ -352,7 +353,7 @@ fn panel(app: &mut App, ui: &mut Ui, r: Rect, deck: usize) {
     for (rr, name, dir, text) in [(dn, "left", -1, "DRUM RELEASE FX Beat Down button:\nChange the beat value to sync the effect sound with."), (up, "right", 1, "DRUM RELEASE FX Beat Up button:\nChange the beat value to sync the effect sound with.")] {
         let resp = ui.interact(rr, ui.id().with(("rfxbeat", dir)), Sense::click());
         let (a, hot) = feedback(&resp, true);
-        icon(app, &p, name, chev.translate(rr.min.to_vec2()), fade(WHITE, a));
+        icon(app, &p, name, chev.translate(rr.min.to_vec2()), fade(WHITE.c(), a));
         if hot {
             p.rect_filled(rr, 2.0, Color32::from_white_alpha(26));
         }
@@ -360,7 +361,7 @@ fn panel(app: &mut App, ui: &mut Ui, r: Rect, deck: usize) {
             app.groove_fx_beat_step(deck, dir);
         }
     }
-    p.text(Rect::from_min_max(dn.right_top(), up.left_bottom()).center(), Align2::CENTER_CENTER, groove::beat_text(beat), caps(10.0), WHITE);
+    p.text(Rect::from_min_max(dn.right_top(), up.left_bottom()).center(), Align2::CENTER_CENTER, groove::beat_text(beat), caps(10.0), WHITE.c());
 }
 
 /// The scripted run holds the release FX without a pointer on it (see `shot_events`).
@@ -427,16 +428,16 @@ fn slot(app: &mut App, ui: &mut Ui, r: Rect, deck: usize, idx: usize, st: groove
             p.rect_filled(Rect::from_min_size(pos2(body.min.x, r.max.y - 2.0), vec2(body.width() * st.progress.clamp(0.0, 1.0), 2.0)), 0.0, GREEN);
         }
         if let (true, Some(s)) = (app.prefs.groove.show_title, info.as_ref()) {
-            p.with_clip_rect(Rect::from_min_max(pos2(r.min.x + 4.0, r.min.y), body.max)).text(pos2(r.min.x + 4.0, r.min.y + 8.0), Align2::LEFT_CENTER, &s.name, bold(9.0), WHITE);
+            p.with_clip_rect(Rect::from_min_max(pos2(r.min.x + 4.0, r.min.y), body.max)).text(pos2(r.min.x + 4.0, r.min.y + 8.0), Align2::LEFT_CENTER, &s.name, bold(9.0), WHITE.c());
         }
     } else {
         // Play (stop while it plays), Eject, the slot's GAIN, BPM | beats.
         let pr = Rect::from_min_size(r.min + vec2(4.0, 2.0), vec2(24.0, 14.0));
         let presp = ui.interact(pr, ui.id().with(("play", idx)), if loaded { Sense::click() } else { Sense::hover() });
         let (a, hot) = feedback(&presp, loaded);
-        p.rect_filled(pr, 2.0, fade(BTN_FILL, a));
+        p.rect_filled(pr, 2.0, fade(BTN_FILL.c(), a));
         p.rect_stroke(pr.shrink(0.5), 2.0, Stroke::new(1.0_f32, fade(GREEN, a)), egui::StrokeKind::Middle);
-        icon(app, &p, if playing || waiting { "stop" } else { "play" }, Rect::from_min_size(pr.min + vec2(8.0, 3.0), vec2(8.0, 8.0)), fade(WHITE, a));
+        icon(app, &p, if playing || waiting { "stop" } else { "play" }, Rect::from_min_size(pr.min + vec2(8.0, 3.0), vec2(8.0, 8.0)), fade(WHITE.c(), a));
         if hot {
             p.rect_filled(pr, 2.0, Color32::from_white_alpha(26));
         }
@@ -468,9 +469,9 @@ fn slot(app: &mut App, ui: &mut Ui, r: Rect, deck: usize, idx: usize, st: groove
             let bpm_r = Rect::from_min_size(pos2(r.max.x - 35.0, r.min.y + 4.0), vec2(17.0, 11.0));
             let beat_r = Rect::from_min_size(pos2(r.max.x - 15.0, r.min.y + 4.0), vec2(12.0, 11.0));
             if s.bpm > 0.0 {
-                p.text(bpm_r.center(), Align2::CENTER_CENTER, format!("{:.0}", s.bpm), bold(9.0), WHITE);
+                p.text(bpm_r.center(), Align2::CENTER_CENTER, format!("{:.0}", s.bpm), bold(9.0), WHITE.c());
                 p.line_segment([pos2(r.max.x - 15.5, r.min.y + 5.0), pos2(r.max.x - 15.5, r.min.y + 14.0)], Stroke::new(1.0_f32, WHITE));
-                p.text(beat_r.center(), Align2::CENTER_CENTER, format!("{beats}"), bold(9.0), WHITE);
+                p.text(beat_r.center(), Align2::CENTER_CENTER, format!("{beats}"), bold(9.0), WHITE.c());
             }
             let info_resp = ui.interact(Rect::from_min_max(bpm_r.min, beat_r.max), ui.id().with(("slotinfo", idx)), Sense::hover());
             info_resp.on_hover_text(format!("Track title: {}\nBPM: {:.0}\nNumber of beats: {:2}", s.name, s.bpm, beats));
@@ -485,13 +486,14 @@ fn slot(app: &mut App, ui: &mut Ui, r: Rect, deck: usize, idx: usize, st: groove
         }
     }
     // A track dragged from the browser or from a deck loads here.
-    if let Some(ids) = app.drag.clone() {
-        if ui.rect_contains_pointer(r) {
+    if let Some(ids) = &app.drag {
+        let over = ui.rect_contains_pointer(r);
+        if crate::ui_feel::drop_glow(ui, ui.id().with(("groove_drop", deck, idx)), r, over, 0.0) {
             p.rect_stroke(r, 0.0, Stroke::new(2.0_f32, BLUE), egui::StrokeKind::Inside);
-            if ui.input(|i| i.pointer.any_released()) {
-                if let Some(id) = ids.first() {
-                    app.groove_load_track(deck, idx, *id);
-                }
+        }
+        if over && ui.input(|i| i.pointer.any_released()) {
+            if let Some(id) = ids.first().copied() {
+                app.groove_load_track(deck, idx, id);
             }
         }
     }
@@ -680,7 +682,7 @@ pub fn wave_column(app: &mut App, ui: &mut Ui, o: Pos2, waves_h: f32) -> bool {
     for (name, r, id) in [("up", at(6, 2, 10, 10), "gcpgup"), ("down", at(6, h - 12, 10, 10), "gcpgdn")] {
         let resp = ui.interact(r.expand(2.0), ui.id().with(id), Sense::click());
         let (a, _) = feedback(&resp, true);
-        icon(app, &p, name, Rect::from_center_size(r.center(), vec2(9.0, 5.0)), fade(if resp.hovered() { WHITE } else { hex(0xAAAAAA) }, a));
+        icon(app, &p, name, Rect::from_center_size(r.center(), vec2(9.0, 5.0)), fade(crate::ui_feel::hl(&resp, gy(0xAAAAAA), WHITE.c()), a));
         if resp.clicked() {
             app.gc.page = if app.gc.page == 2 { 0 } else { 2 };
         }
@@ -707,7 +709,7 @@ pub fn capture_buttons(app: &mut App, ui: &mut Ui, o: Pos2, waves_h: f32) {
         let on = app.gc.capture_on == Some(n as u8);
         let resp = ui.interact(r, ui.id().with(("gccap", n)), Sense::click());
         let (a, hot) = feedback(&resp, true);
-        icon(app, &p, "capture", Rect::from_min_size(r.min, vec2(14.0, 13.0)), fade(if on { BLUE } else { WHITE }, a));
+        icon(app, &p, "capture", Rect::from_min_size(r.min, vec2(14.0, 13.0)), fade(if on { BLUE.c() } else { WHITE.c() }, a));
         if hot {
             p.rect_filled(r, 2.0, Color32::from_white_alpha(26));
         }
@@ -719,9 +721,9 @@ pub fn capture_buttons(app: &mut App, ui: &mut Ui, o: Pos2, waves_h: f32) {
     let lr = at(4, (h - 14) / 2, 14, 14);
     let resp = ui.interact(lr, ui.id().with("gccaplen"), Sense::click());
     let (a, hot) = feedback(&resp, true);
-    p.rect_stroke(lr, 2.0, Stroke::new(1.0_f32, fade(hex(0x646464), a)), egui::StrokeKind::Inside);
-    p.text(lr.center() - vec2(0.5, 0.5), Align2::CENTER_CENTER, format!("{}", app.gc.capture_len), FontId::proportional(8.0), fade(WHITE, a));
-    icon(app, &p, "caplen", Rect::from_min_size(lr.min + vec2(10.0, 11.0), vec2(3.0, 2.0)), fade(WHITE, a));
+    p.rect_stroke(lr, 2.0, Stroke::new(1.0_f32, fade(gy(0x646464), a)), egui::StrokeKind::Inside);
+    p.text(lr.center() - vec2(0.5, 0.5), Align2::CENTER_CENTER, format!("{}", app.gc.capture_len), FontId::proportional(8.0), fade(WHITE.c(), a));
+    icon(app, &p, "caplen", Rect::from_min_size(lr.min + vec2(10.0, 11.0), vec2(3.0, 2.0)), fade(WHITE.c(), a));
     if hot {
         p.rect_filled(lr, 2.0, Color32::from_white_alpha(26));
     }

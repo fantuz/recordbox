@@ -337,13 +337,19 @@ pub fn sync(app: &mut App) {
     }
     // PAD FX and MERGE FX work with the FX panel hidden too; outside Performance mode
     // nothing does.
-    let pad_wanted = app.px.fxx.pad.wanted();
+    let pad_wanted = if perf { app.px.fxx.pad.wanted() } else { [false; 4] };
     let pad_sets = if perf { app.px.fxx.pad.sets(&app.prefs.fx.padfx) } else { [fx::PadSet::NONE; 4] };
     let merge = perf && app.prefs.fx.mfx.enabled;
     if !on && !merge && !pad_wanted.iter().any(|w| *w) {
         if let Some(mut g) = fx::RACK.try_lock() {
             if let Some(r) = g.as_mut() {
                 r.enabled = false;
+                r.pad_set = [fx::PadSet::NONE; 4];
+                r.master_release = None;
+                if let Some(m) = r.merge.as_deref_mut() {
+                    m.stop(&mut app.px.fxx.mfx);
+                }
+                r.performance = perf;
             }
         }
         return;
@@ -372,9 +378,17 @@ pub fn sync(app: &mut App) {
     }
     // With RELEASE FX > Unit Number 1 the one RELEASE FX is the master's (FX1's panel).
     let master_release = app.prefs.fx.effect.release_units == 1;
+    let mut samples = if merge { crate::mfx::prepare_samples(app) } else { Default::default() };
     let stop = {
-        let assigned = app.px.fx.each_ref().map(|unit| unit.params.assign);
-        let mut rack = fx::lock_prepared(&fx::RACK, assigned, pad_wanted, master_release && on, merge);
+        let settings = app.px.fx.each_ref().map(|unit| {
+            let mut params = unit.params;
+            if !on {
+                params.assign.fill(false);
+            }
+            params
+        });
+        let mut rack = fx::lock_prepared(&fx::RACK, settings, pad_wanted, pad_sets, master_release && on, merge);
+        rack.performance = perf;
         rack.enabled = on;
         rack.master_cfx_set = master_cfx;
         for (u, ui) in rack.units.iter_mut().zip(app.px.fx.iter()) {
@@ -394,7 +408,7 @@ pub fn sync(app: &mut App) {
         }
         rack.pad_set = pad_sets;
         if merge || rack.merge.is_some() {
-            crate::mfx::sync(app, &mut rack, &bpm)
+            crate::mfx::sync(app, &mut rack, &bpm, &mut samples)
         } else {
             Vec::new()
         }
@@ -446,8 +460,8 @@ const OUTLINE: egui::Color32 = hex(0x646464);
 fn small(ui: &mut Ui, r: Rect, id: impl std::hash::Hash, label: &str, lit: bool, enabled: bool) -> egui::Response {
     let resp = ui.interact(r, ui.id().with(id), Sense::click());
     let p = ui.painter();
-    p.rect_filled(r, 2.0, if lit { BLUE } else if resp.hovered() && enabled { lighten(BTN) } else { hex(0x282828) });
-    p.text(r.center(), Align2::CENTER_CENTER, label, caps(9.0), if enabled { WHITE } else { OFF });
+    p.rect_filled(r, 2.0, if lit { BLUE.c() } else { crate::ui_feel::hl_if(&resp, enabled, gy(0x282828), lighten(BTN.c())) });
+    p.text(r.center(), Align2::CENTER_CENTER, label, caps(9.0), if enabled { WHITE.c() } else { OFF.c() });
     resp
 }
 
@@ -455,11 +469,11 @@ fn small(ui: &mut Ui, r: Rect, id: impl std::hash::Hash, label: &str, lit: bool,
 fn choice(ui: &mut Ui, r: Rect, id: impl std::hash::Hash, label: &str, lit: bool) -> egui::Response {
     let resp = ui.interact(r, ui.id().with(id), Sense::click());
     let p = ui.painter();
-    p.rect_filled(r, 2.0, if lit { BLUE } else if resp.hovered() { lighten(BTN) } else { hex(0x1E1E1E) });
+    p.rect_filled(r, 2.0, if lit { BLUE.c() } else { crate::ui_feel::hl(&resp, gy(0x1E1E1E), lighten(BTN.c())) });
     if !lit {
         p.rect_stroke(r, 2.0, Stroke::new(1.0_f32, OUTLINE), egui::StrokeKind::Inside);
     }
-    p.text(r.center(), Align2::CENTER_CENTER, label, caps(9.0), WHITE);
+    p.text(r.center(), Align2::CENTER_CENTER, label, caps(9.0), WHITE.c());
     resp
 }
 
@@ -475,16 +489,19 @@ fn fx_knob_r(ui: &mut Ui, c: egui::Pos2, rad: f32, id: impl std::hash::Hash, val
     if resp.double_clicked() {
         out = Some(reset);
     } else if resp.dragged() {
-        let dy = resp.drag_delta().y;
+        let dy = crate::ui_feel::knob_dy(ui, &resp);
         if dy != 0.0 {
             out = Some((value - dy / 150.0).clamp(0.0, 1.0));
         }
     }
     let v = out.unwrap_or(value);
+    crate::ui_feel::grab_cursor(&resp);
+    crate::ui_feel::knob_readout(ui, &resp, egui::pos2(c.x, c.y - rad + 6.0), v, if bipolar { 0.5 } else { -1.0 });
+    let v = crate::ui_feel::knob_shown(&resp, v);
     let ang = |x: f32| (-225.0 + 270.0 * x).to_radians();
     let arc = |a: f32, b: f32| -> Vec<egui::Pos2> { (0..=32).map(|i| { let t = ang(a + (b - a) * i as f32 / 32.0); c + vec2(t.cos(), t.sin()) * rad }).collect() };
     let active = resp.hovered() || resp.dragged();
-    p.add(egui::Shape::line(arc(0.0, 1.0), Stroke::new(2.4_f32, if active { hex(0x464646) } else { hex(0x323232) })));
+    p.add(egui::Shape::line(arc(0.0, 1.0), Stroke::new(2.4_f32, if active { gy(0x464646) } else { gy(0x323232) })));
     let from = if bipolar { 0.5 } else { 0.0 };
     if (v - from).abs() > 0.012 {
         p.add(egui::Shape::line(arc(from, v), Stroke::new(2.4_f32, BLUE)));
@@ -505,8 +522,8 @@ fn mode_button(ui: &mut Ui, r: Rect, id: impl std::hash::Hash, dots: i32, lit: b
     if lit {
         p.rect_filled(r, 2.0, BLUE);
     } else {
-        p.rect_filled(r, 2.0, if resp.hovered() { lighten(BTN) } else { hex(0x181818) });
-        p.rect_stroke(r, 2.0, Stroke::new(1.0_f32, hex(0x646464)), egui::StrokeKind::Inside);
+        p.rect_filled(r, 2.0, crate::ui_feel::hl(&resp, gy(0x181818), lighten(BTN.c())));
+        p.rect_stroke(r, 2.0, Stroke::new(1.0_f32, gy(0x646464)), egui::StrokeKind::Inside);
     }
     for k in 0..dots {
         p.circle_filled(r.center() + vec2((k as f32 - (dots - 1) as f32 / 2.0) * 5.3, 0.0), 1.8, WHITE);
@@ -541,16 +558,16 @@ fn slot(app: &mut App, ui: &mut Ui, u: usize, s: usize, l: Lay, dx: f32) {
     let mut name_r = l.r(163.0 + dx, 2.0, 70.0, 18.0);
     name_r.max.x -= 2.0;
     let nresp = ui.interact(name_r, ui.id().with(("fxname", u, s)), Sense::click());
-    p.rect_filled(name_r, 2.0, if sp.on { BLUE } else if nresp.hovered() { lighten(BTN) } else { BTN });
-    p.text(name_r.center(), Align2::CENTER_CENTER, fx::name(sp.kind), caps(8.75), WHITE);
+    p.rect_filled(name_r, 2.0, if sp.on { BLUE.c() } else { crate::ui_feel::hl(&nresp, BTN.c(), lighten(BTN.c())) });
+    p.text(name_r.center(), Align2::CENTER_CENTER, fx::name(sp.kind), caps(8.75), WHITE.c());
     if tip(nresp, app, "Turns the effect on/off.").clicked() {
         let f = &mut app.px.fx[u].params;
         if single { f.one.on = !sp.on } else { f.slots[s].on = !sp.on }
     }
     let list_r = l.r(233.0 + dx, 2.0, 16.0, 18.0);
     let lresp = ui.interact(list_r, ui.id().with(("fxlist", u, s)), Sense::click());
-    p.rect_filled(list_r, 2.0, if lresp.hovered() { lighten(BTN) } else { BTN });
-    crate::icons_player::chevron_down(&p, list_r.center() + vec2(0.0, 0.0), 0.85, WHITE);
+    p.rect_filled(list_r, 2.0, crate::ui_feel::hl(&lresp, BTN.c(), lighten(BTN.c())));
+    crate::icons_player::chevron_down(&p, list_r.center() + vec2(0.0, 0.0), 0.85, WHITE.c());
     crate::ui_browser::dropdown(ui, &lresp, &format!("fxpop{u}{s}"), |ui| {
         egui::ScrollArea::vertical().max_height(420.0).show(ui, |ui| {
             // (rekordbox draws a line before the last nine, its "FX+ pack".)
@@ -579,7 +596,7 @@ fn slot(app: &mut App, ui: &mut Ui, u: usize, s: usize, l: Lay, dx: f32) {
     if down.clicked() && can_down {
         app.px.fx[u].set_index(s, idx - 1);
     }
-    p.text(l.r(192.0 + dx, 29.0, 56.0, 16.0).center(), Align2::CENTER_CENTER, fx::value_text(sp.kind, sp.value), bold(9.0), if table.is_empty() { OFF } else { WHITE });
+    p.text(l.r(192.0 + dx, 29.0, 56.0, 16.0).center(), Align2::CENTER_CENTER, fx::value_text(sp.kind, sp.value), bold(9.0), if table.is_empty() { OFF.c() } else { WHITE.c() });
     let up = ui.interact(l.r(235.0 + dx, 29.0, 15.0, 16.0), ui.id().with(("fxup", u, s)), Sense::click());
     crate::icons_player::chevron_right(&p, pos2(up.rect.min.x + 6.0, up.rect.center().y), 1.15, if can_up { ARROW } else { ARROW_OFF });
     if up.clicked() && can_up {
@@ -602,7 +619,7 @@ fn single_controls(app: &mut App, ui: &mut Ui, u: usize, l: Lay) {
         let kc = l.r(267.0 + dx, 29.0, 16.0, 16.0).center();
         let lr = l.r(249.0 + dx, 14.0, 56.0, 11.0);
         if label.is_empty() {
-            p.circle_stroke(kc, 6.0, Stroke::new(2.4_f32, hex(0x282828)));
+            p.circle_stroke(kc, 6.0, Stroke::new(2.4_f32, gy(0x282828)));
         } else {
             // (PITCH, FILTER and the like rest at their centre: the blue runs from there.)
             let bipolar = matches!(label, "PITCH" | "FILTER" | "SWING" | "LR RATIO" | "LOW / HI CUT" | "SPEED" | "TIME");
@@ -611,7 +628,7 @@ fn single_controls(app: &mut App, ui: &mut Ui, u: usize, l: Lay) {
                 app.px.fx[u].params.one.knob[k] = v;
             }
             let shown = v.unwrap_or(sp.knob[k]);
-            p.text(lr.center(), Align2::CENTER_CENTER, if active { fx::single_knob_text(sp.kind, k, shown) } else { label.to_string() }, caps(8.0), WHITE);
+            p.text(lr.center(), Align2::CENTER_CENTER, if active { fx::single_knob_text(sp.kind, k, shown) } else { label.to_string() }, caps(8.0), WHITE.c());
         }
         let label = labels[2 + k];
         if label.is_empty() {
@@ -620,8 +637,8 @@ fn single_controls(app: &mut App, ui: &mut Ui, u: usize, l: Lay) {
         let mut r = l.r(287.0 + dx + if k == 1 { 5.0 } else { 0.0 }, 28.0 - k as f32, 50.0, 18.0);
         r.max.x -= 2.0;
         let resp = ui.interact(r, ui.id().with(("fxbtn", u, k)), Sense::click());
-        p.rect_filled(r, 2.0, if sp.btn[k] { BLUE } else if resp.hovered() { lighten(BTN) } else { BTN });
-        p.text(r.center(), Align2::CENTER_CENTER, label, caps(8.0), WHITE);
+        p.rect_filled(r, 2.0, if sp.btn[k] { BLUE.c() } else { crate::ui_feel::hl(&resp, BTN.c(), lighten(BTN.c())) });
+        p.text(r.center(), Align2::CENTER_CENTER, label, caps(8.0), WHITE.c());
         if resp.clicked() {
             app.px.fx[u].params.one.btn[k] = !sp.btn[k];
         }
@@ -632,8 +649,8 @@ fn single_controls(app: &mut App, ui: &mut Ui, u: usize, l: Lay) {
     let now: Snap = (sp.knob[0], sp.knob[1], sp.btn[0], sp.btn[1]);
     let saved = app.px.fx[u].snaps[pos(sp.kind)] == Some(now);
     let resp = ui.interact(r, ui.id().with(("fxsnap", u)), Sense::click());
-    p.rect_filled(r, 2.0, if resp.hovered() { lighten(BTN) } else { BTN });
-    let c = if saved { hex(0x3C8CFF) } else { WHITE };
+    p.rect_filled(r, 2.0, crate::ui_feel::hl(&resp, BTN.c(), lighten(BTN.c())));
+    let c = if saved { hex(0x3C8CFF) } else { WHITE.c() };
     let body = Rect::from_center_size(r.center() + vec2(0.0, 0.5), vec2(12.0, 8.0));
     p.rect_stroke(body, 1.5, Stroke::new(1.0_f32, c), egui::StrokeKind::Inside);
     p.circle_stroke(body.center(), 2.0, Stroke::new(1.0_f32, c));
@@ -652,7 +669,7 @@ pub fn panel(app: &mut App, ui: &mut Ui, r: Rect) {
     // (rekordbox: 3 pt of black above the Beat FX row and between it and the CFX row.)
     // (Measured on the reference: 1 pt of black, the 49 pt Beat FX row, 3 pt of black, the
     // 24 pt CFX row at 53.)
-    p.rect_filled(full, 0.0, egui::Color32::BLACK);
+    p.rect_filled(full, 0.0, BG);
     let r = Rect::from_min_max(pos2(r.min.x, r.min.y + 1.0), pos2(r.max.x, r.min.y + 50.0));
     // (View > Layout > Effect Panel: BEAT FX, SOUND COLOR FX or both rows.)
     let (beat_row, color_row) = app.prefs.rb.fx_rows();
@@ -669,7 +686,7 @@ pub fn panel(app: &mut App, ui: &mut Ui, r: Rect) {
     if !beat_row {
         return;
     }
-    p.rect_filled(r, 0.0, hex(0x1E1E1E));
+    p.rect_filled(r, 0.0, gy(0x1E1E1E));
     let whole = Lay { x0: full.min.x, y0: full.min.y + 1.0, k: full.width() / 1280.0 };
     let k = whole.k;
     p.rect_filled(Rect::from_min_max(pos2(whole.r(0.0, 0.0, 639.0, 0.0).max.x, full.min.y), pos2(whole.r(641.0, 0.0, 1.0, 0.0).min.x, full.min.y + 50.0)), 0.0, BG);
@@ -677,7 +694,7 @@ pub fn panel(app: &mut App, ui: &mut Ui, r: Rect) {
     for u in 0..2usize {
         let l = whole.sub(if u == 0 { 0.0 } else { 641.0 }, 639.0);
         let _ = k;
-        p.text(pos2(l.x0 + 10.5, l.y0 + 12.0), Align2::LEFT_CENTER, format!("FX{}", u + 1), bold(12.5), hex(0x8C8C8C));
+        p.text(pos2(l.x0 + 10.5, l.y0 + 12.0), Align2::LEFT_CENTER, format!("FX{}", u + 1), bold(12.5), gy(0x8C8C8C));
         // Assign: decks, the sampler (S) and the master (M alone, as in rekordbox: lighting M
         // clears the others, lighting another clears M). Decks 3 and 4 exist in the 4-deck
         // layout.
@@ -734,9 +751,9 @@ pub fn panel(app: &mut App, ui: &mut Ui, r: Rect) {
             let rel_r = rl.r(15.0, 4.0, 66.0, 18.0).shrink2(vec2(0.5, 0.0));
             let rresp = ui.interact(rel_r, ui.id().with(("fxrel", u)), Sense::click_and_drag());
             let held = rresp.is_pointer_button_down_on();
-            p.rect_filled(rel_r, 2.0, hex(0x1E1E1E));
-            p.rect_stroke(rel_r, 2.0, Stroke::new(1.0_f32, if held { BLUE } else { OUTLINE }), egui::StrokeKind::Inside);
-            p.text(rel_r.center(), Align2::CENTER_CENTER, fx::RELEASE[rk].0, caps(8.75), if held { hex(0x3C8CFF) } else { WHITE });
+            p.rect_filled(rel_r, 2.0, gy(0x1E1E1E));
+            p.rect_stroke(rel_r, 2.0, Stroke::new(1.0_f32, if held { BLUE.c() } else { OUTLINE }), egui::StrokeKind::Inside);
+            p.text(rel_r.center(), Align2::CENTER_CENTER, fx::RELEASE[rk].0, caps(8.75), if held { hex(0x3C8CFF) } else { WHITE.c() });
             let ridx = app.px.fx[u].release_idx[rk].min(fx::RELEASE_BEATS.len() - 1);
             app.px.fx[u].params.release = if held { Some((rk as u8, fx::RELEASE_BEATS[ridx])) } else { None };
             if held {
@@ -746,8 +763,8 @@ pub fn panel(app: &mut App, ui: &mut Ui, r: Rect) {
             let mut lr = rl.r(81.0, 4.0, 16.0, 18.0).shrink2(vec2(0.0, 0.5));
             lr.min.x += 1.5;
             let rlresp = ui.interact(lr, ui.id().with(("fxrellist", u)), Sense::click());
-            p.rect_filled(lr, 2.0, if rlresp.hovered() { lighten(BTN) } else { BTN });
-            crate::icons_player::chevron_down(&p, lr.center(), 0.85, WHITE);
+            p.rect_filled(lr, 2.0, crate::ui_feel::hl(&rlresp, BTN.c(), lighten(BTN.c())));
+            crate::icons_player::chevron_down(&p, lr.center(), 0.85, WHITE.c());
             crate::ui_browser::dropdown(ui, &rlresp, &format!("fxrelpop{u}"), |ui| {
                 for (i, (name, _)) in fx::RELEASE.iter().enumerate() {
                     if ui.selectable_label(rk == i, *name).clicked() {
@@ -761,7 +778,7 @@ pub fn panel(app: &mut App, ui: &mut Ui, r: Rect) {
             if rd.clicked() && ridx > 0 {
                 app.px.fx[u].release_idx[rk] = ridx - 1;
             }
-            p.text(rl.r(22.0, 26.0, 56.0, 16.0).center() - vec2(0.0, 0.5), Align2::CENTER_CENTER, fx::beat_text(fx::RELEASE_BEATS[ridx], false), bold(8.5), WHITE);
+            p.text(rl.r(22.0, 26.0, 56.0, 16.0).center() - vec2(0.0, 0.5), Align2::CENTER_CENTER, fx::beat_text(fx::RELEASE_BEATS[ridx], false), bold(8.5), WHITE.c());
             let ru = ui.interact(rl.r(65.0, 26.0, 15.0, 16.0), ui.id().with(("fxrelup", u)), Sense::click());
             crate::icons_player::chevron_right(&p, pos2(ru.rect.min.x + 6.0, ru.rect.center().y), 1.15, if ridx + 1 < fx::RELEASE_BEATS.len() { ARROW } else { ARROW_OFF });
             if ru.clicked() && ridx + 1 < fx::RELEASE_BEATS.len() {
@@ -812,10 +829,10 @@ fn color_knob(app: &mut App, ui: &mut Ui, kc: egui::Pos2, c: usize) {
 /// its label, its effect (name = on/off, list) and its COLOR knob.
 fn cfx_row(app: &mut App, ui: &mut Ui, r: Rect) {
     let p = ui.painter().clone();
-    p.rect_filled(r, 0.0, hex(0x1E1E1E));
+    p.rect_filled(r, 0.0, gy(0x1E1E1E));
     let l = Lay { x0: r.min.x, y0: r.center().y - 12.0, k: r.width() / 1280.0 };
     let cy = r.center().y;
-    p.text(pos2(r.min.x + 10.5, cy - 0.5), Align2::LEFT_CENTER, "CFX", bold(12.5), hex(0x8C8C8C));
+    p.text(pos2(r.min.x + 10.5, cy - 0.5), Align2::LEFT_CENTER, "CFX", bold(12.5), gy(0x8C8C8C));
     let multi = app.px.fxx.cfx_multi;
     // (rekordbox's multi layout has the two mode buttons 26 x 24 at 70 and 101; the single
     // layout 18 x 18 at 70 and 90.)
@@ -835,24 +852,24 @@ fn cfx_row(app: &mut App, ui: &mut Ui, r: Rect) {
         // PARAM is the shown effect's... each effect keeps its own; the knob here sets the
         // one of the effect last touched (FILTER until then).
         let pk = app.px.cfx_kind as usize % 9;
-        p.text(l.r(143.0, 1.0, 42.0, 22.0).center(), Align2::CENTER_CENTER, "PARAM", caps(9.0), WHITE);
+        p.text(l.r(143.0, 1.0, 42.0, 22.0).center(), Align2::CENTER_CENTER, "PARAM", caps(9.0), WHITE.c());
         if let Some(v) = fx_knob(ui, l.r(185.0, 1.0, 22.0, 22.0).center(), "cfxparam", app.px.fxx.cfx_params[pk], 0.5, false) {
             app.px.fxx.cfx_params[pk] = v;
         }
         for (i, (label, ch)) in channels.into_iter().enumerate() {
             let c = Lay { x0: l.x0 + [227.0, 366.0, 505.0, 644.0, 783.0, 922.0][i] * l.k, ..l };
-            p.text(c.r(0.0, 0.0, 20.0, 24.0).center(), Align2::CENTER_CENTER, label, caps(10.0), if ch.is_some() { WHITE } else { OFF });
+            p.text(c.r(0.0, 0.0, 20.0, 24.0).center(), Align2::CENTER_CENTER, label, caps(10.0), if ch.is_some() { WHITE.c() } else { OFF.c() });
             let kc = c.r(110.0, 1.0, 22.0, 22.0).center();
             let Some(ch) = ch else {
-                p.circle_stroke(kc, 7.6, Stroke::new(2.4_f32, hex(0x282828)));
+                p.circle_stroke(kc, 7.6, Stroke::new(2.4_f32, gy(0x282828)));
                 continue;
             };
             let kind = app.px.fxx.cfx_multi_kind[ch];
             let on = app.px.fxx.cfx_multi_on[ch];
             let er = c.r(21.0, 3.0, 68.0, 18.0).shrink2(vec2(0.5, 0.0));
             let eresp = ui.interact(er, ui.id().with(("cfxmname", ch)), Sense::click());
-            p.rect_filled(er, 2.0, if on { BLUE } else if eresp.hovered() { lighten(BTN) } else { BTN });
-            p.text(er.center(), Align2::CENTER_CENTER, crate::cfx::name(kind), caps(9.0), WHITE);
+            p.rect_filled(er, 2.0, if on { BLUE.c() } else { crate::ui_feel::hl(&eresp, BTN.c(), lighten(BTN.c())) });
+            p.text(er.center(), Align2::CENTER_CENTER, crate::cfx::name(kind), caps(9.0), WHITE.c());
             if eresp.clicked() {
                 app.px.fxx.cfx_multi_on[ch] = !on;
                 app.px.cfx_kind = kind;
@@ -860,8 +877,8 @@ fn cfx_row(app: &mut App, ui: &mut Ui, r: Rect) {
             let _ = eresp.on_hover_text("Turns the effect on/off.");
             let lr = c.r(89.0, 3.0, 18.0, 18.0).shrink2(vec2(0.5, 0.0));
             let lresp = ui.interact(lr, ui.id().with(("cfxmlist", ch)), Sense::click());
-            p.rect_filled(lr, 2.0, if lresp.hovered() { lighten(BTN) } else { BTN });
-            crate::icons_player::chevron_down(&p, lr.center() + vec2(0.0, 0.5), 1.0, WHITE);
+            p.rect_filled(lr, 2.0, crate::ui_feel::hl(&lresp, BTN.c(), lighten(BTN.c())));
+            crate::icons_player::chevron_down(&p, lr.center() + vec2(0.0, 0.5), 1.0, WHITE.c());
             crate::ui_browser::dropdown(ui, &lresp, &format!("cfxmpop{ch}"), |ui| {
                 for (name, kd) in crate::cfx::LIST {
                     let Some(kd) = kd else { continue };
@@ -892,11 +909,11 @@ fn cfx_row(app: &mut App, ui: &mut Ui, r: Rect) {
     er.min.x += 1.0;
     er.max.x -= 4.0;
     let eresp = ui.interact(er, ui.id().with("cfxeffect"), Sense::click());
-    p.rect_filled(er, 2.0, hex(0x1E1E1E));
+    p.rect_filled(er, 2.0, gy(0x1E1E1E));
     p.rect_stroke(er, 2.0, Stroke::new(0.75_f32, BLUE), egui::StrokeKind::Inside);
-    p.text(er.center(), Align2::CENTER_CENTER, crate::cfx::name(kind), caps(9.0), WHITE);
+    p.text(er.center(), Align2::CENTER_CENTER, crate::cfx::name(kind), caps(9.0), WHITE.c());
     if user {
-        crate::icons_player::chevron_down(&p, l.r(381.0, 4.0, 16.0, 16.0).center() + vec2(0.0, 0.5), 1.0, WHITE);
+        crate::icons_player::chevron_down(&p, l.r(381.0, 4.0, 16.0, 16.0).center() + vec2(0.0, 0.5), 1.0, WHITE.c());
         let aresp = ui.interact(l.r(381.0, 4.0, 16.0, 16.0), ui.id().with("cfxeffectlist"), Sense::click());
         let resp = eresp.union(aresp);
         crate::ui_browser::dropdown(ui, &resp, "cfxpop", |ui| {
@@ -911,18 +928,18 @@ fn cfx_row(app: &mut App, ui: &mut Ui, r: Rect) {
             }
         });
     }
-    p.text(l.r(439.0, 1.0, 42.0, 22.0).center(), Align2::CENTER_CENTER, "PARAM", caps(9.0), WHITE);
+    p.text(l.r(439.0, 1.0, 42.0, 22.0).center(), Align2::CENTER_CENTER, "PARAM", caps(9.0), WHITE.c());
     if let Some(v) = fx_knob(ui, l.r(481.0, 1.0, 22.0, 22.0).center(), "cfxparam", app.px.cfx_param, 0.5, false) {
         app.px.cfx_param = v;
         app.px.fxx.cfx_params[kind as usize % 9] = v;
     }
     for (i, (label, ch)) in channels.into_iter().enumerate() {
-        p.text(l.r([538.0, 618.0, 698.0, 777.0, 857.0, 937.0][i], 0.0, 21.0, 24.0).center(), Align2::CENTER_CENTER, label, caps(10.0), if ch.is_some() { WHITE } else { OFF });
+        p.text(l.r([538.0, 618.0, 698.0, 777.0, 857.0, 937.0][i], 0.0, 21.0, 24.0).center(), Align2::CENTER_CENTER, label, caps(10.0), if ch.is_some() { WHITE.c() } else { OFF.c() });
         let kc = l.r([560.0, 640.0, 720.0, 799.0, 879.0, 959.0][i], 1.0, 22.0, 22.0).center();
         match ch {
             Some(c) => color_knob(app, ui, kc, c),
             None => {
-                p.circle_stroke(kc, 7.6, Stroke::new(2.4_f32, hex(0x282828)));
+                p.circle_stroke(kc, 7.6, Stroke::new(2.4_f32, gy(0x282828)));
             }
         }
     }
@@ -936,9 +953,9 @@ fn cfx_row(app: &mut App, ui: &mut Ui, r: Rect) {
 fn mfx_row(app: &mut App, ui: &mut Ui, r: Rect) {
     use crate::mfx;
     let p = ui.painter().clone();
-    p.rect_filled(r, 0.0, hex(0x1E1E1E));
+    p.rect_filled(r, 0.0, gy(0x1E1E1E));
     let l = Lay { x0: r.min.x, y0: r.center().y - 12.0, k: r.width() / 1280.0 };
-    p.text(pos2(r.min.x + 10.5, r.center().y - 0.5), Align2::LEFT_CENTER, "MFX", bold(12.5), hex(0x8C8C8C));
+    p.text(pos2(r.min.x + 10.5, r.center().y - 0.5), Align2::LEFT_CENTER, "MFX", bold(12.5), gy(0x8C8C8C));
     let four = app.deck_count() == 4;
     for u in 0..2usize {
         let h = Lay { x0: l.x0 + u as f32 * 400.0 * l.k, ..l };
@@ -954,9 +971,9 @@ fn mfx_row(app: &mut App, ui: &mut Ui, r: Rect) {
         let sel = app.prefs.fx.mfx.select[u].min(3) as usize;
         let sr = h.r(120.0, 3.0, 86.0, 18.0);
         let sresp = ui.interact(sr, ui.id().with(("mfxsel", u)), Sense::click());
-        p.rect_filled(sr, 2.0, if sresp.hovered() { lighten(BTN) } else { BTN });
-        p.text(pos2(sr.min.x + 6.0, sr.center().y), Align2::LEFT_CENTER, format!("MERGE FX {}", sel + 1), caps(9.0), WHITE);
-        crate::icons_player::chevron_down(&p, pos2(sr.max.x - 8.0, sr.center().y + 0.5), 1.0, WHITE);
+        p.rect_filled(sr, 2.0, crate::ui_feel::hl(&sresp, BTN.c(), lighten(BTN.c())));
+        p.text(pos2(sr.min.x + 6.0, sr.center().y), Align2::LEFT_CENTER, format!("MERGE FX {}", sel + 1), caps(9.0), WHITE.c());
+        crate::icons_player::chevron_down(&p, pos2(sr.max.x - 8.0, sr.center().y + 0.5), 1.0, WHITE.c());
         let names: Vec<String> = (0..4).map(|i| format!("MERGE FX {}   {}", i + 1, mfx::PRESETS[app.prefs.fx.mfx.preset[i].min(7) as usize].0)).collect();
         crate::ui_browser::dropdown(ui, &sresp, &format!("mfxselpop{u}"), |ui| {
             for (i, n) in names.iter().enumerate() {
@@ -971,8 +988,8 @@ fn mfx_row(app: &mut App, ui: &mut Ui, r: Rect) {
         let or = h.r(212.0, 3.0, 44.0, 18.0);
         let oresp = ui.interact(or, ui.id().with(("mfxon", u)), Sense::click());
         let busy = app.px.fxx.mfx.units[u].phase_on && !on;
-        p.rect_filled(or, 2.0, if on { BLUE } else if busy { hex(0x1E468C) } else if oresp.hovered() { lighten(BTN) } else { BTN });
-        p.text(or.center(), Align2::CENTER_CENTER, "ON", caps(9.0), WHITE);
+        p.rect_filled(or, 2.0, if on { BLUE.c() } else if busy { hex(0x1E468C) } else { crate::ui_feel::hl(&oresp, BTN.c(), lighten(BTN.c())) });
+        p.text(or.center(), Align2::CENTER_CENTER, "ON", caps(9.0), WHITE.c());
         if oresp.on_hover_text("MERGE FX ON/OFF (Shift + click: cancel)").clicked() {
             let shift = ui.input(|i| i.modifiers.shift);
             mfx::toggle(app, u, shift);
@@ -984,19 +1001,19 @@ fn mfx_row(app: &mut App, ui: &mut Ui, r: Rect) {
             }
         }
         let comps = app.prefs.fx.mfx.comps[sel];
-        p.text(pos2(h.r(296.0, 0.0, 1.0, 24.0).min.x, r.center().y), Align2::LEFT_CENTER, format!("{} + {}", mfx::name(comps[0]), mfx::name(comps[1])), FontId::proportional(8.5), DIM2);
+        p.text(pos2(h.r(296.0, 0.0, 1.0, 24.0).min.x, r.center().y), Align2::LEFT_CENTER, format!("{} + {}", mfx::name(comps[0]), mfx::name(comps[1])), FontId::proportional(8.5), DIM2.c());
     }
     // Sample volume (-12 .. +12 dB) and the settings.
     let vol = app.prefs.fx.mfx.volume;
-    p.text(l.r(1092.0, 0.0, 60.0, 24.0).center(), Align2::CENTER_CENTER, "SAMPLE VOL", caps(8.0), WHITE);
+    p.text(l.r(1092.0, 0.0, 60.0, 24.0).center(), Align2::CENTER_CENTER, "SAMPLE VOL", caps(8.0), WHITE.c());
     if let Some(v) = fx_knob(ui, l.r(1160.0, 1.0, 22.0, 22.0).center(), "mfxvol", (vol + 12.0) / 24.0, 0.5, true) {
         app.prefs.fx.mfx.volume = ((v * 24.0 - 12.0) * 10.0).round() / 10.0;
         app.px.fxx.pending.get_or_insert_with(std::time::Instant::now);
     }
-    p.text(l.r(1186.0, 0.0, 48.0, 24.0).center(), Align2::CENTER_CENTER, format!("{vol:+.1}dB"), bold(8.5), WHITE);
+    p.text(l.r(1186.0, 0.0, 48.0, 24.0).center(), Align2::CENTER_CENTER, format!("{vol:+.1}dB"), bold(8.5), WHITE.c());
     let gr = l.r(1251.0, 3.0, 18.0, 18.0);
     let gresp = ui.interact(gr, ui.id().with("mfxsettings"), Sense::click());
-    p.rect_filled(gr, 2.0, if gresp.hovered() { lighten(BTN) } else { BTN });
+    p.rect_filled(gr, 2.0, crate::ui_feel::hl(&gresp, BTN.c(), lighten(BTN.c())));
     let c = gr.center();
     p.circle_stroke(c, 3.2, Stroke::new(1.6_f32, WHITE));
     for i in 0..6 {

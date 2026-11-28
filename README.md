@@ -60,16 +60,18 @@ To open the Homebrew app in Finder, run `open "$(brew --prefix fantuz/recordbox/
 
 ## Prepare and play
 
+- **Adjust the interface.** EXPORT and PERFORMANCE offer a Light appearance and a detachable library. Choose Full, Reduced or Off under **Preferences → Advanced → Others → recordbox → Interface motion**. [Interface behavior and measurements](docs/UPSTREAM-INTEGRATION.md#interface-motion-from-ef454ed)
 - **Build a collection.** Import local tracks and folders, M3U playlists or a rekordbox XML collection. Rate and tag tracks, organise playlists, and back up or restore your recordbox library.
 - **Prepare a track in EXPORT.** Analyse BPM, key and waveforms, edit the beat grid, and set loops, memory cues and hot cues. New analysis uses the Rekordbox-compatible beat detector. Choose **recordbox classic** in **Preferences → Analysis → Beat grid estimator** to use the earlier detector. Optional high-precision refinement works with either choice.
   By default, press **1–8** to set or recall hot cues A–H. Hold **Shift** and press the same number to clear that slot.
 - **Prepare phrases.** Deck loading and USB export can reuse Rekordbox phrase data. To generate missing phrases, choose **Rekordbox-compatible** or **recordbox classic** under **Preferences → Analysis → Phrase estimator**.
-- **Mix in PERFORMANCE.** Use MIDI Learn to map the decks, mixer and pads, or try the experimental XDJ-RX3 profile for one connection. The DDJ-GRV6 Groove Circuit mappings cover drum swap, capture, gain and release. SPACE, GATE COMP, Beat FX, Pad FX and MERGE FX are available for rehearsing and recording a set. [XDJ-RX3 setup](docs/studies/XDJ-RX3.md) · [Controller support and effects](docs/UPSTREAM-INTEGRATION.md#controllers-and-effects)
+- **Mix in PERFORMANCE.** Use MIDI Learn to map the decks, mixer and pads, or try the experimental XDJ-RX3 or OPUS-QUAD profile for one connection. The DDJ-GRV6 Groove Circuit mappings cover drum swap, capture, gain and release. SPACE, GATE COMP, Beat FX, Pad FX and MERGE FX are available for rehearsing and recording a set. [XDJ-RX3 setup](docs/studies/XDJ-RX3.md) · [OPUS-QUAD setup](docs/studies/OPUS-QUAD.md) · [Controller support and effects](docs/UPSTREAM-INTEGRATION.md#controllers-and-effects)
 - **Edit an arrangement.** Use the EDIT timeline to arrange, audition and render a local track. WAV, AIFF and FLAC are available across platforms. M4A uses the macOS AAC encoder.
 - **Use the library on a second screen.** The overlapping-windows button at the far right of the top bar detaches the library browser. Your playlist, search, selection and scroll position follow it. Close the library window to reattach it.
   **F11** toggles fullscreen for both windows together. **Space** plays or pauses the active deck when you’re outside a text field.
 - **Separate a track into STEMS.** In **Preferences → Extensions → STEMS**, download HTDemucs for speed or HTDemucs fine-tuned for sound quality. Both save drums, bass, instruments and vocals as four stereo parts. Completed separations are available across decks and restarts.
   Saved parts from both models share a 20 GB budget by default. Choose **Keep all saved stems** to retain completed results without a size limit. [STEMS storage and backups](docs/LIBRARY-SYNC.md#how-much-separation-is-saved)
+- **Export vocals or an instrumental.** Use **Track → Export Stems** to make a new local audio file from a separation and add it to your collection with its cues and grid. Choose WAV, FLAC or AIFF for lossless output. The first export shows the destination and playlist option. [Export behavior and format support](docs/UPSTREAM-INTEGRATION.md#exporting-vocals-and-instrumentals)
 
 If an imported MP3 cue sounds early or late, you can audition the same timestamp using a separate collection. [Compare MP3 cue timing](docs/PLAYBACK-PERFORMANCE.md#auditioning-rekordbox-mp3-timing) · [Integration report and measurements](docs/UPSTREAM-INTEGRATION.md)
 

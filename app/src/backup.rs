@@ -462,6 +462,7 @@ fn reload_after_restore(app: &mut crate::app::App) {
         app.save_prefs();
     }
     app.textures.clear();
+    app.list_artwork = Default::default();
     app.selected.clear();
     app.anchor = None;
     app.anchor_id = None;

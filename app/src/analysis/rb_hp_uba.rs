@@ -99,7 +99,19 @@ impl Uba {
     /// `create(sr, total)` + `putSample` over the whole track. `pcm16` = interleaved stereo as
     /// rekordbox's `setSample` truncates it (see [`to_i16`]); blocks of sr/75 frames as there.
     pub fn new(sr: i32, pcm16: &[i16]) -> Uba {
-        let total = (pcm16.len() / 2) as i32;
+        Self::from_frames(sr, pcm16.len() / 2, |f| f64::from(pcm16[2*f]) + f64::from(pcm16[2*f+1]))
+    }
+
+    /// Only every fourth stereo frame feeds these envelopes. Quantize those
+    /// frames directly rather than constructing another full-track PCM buffer.
+    pub(super) fn from_audio(sr: u32, samples: &[f32]) -> Uba {
+        Self::from_frames(sr as i32, samples.len() / 2, |f|
+            f64::from(super::super::rb_beat1::reader_sample(samples[2*f])) +
+            f64::from(super::super::rb_beat1::reader_sample(samples[2*f+1])))
+    }
+
+    fn from_frames(sr: i32, frames: usize, stereo_sum: impl Fn(usize) -> f64) -> Uba {
+        let total = frames as i32;
         let sr4 = sr >> 2;
         let cap = (total / 4).min(900 * (sr / 4));
         let fs = sr4 as f64;
@@ -125,7 +137,7 @@ impl Uba {
             let mut i = 0;
             while i < v45 {
                 let f = start + i as usize;
-                let x = (pcm16[2 * f + 1] as f64 + pcm16[2 * f] as f64) * 0.5;
+                let x = stereo_sum(f) * 0.5;
                 let h = lp1.run(hp.run(x).abs());
                 let l = lp3.run(lp2.run(x).abs());
                 let a = lp4.run(x.abs());
@@ -1451,7 +1463,7 @@ impl<'a> UbaRefine<'a> {
 /// The samples `Analyzer::setSample` gives the envelope units: float scaled to 16-bit range,
 /// truncated to an integer and narrowed without saturation.
 pub fn to_i16(samples: &[f32]) -> Vec<i16> {
-    samples.iter().map(|&v| ((v * 32768.0) as i32) as i16).collect()
+    samples.iter().map(|&v| super::super::rb_beat1::reader_sample(v) as i16).collect()
 }
 
 #[cfg(test)]

@@ -534,28 +534,58 @@ fn alsa_endpoint(name: &str) -> Option<(&str, &str, u16, u16)> {
     Some((client, port, client_id.parse().ok()?, port_id.parse().ok()?))
 }
 
-/// Only offer the session trial on the primary RX3 input. A second MIDI
-/// endpoint, a neighbouring XDJ model or an arbitrary substring is ambiguous.
-pub fn rx3_primary_input(name: &str) -> bool {
-    const MODEL: &str = "XDJ-RX3";
-    if name.eq_ignore_ascii_case(MODEL) || name.eq_ignore_ascii_case("MIDIIN (XDJ-RX3)") {
-        return true;
+/// The two built-in, connection-only profiles. Only a positively identified primary input
+/// can be used to try a profile or resolve a model-level Windows mapping.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TrialProfile {
+    Rx3,
+    OpusQuad,
+}
+
+impl TrialProfile {
+    pub fn model(self) -> &'static str {
+        match self {
+            Self::Rx3 => "XDJ-RX3",
+            Self::OpusQuad => "OPUS-QUAD",
+        }
     }
-    alsa_endpoint(name).is_some_and(|(client, port, _, id)| {
-        id == 0 && client.eq_ignore_ascii_case(MODEL)
-            && [MODEL, "XDJ-RX3 MIDI 1", "MIDI 1"].iter().any(|p| port.eq_ignore_ascii_case(p))
+}
+
+fn win_primary_label(name: &str) -> Option<&str> {
+    let (prefix, rest) = name.split_once('(')?;
+    prefix.eq_ignore_ascii_case("MIDIIN ").then_some(rest)?.strip_suffix(')')
+}
+
+pub fn trial_profile(name: &str) -> Option<TrialProfile> {
+    [TrialProfile::Rx3, TrialProfile::OpusQuad].into_iter().find(|profile| {
+        let model = profile.model();
+        let wrapper = win_primary_label(name).is_some_and(|label| label.eq_ignore_ascii_case(model));
+        name.eq_ignore_ascii_case(model) || wrapper || alsa_endpoint(name).is_some_and(|(client, port, _, id)| {
+            id == 0 && client.eq_ignore_ascii_case(model)
+                && (port.eq_ignore_ascii_case(model) || port.eq_ignore_ascii_case("MIDI 1")
+                    || port.get(..model.len()).is_some_and(|s| s.eq_ignore_ascii_case(model))
+                        && port.get(model.len()..).is_some_and(|s| s.eq_ignore_ascii_case(" MIDI 1")))
+        })
     })
 }
 
 #[cfg(test)]
 #[test]
-fn rx3_trial_accepts_only_unambiguous_primary_inputs() {
-    for name in ["XDJ-RX3", "MIDIIN (XDJ-RX3)", "XDJ-RX3:XDJ-RX3 MIDI 1 24:0", "XDJ-RX3:XDJ-RX3 MIDI 1 134:0"] {
-        assert!(rx3_primary_input(name), "{name}");
+fn trial_accepts_only_unambiguous_primary_inputs() {
+    for profile in [TrialProfile::Rx3, TrialProfile::OpusQuad] {
+        let model = profile.model();
+        for name in [model.to_owned(), format!("MIDIIN ({model})"),
+            format!("{model}:{model} MIDI 1 24:0"), format!("{model}:MIDI 1 134:0")] {
+            assert_eq!(trial_profile(&name), Some(profile), "{name}");
+            assert!(device_matches(&name, model), "{name}");
+        }
+        for name in [format!("Virtual {model}"), format!("MIDIOUT ({model})"), format!("MIDIIN2 ({model})"),
+            format!("{model}:{model} MIDI 2 24:0"), format!("{model}:{model} MIDI 1 24:1"), format!("Other:{model} MIDI 1 24:0")] {
+            assert_eq!(trial_profile(&name), None, "{name}");
+        }
     }
-    for name in ["XDJ-RX", "XDJ-RX2", "XDJ-RX30", "Virtual XDJ-RX3", "MIDIOUT (XDJ-RX3)", "MIDIIN2 (XDJ-RX3)",
-                 "XDJ-RX3:XDJ-RX3 MIDI 2 24:0", "XDJ-RX3:XDJ-RX3 MIDI 1 24:1", "Other:XDJ-RX3 MIDI 1 24:0"] {
-        assert!(!rx3_primary_input(name), "{name}");
+    for name in ["XDJ-RX", "XDJ-RX2", "XDJ-RX30", "OPUS-QUAD 2", "OPUS-QUAD PRO"] {
+        assert_eq!(trial_profile(name), None);
     }
 }
 
@@ -610,9 +640,10 @@ pub fn legacy_file(dir: &Path, device: &str) -> Option<PathBuf> {
 
 fn names_for_mapping(port: &str) -> Vec<&str> {
     let mut names = vec![port];
-    // WinMM can wrap the primary RX3 port; prefer a port-specific file when both exist.
-    if port.eq_ignore_ascii_case("MIDIIN (XDJ-RX3)") {
-        names.push("XDJ-RX3");
+    if let Some(label) = win_primary_label(port) {
+        if let Some(profile) = trial_profile(label).filter(|p| p.model().eq_ignore_ascii_case(label)) {
+            names.push(profile.model());
+        }
     }
     if let Some((client, endpoint, _, _)) = alsa_endpoint(port) {
         if endpoint.eq_ignore_ascii_case(client) || endpoint.strip_suffix(" MIDI 1").is_some_and(|p| p.eq_ignore_ascii_case(client)) ||

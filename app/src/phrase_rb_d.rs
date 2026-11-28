@@ -17,6 +17,8 @@ use crate::phrase_rb_d11 as d11;
 use crate::phrase_rb_d12 as d12;
 use crate::phrase_rb_d13 as d13;
 use crate::phrase_rb_d14 as d14;
+#[path = "phrase_rb_d15.rs"]
+mod d15;
 
 /// One recorded call: name and its argument values after the call (by argument index of the
 /// reference's prototype, `self` = 0).
@@ -403,7 +405,25 @@ pub fn sub_main_d_cancellable(inp: &DIn, tr: &mut Trace, cancelled: &dyn Fn() ->
             v200 = vec![v181];
         }
     } else {
-        return None; // the Low-mood / type-2 structure path is not ported yet
+        // Type 2 (Low mood, and Mid mood typed 2): boundaries from VerseHookJudge23 with short
+        // breaks, level changes, snare fills and vocal entries added; the ones past the end of
+        // the level arrays are dropped, those within three beats of the first downbeat cleared.
+        if cancelled() { return None; }
+        if v230 == 1 {
+            v200 = d7::verse_hook_judge23(&vh, &v259, v231, p1, p18_0)?;
+            tr.rec("VerseHookJudge23", || vec![(14, iv(&v200))]);
+            v200 = d15::verse_hook_add_genre23(&c.g3224, &mp, &v286, &v285, &selfa, &v200, p1);
+            tr.rec("VerseHookAdd_genre23", || vec![(6, iv(&v200)), (8, iv(&v200))]);
+            let last_beat = c.g3256.len().min(selfa.len()) as i32;
+            v200.retain(|&beat| beat > v181 + 3 && beat <= last_beat);
+            v200.insert(0, v181);
+        }
+        if v230 == 0 {
+            v200 = vec![v181];
+        }
+        if v200.len() >= 2 && v200[0] == v200[1] {
+            v200.remove(0);
+        }
     }
     if mood == 1 {
         if cancelled() { return None; }
@@ -450,10 +470,25 @@ pub fn sub_main_d_cancellable(inp: &DIn, tr: &mut Trace, cancelled: &dyn Fn() ->
     let _ = (inp.sr, inp.total, inp.key);
     // Mid/Low mood (LABEL_262)
     let n = v200.len();
-    if n <= 1 {
-        return None; // the reference fails here unless an earlier block set v269
-    }
     if cancelled() { return None; }
+    if n == 0 {
+        return None; // the reference has no data pointer for an empty list and fails
+    }
+    if n == 1 {
+        // One phrase: kind 10 without the per-phrase analyses; FeatureLastAdjust leaves a
+        // single phrase alone (its level argument is allocated empty at the start).
+        let (_v186, v198) = d12::outro_feature_ana(&v200, &[10], &c.g3064, rh2, &c.g3128, p1);
+        tr.rec("OutroFeatureAna", || vec![(8, iv(&v198))]);
+        let mut v253 = vec![10i32];
+        let mut v199 = vec![0i32; 1];
+        d13::feature_last_adjust(&v200, &mut v253, &mut v199, &v198, mood, &[]);
+        tr.rec("FeatureLastAdjust", || vec![(2, iv(&v253)), (3, iv(&v199))]);
+        let mut rows = vec![[v200[0], 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]];
+        let z = vec![0i32; 1];
+        let mut v193 = vec![0i32; 1];
+        d13::data_format_convert(mood, &v253, &z, &z, &z, &z, &mut v193, &mut rows);
+        return Some(DOut { n: 1, first_ms: inp.b.first_ms, mood, bar: p1, h4: 0, h5: (inp.key < 12) as i32, end: v198.last().copied().unwrap_or(0), rows });
+    }
     let v238 = d14::abmelo(&c.g3592, &v200, p1, c.nbeats)?;
     tr.rec("ABmeloAnalyze", || vec![(5, v238.iter().flatten().map(|x| *x as f64).collect())]);
     let mut v244 = d14::hooksolo(&v290, &selfa, &v200, &v285, mood)?;

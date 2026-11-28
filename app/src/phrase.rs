@@ -51,9 +51,15 @@ impl Structure {
 
 pub(crate) use crate::phrase_rb::{MAX_BEATS, MAX_SECONDS as MAX_ANALYSIS_SECONDS};
 
+/// The original analyser receives a pre-existing key, or an unknown key if key and
+/// phrases are inferred together. Only the stored PSSI key flag depends on this.
+pub fn key_input(track: &crate::model::Track) -> i32 {
+    if track.key_manual || !track.key_text.trim().is_empty() { track.key } else { -1 }
+}
+
 /// Current-grid inference consumes the deck's stereo samples directly, including the
 /// classic fallback. A cancelled native job must never start the fallback.
-pub fn analyze_audio(d: &crate::audio::Decoded, beats: &[Beat], classic: bool, cancelled: &dyn Fn() -> bool) -> Option<Structure> {
+pub fn analyze_audio(d: &crate::audio::Decoded, beats: &[Beat], key: i32, classic: bool, cancelled: &dyn Fn() -> bool) -> Option<Structure> {
     if cancelled() || d.sr == 0 || d.frames() == 0 || d.frames() > MAX_ANALYSIS_SECONDS.saturating_mul(d.sr as usize) || !(8..=MAX_BEATS).contains(&beats.len()) {
         return None;
     }
@@ -63,7 +69,7 @@ pub fn analyze_audio(d: &crate::audio::Decoded, beats: &[Beat], classic: bool, c
         return None;
     }
     if !classic && std::env::var("PREPDECK_PHRASE").as_deref() != Ok("own") {
-        let key = crate::phrase_rb::analyser_key(-1);
+        let key = crate::phrase_rb::analyser_key(key);
         if let Some(result) = crate::phrase_rb::analyze_with_cancel(&d.samples, d.sr, beats, key, cancelled) {
             if cancelled() { return None; }
             if let Some(structure) = parse(&crate::phrase_rb::pssi_bytes(&result)) {
@@ -313,7 +319,7 @@ pub fn cue_proposals(s: &Structure, beats: &[Beat]) -> Vec<(f64, &'static str)> 
     s.phrases
         .iter()
         .filter(|p| p.beat > 1)
-        .filter_map(|p| beats.get(p.beat as usize - 1).map(|b| (b.time, kind_name(p.kind))))
+        .filter_map(|p| beats.get(p.beat as usize - 1).map(|b| (b.time, label(s.mood, p.kind))))
         .collect()
 }
 
@@ -446,6 +452,26 @@ mod tests {
         let stopped = || { calls.set(calls.get() + 1); calls.get() >= 5 };
         assert!(analyze_classic(160_000, |_| 0.0, 4000.0, &beats, &stopped).is_none());
         assert_eq!(calls.get(), 5);
+    }
+
+    #[test]
+    fn inferred_keys_and_imported_keys_give_the_reference_header_flags() {
+        let mut track = crate::model::Track { key: 4, ..Default::default() };
+        assert_eq!(key_input(&track), -1);
+        track.key_text = "5A".into();
+        assert_eq!(key_input(&track), 4);
+        track.key_text.clear();
+        track.key_manual = true;
+        assert_eq!(key_input(&track), 4);
+    }
+
+    #[test]
+    fn proposals_use_the_phrase_label_for_each_mood() {
+        let beats: Vec<Beat> = (0..8).map(|i| Beat { index:i, time:i as f64 * 0.5, bpm:120.0, beat:1 + (i % 4) as u8 }).collect();
+        let mut structure = Structure { mood:3, end_beat:8, phrases:vec![Phrase { beat:5, kind:5 }], rb:None };
+        assert_eq!(cue_proposals(&structure, &beats), [(2.0, "Verse 2")]);
+        structure.mood = 2;
+        assert_eq!(cue_proposals(&structure, &beats), [(2.0, "Verse 4")]);
     }
 
     #[test]

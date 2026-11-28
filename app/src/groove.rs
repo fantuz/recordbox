@@ -2061,10 +2061,11 @@ mod tests {
 
     #[test]
     fn the_release_fx_runs_on_the_drums_and_the_swap_only() {
-        // A deck whose DRUMS part is a constant 0.5; no slot plays.
+        // The DRUMS part is 0.5. Give the other stems a different signal so a
+        // release effect applied to the full mix would fail this check.
         let g = grid(120.0, 60.0);
-        let len = 44100 * 20;
-        let mut data = vec![0.0f32; len * 8];
+        let len = 44100 * 5;
+        let mut data = vec![-0.25f32; len * 8];
         data[..len * 2].iter_mut().for_each(|v| *v = 0.5);
         let st = crate::stems::Stems { len, data };
         let mut e = Engine::new(0);
@@ -2096,7 +2097,13 @@ mod tests {
         e.release = Some((2, 1.0));
         let (out, cut) = step(&mut e, &mut pos, 44100);
         assert!(cut);
-        assert!((out[2000] - 0.5).abs() < 0.12, "the spinning drums: {}", out[2000]);
+        // The 120 BPM backspin accelerates from 0 to 8x in 160 ms. Above 1x,
+        // the gain follows 0.5598 * (0.98 + 0.02 * speed).
+        for frame in [1000, 2000, 3700] {
+            let speed = 8.0 * frame as f32 / (0.160 * 44100.0);
+            let expected = 0.5 * 0.5598 * (0.98 + 0.02 * speed);
+            assert!((out[frame] - expected).abs() < 0.002, "backspin frame {frame}: {} vs {expected}", out[frame]);
+        }
         assert!(out[40000].abs() < 0.01, "stopped: {}", out[40000]);
         // The press itself does not step: the deck's own drums fade as the effect comes in.
         assert!((out[0] - 0.0).abs() < 0.01 && out[..300].windows(2).all(|w| (w[1] - w[0]).abs() < 0.02), "{:?}", &out[..8]);

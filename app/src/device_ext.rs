@@ -1121,16 +1121,88 @@ mod tests {
     }
 }
 
-/// Scripted states for checking the device windows with `--screenshot`
-/// (PREPDECK_SHOT_VIEW=devicelist|deviceprop|devicesync|devicereport|hotcuebank, the folder
-/// device at PREPDECK_SHOT_DEVICE, PREPDECK_SHOT_TAB for the Property tab). A device without a
-/// library gets a small one exported from the collection first.
+/// Scratch devices live through all frames of a screenshot. Existing device folders are
+/// available for browsing only, and are never used as destinations for example exports.
+pub(crate) enum ScreenshotDevice {
+    Scratch(tempfile::TempDir),
+    Existing(PathBuf),
+}
+
+impl ScreenshotDevice {
+    pub(crate) fn path(&self) -> &Path {
+        match self {
+            Self::Scratch(dir) => dir.path(),
+            Self::Existing(path) => path,
+        }
+    }
+
+    fn prepare(parent: Option<&Path>, browse: bool) -> std::io::Result<Self> {
+        if let Some(parent) = parent {
+            let parent = parent.canonicalize()?;
+            if !parent.is_dir() {
+                return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "expected an existing device folder"));
+            }
+            if browse && !matches!(usb::inspect_target(&parent), Ok((usb::DeviceLayout::Empty, None))) {
+                return Ok(Self::Existing(parent));
+            }
+            return tempfile::Builder::new().prefix("recordbox-shot-").tempdir_in(parent).map(Self::Scratch);
+        }
+        tempfile::Builder::new().prefix("recordbox-shot-").tempdir().map(Self::Scratch)
+    }
+}
+
+impl App {
+    pub(crate) fn screenshot_device(&mut self, browse: bool) -> Option<&ScreenshotDevice> {
+        let parent = std::env::var_os("PREPDECK_SHOT_DEVICE").filter(|root| !root.is_empty());
+        match ScreenshotDevice::prepare(parent.as_deref().map(Path::new), browse) {
+            Ok(device) => {
+                if let Some(i) = self.screenshot_devices.iter().position(|d| d.path() == device.path()) {
+                    return self.screenshot_devices.get(i);
+                }
+                self.screenshot_devices.push(device);
+                self.screenshot_devices.last()
+            }
+            Err(error) => {
+                eprintln!("Could not prepare screenshot device: {error}");
+                None
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn screenshot_exports_use_private_devices_and_preserve_existing_catalogs() -> std::io::Result<()> {
+    let parent = tempfile::tempdir()?;
+    let catalog = parent.path().join("PIONEER/rekordbox/export.pdb");
+    std::fs::create_dir_all(catalog.parent().unwrap())?;
+    std::fs::write(&catalog, b"original catalog")?;
+    let display = ScreenshotDevice::prepare(Some(parent.path()), true)?;
+    assert!(matches!(&display, ScreenshotDevice::Existing(_)));
+    assert_eq!(display.path(), parent.path().canonicalize()?);
+    let first = ScreenshotDevice::prepare(Some(parent.path()), false)?;
+    let second = ScreenshotDevice::prepare(Some(parent.path()), false)?;
+    let first_path = first.path().to_owned();
+    assert_eq!(first.path().parent(), Some(display.path()));
+    assert_ne!(first.path(), second.path());
+    std::fs::write(first.path().join("fixture"), b"copied audio")?;
+    drop(first);
+    assert!(!first_path.exists());
+    assert!(second.path().exists());
+    assert_eq!(std::fs::read(catalog)?, b"original catalog");
+    assert!(ScreenshotDevice::prepare(Some(&parent.path().join("missing")), false).is_err());
+    Ok(())
+}
+
+/// PREPDECK_SHOT_DEVICE can point to a catalog to display. Sample exports for the
+/// screenshot always use a new subfolder there or in the system temporary directory.
 pub fn shot_setup(app: &mut App, what: &str) {
-    let root = PathBuf::from(std::env::var("PREPDECK_SHOT_DEVICE").unwrap_or_else(|_| std::env::temp_dir().join("recordbox_shot_devfeat").to_string_lossy().to_string()));
-    let _ = std::fs::create_dir_all(&root);
+    let Some(device) = app.screenshot_device(what != "devicereport") else { return };
+    let scratch = matches!(device, ScreenshotDevice::Scratch(_));
+    let root = device.path().to_path_buf();
     let r = root.to_string_lossy().to_string();
     let mut report = None;
-    if usb::check_export_target(&root).is_ok_and(|layout| layout == usb::DeviceLayout::Empty || what == "devicereport") {
+    if scratch {
         let ids: Vec<i64> = app.tracks.iter().filter(|t| !t.missing && usb::player_supported(&t.file_type)).take(6).map(|t| t.id).collect();
         let mut tracks = HashMap::new();
         for id in &ids {
@@ -1156,9 +1228,6 @@ pub fn shot_setup(app: &mut App, what: &str) {
             eprintln!("shot export failed: {e}");
         }
         report = got.into_inner().ok().flatten();
-    }
-    if !app.prefs.devices_extra.contains(&r) {
-        app.prefs.devices_extra.push(r.clone());
     }
     app.scan_devices();
     app.side = SideMode::Devices;

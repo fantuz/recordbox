@@ -264,6 +264,32 @@ def write_file(path: Path, data: bytes, mode: int = 0o644) -> None:
     path.write_bytes(data); path.chmod(mode)
 
 
+def bundle_mp3_sources(source_root: Path, destination: Path, commit: str) -> None:
+    locked = tomllib.loads((source_root / "app/Cargo.lock").read_text(encoding="utf-8"))["package"]
+    names = {"mp3lame-encoder", "mp3lame-sys"}
+    packages = [p for p in locked if p["name"] in names]
+    if not packages:
+        return
+    if len(packages) != 2 or {p["name"] for p in packages} != names:
+        raise PackageError("Expected one locked version of each LAME component")
+    sources = source_root / "packaging/lame"
+    for p in packages:
+        if p.get("source") != "registry+https://github.com/rust-lang/crates.io-index" or not re.fullmatch(r"[0-9][0-9A-Za-z.+-]*", p["version"]):
+            raise PackageError("MP3 codec source does not match the crates.io distribution recipe")
+        name = f"{p['name']}-{p['version']}"
+        archive = sources / f"{name}.crate"
+        if not archive.is_file() or sha256(archive) != p.get("checksum"):
+            raise PackageError(f"Missing or mismatched locked codec source {archive.name}")
+        write_file(destination / archive.name, archive.read_bytes())
+        if p["name"] == "mp3lame-sys":
+            with tarfile.open(archive, "r:gz") as src:
+                for item, notice in (("LICENSE", "LGPL-3.0.txt"), ("lame-4.0/COPYING", "LAME-COPYING.txt"), ("lame-4.0/LICENSE", "LAME-LICENSE.txt")):
+                    write_file(destination / notice, src.extractfile(f"{name}/{item}").read())
+    for notice in ("GPL-3.0.txt", "README.md"):
+        write_file(destination / notice, (sources / notice).read_bytes())
+    write_file(destination / "recordbox-source.txt", f"https://github.com/fantuz/recordbox/archive/{commit}.tar.gz\n".encode())
+
+
 def distribution_mode(path: Path, platform: str) -> int:
     """Archive metadata; Windows stat/chmod do not describe POSIX permissions."""
     if path.is_dir(): return 0o755
@@ -375,6 +401,7 @@ def build_archive(binary: Path, source_root: Path, output: Path, platform: str, 
             write_file(resources / "VULKAN.md", (source_root / "docs/VULKAN.md").read_bytes())
         write_file(resources / "Inter-NOTICE.txt", (source_root / "app/assets/fonts/README.txt").read_bytes())
         write_file(resources / "Inter-OFL.txt", (source_root / "packaging/Inter-OFL.txt").read_bytes())
+        bundle_mp3_sources(source_root, resources / "runtime-notices/LAME", source_commit.lower())
         for index, notice in enumerate(runtime_notices or [], 1):
             if not notice.is_file() or not re.fullmatch(r"[A-Za-z0-9_.+-]+", notice.name):
                 raise PackageError(f"Invalid runtime notice: {notice}")

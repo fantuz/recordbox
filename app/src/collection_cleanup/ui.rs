@@ -158,7 +158,7 @@ impl Review {
                     .enumerate()
                     .map(|(i, t)| (t.id, i))
                     .collect();
-                app.collection_categories = Default::default();
+                app.invalidate_track_metadata();
                 app.selected.retain(|id| !removed.contains(id));
                 app.sub_sel.retain(|id| !removed.contains(id));
                 app.previews.retain(|id, _| !removed.contains(id));
@@ -501,13 +501,8 @@ fn busy(app: &App, report: &Report, selected: &BTreeSet<usize>) -> bool {
         || selected_track(app.ext.preview.state.lock().track)
 }
 
-/// The library can redock during cleanup. Keep the process alive while changes are being applied.
-pub fn guard_app_close(app: &App, ctx: &Context) {
-    if ctx.input(|i| i.viewport().close_requested())
-        && matches!(app.ext.cleanup.as_ref().map(|review| &review.phase), Some(Phase::Working { applying: true, .. }))
-    {
-        ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
-    }
+pub(crate) fn applying(app: &App) -> bool {
+    matches!(app.ext.cleanup.as_ref().map(|review| &review.phase), Some(Phase::Working { applying: true, .. }))
 }
 
 pub fn show(app: &mut App, ctx: &Context) {

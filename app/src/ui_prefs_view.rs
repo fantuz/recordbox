@@ -339,12 +339,17 @@ fn color(app: &mut App, ui: &mut Ui, mode: Mode) {
     if matches!(mode, Mode::Export | Mode::Performance) {
         item(ui, "ViewSkin", 118.0, |it| {
             it.title("Appearance");
-            it.radio(52.0, 56.0, true, "Dark ");
-            // recordbox's colours are fixed values used by every drawing file; a light
-            // appearance needs each of them to become a themed lookup (see PARITY-GAPS.md).
-            it.en = false;
-            it.hint("recordbox has the dark appearance only.");
-            it.radio(52.0, 82.0, false, "Light ");
+            // `ViewSkin::buttonClicked`: the radios set `ColorThemeMode` (1 Dark, 2 Light) and
+            // the whole window is redrawn at once (theme::sync).
+            let light = app.prefs.rb.color_theme == 2;
+            if it.radio(52.0, 56.0, !light, "Dark ") && light {
+                app.prefs.rb.color_theme = 1;
+                dirty = true;
+            }
+            if it.radio(52.0, 82.0, light, "Light ") && !light {
+                app.prefs.rb.color_theme = 2;
+                dirty = true;
+            }
         });
     }
     item(ui, "ViewWaveColor", 144.0, |it| {

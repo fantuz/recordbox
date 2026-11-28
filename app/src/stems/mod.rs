@@ -806,7 +806,8 @@ pub fn save(path: &Path, s: &Stems) -> Result<()> {
     Ok(())
 }
 
-pub fn load(path: &Path) -> Result<Stems> {
+/// Validate a complete planar cache and leave the reader at its PCM payload.
+pub(crate) fn open_cache(path: &Path) -> Result<(std::fs::File, usize)> {
     let mut file = std::fs::File::open(path)?;
     let mut header = [0; 16];
     file.read_exact(&mut header).context("reading the STEMS cache header")?;
@@ -814,8 +815,12 @@ pub fn load(path: &Path) -> Result<Stems> {
     let frames = u64::from_le_bytes(header[8..].try_into()?);
     let bytes = file.metadata()?.len().checked_sub(16).context("stems cache file is incomplete")?;
     anyhow::ensure!(frames.checked_mul(16) == Some(bytes), "stems cache file is incomplete");
-    let len = usize::try_from(frames)?;
-    let samples = usize::try_from(bytes / 2)?;
+    Ok((file, usize::try_from(frames)?))
+}
+
+pub fn load(path: &Path) -> Result<Stems> {
+    let (mut file, len) = open_cache(path)?;
+    let samples = len.checked_mul(8).context("stems cache is too large")?;
     let mut data = Vec::new();
     data.try_reserve_exact(samples).context("allocating memory for saved stems")?;
     // Decode directly into the playback allocation. A four-minute track has about 169 MB of PCM.

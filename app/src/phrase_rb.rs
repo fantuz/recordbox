@@ -229,8 +229,12 @@ pub fn analyze_with_cancel(samples: &[f32], sr: u32, beats: &[Beat], key: i32, c
         return None;
     }
     let (bpm100, first_ms, first_bar) = grid_input(beats)?;
-    let estimated_beats = frames as f64 * f64::from(bpm100) / (6000.0 * f64::from(sr));
-    if !(8.0..=MAX_BEATS as f64).contains(&estimated_beats) {
+    // The reference reader gives the classifier length minus one. Its eight-beat
+    // admission check starts at the first beat and excludes 32 filter frames.
+    let frames = frames - 1;
+    let beat_frames = frames as f64 - 32.0 - (f64::from(first_ms) * f64::from(sr) / 1000.0);
+    let beats_per_frame = f64::from(bpm100) / (6000.0 * f64::from(sr));
+    if beat_frames * beats_per_frame < 8.0 || frames as f64 * beats_per_frame > MAX_BEATS as f64 {
         return None;
     }
     let inp = Input { sr: sr as i32, total: frames as i32, bpm100, first_ms, first_bar, key };
@@ -241,7 +245,7 @@ pub fn analyze_with_cancel(samples: &[f32], sr: u32, beats: &[Beat], key: i32, c
         if let Some(lane) = ACTIVE.try_lock_for(std::time::Duration::from_millis(50)) { break lane; }
     };
     // An unmodelled structure must not strand a deck worker or fail an entire export.
-    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| analyze_blocks(samples, &inp, cancelled))).ok().flatten()
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| analyze_blocks(&samples[..2 * frames], &inp, cancelled))).ok().flatten()
 }
 
 fn analyze_blocks(samples: &[f32], inp: &Input, cancelled: &dyn Fn() -> bool) -> Option<RbResult> {
@@ -436,6 +440,40 @@ mod unit {
         tr.rec("enabled", || vec![(0, vec![1.0])]);
         assert_eq!(tr.calls.len(), 1);
         assert_eq!(tr.calls[0].args[0].1, [1.0]);
+    }
+
+    #[test]
+    fn type_two_phrases_match_upstream_on_layered_tone_and_isolated_kicks() {
+        // The reference produces a two-phrase Low result for this tone and a
+        // single Mid phrase for the kicks. Neither case used the old type-1 path.
+        let sr = 22_050;
+        let cases: &[(f64, i32, i32, &[(i32, i32)])] = &[
+            (128.0, 3, 63, &[(1, 9), (33, 9)]),
+            (94.0, 2, 64, &[(1, 1)]),
+        ];
+        for &(bpm, mood, end_beat, phrases) in cases {
+            let period = 60.0 / bpm;
+            let frames = (64.0 * period * f64::from(sr)) as usize;
+            let mut stereo = Vec::with_capacity(frames * 2);
+            for i in 0..frames {
+                let t = i as f64 / f64::from(sr);
+                let beat = (t / period) as usize;
+                let phase = t - beat as f64 * period;
+                let sample = if mood == 3 {
+                    let level = if beat < 32 { 0.18 } else { 0.35 };
+                    level * (std::f64::consts::TAU * 440.0 * t).sin()
+                } else if beat % 2 == 0 {
+                    0.3 * (-30.0 * phase).exp() * (std::f64::consts::TAU * 55.0 * phase).sin()
+                } else {
+                    0.0
+                };
+                stereo.extend([sample as f32; 2]);
+            }
+            let result = analyze_with_cancel(&stereo, sr, &grid(64, bpm, 0.0, 1), 0, &|| false).unwrap();
+            assert_eq!((result.mood, result.end_beat), (mood, end_beat));
+            let rows: Vec<_> = phrases.iter().map(|&(beat, kind)| [beat, kind, 0, 0, 0, 0, 0, 0, 0, 0, 0]).collect();
+            assert_eq!(result.rows, rows);
+        }
     }
 
     /// A synthetic 4/4 track (hat-only intro, kick section, break, kick section, hat outro):

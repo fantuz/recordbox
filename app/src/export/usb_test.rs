@@ -166,6 +166,72 @@ fn stopping_phrase_analysis_leaves_the_usb_contents_intact() {
     assert_eq!(snapshot(&root), before);
 }
 
+#[test]
+fn usb_preparation_reports_failures_keeps_existing_copies_and_discards_stopped_results() -> anyhow::Result<()> {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    let tmp = tempfile::tempdir()?;
+    let root = tmp.path().join("usb");
+    std::fs::create_dir(&root)?;
+    let path = tmp.path().join("intro.wav");
+    crate::demo::write_wav(&path, 44_100, &[0.0; 2048])?;
+    let mut track = crate::importer::read_track(&path);
+    track.id = 1;
+    let et = ExportTrack {
+        track, grid: Some(BeatGrid::constant(0.0, 118.0, 1)), wave: Some(Waveform::default()),
+        cues: vec![], tags: vec![], rb_anlz: None, grid_same: false, vocal: None, phrases: None,
+    };
+    let mut request = ExportRequest { root: root.clone(), tracks: [(1, et.clone())].into(),
+        nodes: vec![ExportNode { name: "Set".into(), tracks: vec![1], ..Default::default() }], ..Default::default() };
+    let cancel = AtomicBool::new(false);
+    run_export(request, &|_| {}, &cancel)?;
+    let before = read_device(&root)?;
+    let orig = before.tracks.values().next().unwrap();
+    let on_drive = root.join(orig.file_path.trim_start_matches('/'));
+    let companion = root.join(orig.analyze_path.trim_start_matches('/'));
+    let (audio, analysis) = (std::fs::read(&on_drive)?, std::fs::read(&companion)?);
+
+    std::fs::write(&path, b"damaged source")?;
+    let missing = tmp.path().join("second.wav");
+    std::fs::write(&missing, b"damaged second source")?;
+    let mut refresh = et;
+    refresh.wave = None;
+    let mut extra = refresh.clone();
+    extra.track.id = 2;
+    extra.track.path = missing.to_string_lossy().into_owned();
+    let unprepared = || ExportRequest {
+        root: root.clone(), tracks: [(1, refresh.clone()), (2, extra.clone())].into(),
+        nodes: vec![ExportNode { name: "Set".into(), tracks: vec![1, 2], ..Default::default() }], ..Default::default()
+    };
+    let intact = snapshot(&root);
+    let outcome = run_export(unprepared(), &|event| match event {
+        Progress::Step { text, .. } if text.starts_with("Analyzing ") => cancel.store(true, Ordering::Relaxed),
+        Progress::Analyzed(..) => panic!("cancelled analysis reached the local library"),
+        _ => {}
+    }, &cancel);
+    assert!(outcome.unwrap_err().to_string().contains("stopped"));
+    assert_eq!(snapshot(&root), intact);
+
+    cancel.store(false, Ordering::Relaxed);
+    request = unprepared();
+    request.remove_nodes = vec![before.nodes[0].id];
+    request.delete_unreferenced = true;
+    assert!(run_export(request, &|_| {}, &cancel).unwrap_err().to_string().contains("Could not prepare"));
+    assert_eq!(snapshot(&root), intact);
+
+    let msg = run_export(unprepared(), &|event| match event {
+        Progress::Analyzed(..) => panic!("failed refresh reached the local library"),
+        Progress::Report(report) => assert_eq!(report.skipped.len(), 2),
+        _ => {}
+    }, &cancel)?;
+    assert!(msg.contains("previous device copy kept"), "{msg}");
+    let after = read_device(&root)?;
+    assert_eq!(after.tracks.len(), 1);
+    assert_eq!(after.nodes.iter().find(|n| n.name == "Set").unwrap().entries, [orig.id]);
+    assert_eq!((std::fs::read(on_drive)?, std::fs::read(companion)?), (audio, analysis));
+    Ok(())
+}
+
 /// USB-005: an export cut short at any journal step (as if the program died there) is either
 /// undone or finished by recovery: the drive is byte-for-byte the "before" or the "after".
 #[test]

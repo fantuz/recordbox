@@ -91,10 +91,10 @@ pub fn master_volume(p: &Painter, c: Pos2, volume: f32) {
     let sweep = 270f32.to_radians();
     let at = |angle: f32| vec2(angle.cos(), angle.sin());
     let arc = |v: f32| (0..=28).map(|i| c + at(start + sweep * v * i as f32 / 28.0) * 8.2).collect();
-    p.add(Shape::line(arc(1.0), Stroke::new(2.7, Color32::from_gray(50))));
+    p.add(Shape::line(arc(1.0), Stroke::new(2.7, crate::theme::gy(0x323232))));
     if volume > 0.0 { p.add(Shape::line(arc(volume), Stroke::new(2.7, crate::theme::BLUE))); }
     let pointer = at(start + sweep * volume);
-    p.line_segment([c + pointer * 4.4, c + pointer * 9.4], Stroke::new(2.1, Color32::WHITE));
+    p.line_segment([c + pointer * 4.4, c + pointer * 9.4], Stroke::new(2.1, crate::theme::WHITE));
 }
 
 /// Call Previous / Next Memory Cue: an 8 × 8 triangle whose tip is at `tip`.
@@ -245,7 +245,7 @@ pub fn link(p: &Painter, c: Pos2, k: f32, col: Color32) {
 /// when off, overlapping and blue when on.
 pub fn dual_control(p: &Painter, c: Pos2, on: bool) {
     let g = |x: f32, y: f32| c + vec2(x - 11.5, y - 10.5) * 1.13;
-    let (a, b, col) = if on { (g(2.75, 3.75), g(7.75, 8.75), Color32::from_rgb(0x14, 0x73, 0xEB)) } else { (g(0.75, 0.75), g(9.75, 11.75), Color32::WHITE) };
+    let (a, b, col) = if on { (g(2.75, 3.75), g(7.75, 8.75), Color32::from_rgb(0x14, 0x73, 0xEB)) } else { (g(0.75, 0.75), g(9.75, 11.75), crate::theme::WHITE.c()) };
     for o in [a, b] {
         p.rect_stroke(Rect::from_min_size(o, vec2(12.5, 8.5) * 1.13).expand(0.75), 0.0, Stroke::new(1.5, col), egui::StrokeKind::Inside);
     }

@@ -75,6 +75,10 @@ impl Review {
         }
     }
 
+    pub(crate) fn writing(&self) -> bool {
+        matches!(self.outbound, Outbound::Working { writing: true, .. })
+    }
+
     pub fn status(&self) -> Option<&'static str> {
         match &self.outbound {
             Outbound::Working { label, .. } => Some(label),
@@ -172,9 +176,6 @@ pub fn show(app: &mut App, ctx: &Context) {
         return;
     };
     review.poll();
-    if matches!(review.outbound, Outbound::Working { writing: true, .. }) && ctx.input(|i| i.viewport().close_requested()) {
-        ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
-    }
     let mut open = true;
     let mut close = false;
     let mut import = false;
@@ -518,6 +519,48 @@ fn preview_rows(ui: &mut Ui, plan: &Plan, selected: &mut BTreeSet<usize>, links:
 mod tests {
     use super::*;
     use egui::{Color32, Shape};
+
+    #[test]
+    fn active_desktop_writes_keep_main_alive_and_allow_library_redocking() {
+        let root = egui::ViewportId::ROOT;
+        let child = crate::DetachedLibrary::id();
+        let ctx = Context::default();
+        ctx.set_embed_viewports(false);
+        let cancelled = |review: Option<&Review>, viewport, closing: Option<egui::ViewportId>| {
+            let mut raw = egui::RawInput { viewport_id: viewport, ..Default::default() };
+            raw.viewports.entry(child).or_default();
+            if let Some(closing) = closing {
+                raw.viewports.get_mut(&closing).unwrap().events.push(egui::ViewportEvent::Close);
+            }
+            let (mut editor_ok, mut recorder_ok) = (true, true);
+            let output = ctx.run(raw, |ctx| {
+                if ctx.viewport_id() == root {
+                    ctx.show_viewport_deferred(child, Default::default(), |_, _| {});
+                }
+                crate::guard_library_write_close(ctx, review.is_some_and(Review::writing), &mut editor_ok, &mut recorder_ok);
+            });
+            let cancelled = output.viewport_output.values().any(|v| v.commands.contains(&egui::ViewportCommand::CancelClose));
+            assert_eq!((editor_ok, recorder_ok), (!cancelled, !cancelled), "a veto expires both prior quit confirmations");
+            cancelled
+        };
+        assert!(!cancelled(None, root, Some(root)));
+        for (label, writing) in [("Preview", false), ("Apply", true), ("Recovery", true)] {
+            let (tx, rx) = crossbeam_channel::bounded(1);
+            let mut review = Review {
+                desktop: None, local: None, found: true, direction: Some(Direction::WriteBack),
+                outbound: Outbound::Working { label, writing, rx }, recovery: Ok(false), confirm_recovery: false,
+            };
+            assert!(!cancelled(Some(&review), root, None));
+            assert!(!cancelled(Some(&review), root, Some(child)));
+            assert!(!cancelled(Some(&review), child, Some(child)));
+            assert_eq!(review.status(), Some(label));
+            assert_eq!(cancelled(Some(&review), root, Some(root)), writing);
+            tx.send(Err(anyhow::anyhow!("fixture finished"))).unwrap();
+            review.poll();
+            assert!(review.status().is_none());
+            assert!(!cancelled(Some(&review), root, Some(root)));
+        }
+    }
 
     fn contrast(a: Color32, b: Color32) -> f32 {
         let luminance = |c| {

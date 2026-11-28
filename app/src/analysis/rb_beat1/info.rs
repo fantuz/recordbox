@@ -110,6 +110,14 @@ impl Bia {
     /// `BeatInfoAnalyzer::analyze(info, out, total, 4, 16, 12, varied)`. Returns the BPM; the
     /// candidate `list` is consumed (the original works on a copy).
     pub(super) fn analyze(&self, list: &mut Vec<BeatInfo>, out: &mut Vec<BeatInfo>, total: i32, a5: i32, a6: i32, a7: i32, varied: bool) -> f32 {
+        self.analyze_with(list, out, total, a5, a6, a7, varied, None)
+    }
+
+    /// `analyze` with the candidate list `segAdjust` searches given apart (`seg_list`; the
+    /// working list when `None`): 2_0's varied pass hands its `segAdjust` the list the constant
+    /// pass left behind (`BeatAnalyzer_2_0`, 0x10119d.. call with the caller's `info`).
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn analyze_with(&self, list: &mut Vec<BeatInfo>, out: &mut Vec<BeatInfo>, total: i32, a5: i32, a6: i32, a7: i32, varied: bool, seg_list: Option<&[BeatInfo]>) -> f32 {
         out.clear();
         if list.is_empty() {
             return 0.0;
@@ -198,7 +206,7 @@ impl Bia {
             }
         }
         // --- P6: phase and tempo fine search per segment.
-        self.seg_adjust(list, &mut segs, total);
+        self.seg_adjust(seg_list.unwrap_or(list), &mut segs, total);
         // --- P7: beat tracking per segment.
         let v335 = a6 + a5 + a7;
         let mut buf = vec![0i32; (4 * v335 + 1) as usize];

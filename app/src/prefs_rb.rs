@@ -165,7 +165,7 @@ pub struct RbPrefs {
     pub pad_mode_custom: bool,
     pub pad_mode_layout: u8,
     // ---- View > Color
-    /// `ColorThemeMode`: 1 dark, 2 light. Only dark is drawn (see PARITY-GAPS.md).
+    /// `ColorThemeMode`: 1 dark, 2 light. EDIT uses its dark workspace in either appearance.
     pub color_theme: u8,
     /// `HotCueColorType`: 1 CDJ, 2 COLD1, 3 COLD2, 4 COLORFUL. Stored (new hot cues are COLORFUL).
     pub hot_cue_color: u8,

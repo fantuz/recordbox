@@ -7,7 +7,9 @@
 //! 2. `madmom::analyze` (0x10230a820) runs madmom's downbeat network (`net`) on a 60 s window from
 //!    that offset (the whole track when the tempo may change), decodes it with a bar-pointer DBN
 //!    (`dbn`) and turns the beat times into a beat list (`madmom::get_beat_list`, `get_bpm`);
-//! 3. `Analyzer::analyzeFocus` merges that list with the legacy analysis into the final grid.
+//! 3. `Analyzer::analyzeFocus` merges the list with the legacy analysis and votes on the bar phase.
+//! Dynamic and Auto-detected tempo changes use model7 over minute-sized windows.
+//! Unresolved subdivisions, half-beat offsets or unusable timing retain the ordinary estimator.
 
 #[path = "rb_hp_net.rs"]
 pub mod net;
@@ -18,6 +20,16 @@ pub mod uba;
 
 #[path = "rb_hp_focus.rs"]
 pub mod focus;
+#[path = "rb_hp_vote.rs"]
+mod vote;
+#[path = "rb_hp_legacy.rs"]
+mod legacy;
+#[path = "rb_hp_src.rs"]
+mod src;
+#[path = "rb_hp_tempo.rs"]
+mod tempo;
+#[path = "rb_hp_focus2.rs"]
+mod focus2;
 
 use crate::model::BeatGrid;
 use std::sync::OnceLock;
@@ -29,36 +41,14 @@ pub const MODE_AUTO: u8 = 2;
 pub const MODE_NORMAL: u8 = 3;
 pub const MODE_DYNAMIC: u8 = 4;
 
-/// The legacy analysis rekordbox runs first (`BeatAnalyzer_2_0`): its BPM and beat positions.
-/// recordbox supplies its own estimate (see `legacy_from_grid`); rekordbox only uses the BPM for
-/// its octave and integer-snap rules and the beats to pick the 60 s window.
+/// The BPM and candidate positions from `BeatAnalyzer_2_0`. The positions select
+/// a network window, and the BPM guides octave and integer-tempo correction.
 #[derive(Clone, Debug)]
 pub struct Legacy {
     /// BPM as the legacy library stores it (float, the same value x100 rounded is `BA_GetBpm`).
     pub bpm: f32,
     /// Beat positions in samples from the first beat on.
     pub beats: Vec<i32>,
-}
-
-pub fn legacy_from_grid(bpm: f64, first_beat: f64, sr: u32, total: usize) -> Option<Legacy> {
-    let bpm100 = (bpm * 100.0).round();
-    // The legacy ABI represents beats as integer sample positions and BPM x 100
-    // as an integer. A sub-sample period cannot produce a distinct beat.
-    if !(1.0..=6000.0 * sr as f64).contains(&bpm100) || !first_beat.is_finite() || sr == 0 {
-        return None;
-    }
-    let b = (bpm100 / 100.0) as f32;
-    let period = 60.0 / bpm100 * 100.0;
-    let mut t = first_beat.rem_euclid(period);
-    let mut beats = vec![];
-    while ((t * sr as f64) as usize) < total {
-        beats.push((t * sr as f64) as i32);
-        t += period;
-    }
-    if beats.is_empty() {
-        return None;
-    }
-    Some(Legacy { bpm: b, beats })
 }
 
 /// `Analyzer::getOffsetCalc` (0x101182100): where the 60 s window of the network starts.
@@ -260,19 +250,38 @@ fn model(dynamic: bool) -> Option<&'static net::Net> {
     cell.get_or_init(|| net::Net::load(&net::models_dir().join(name)).ok()).as_ref()
 }
 
-/// True when rekordbox's beat models are installed and readable.
-pub fn available() -> bool {
-    model(false).is_some()
+/// A cheap, process-local file check during admission. Reading weights happens
+/// later on the worker, only for an enabled model inside its working-set limit.
+pub(super) fn models_present(mode: u8) -> bool {
+    fn present(dynamic: bool) -> bool {
+        static NORMAL: OnceLock<bool> = OnceLock::new();
+        static DYNAMIC: OnceLock<bool> = OnceLock::new();
+        *(if dynamic { &DYNAMIC } else { &NORMAL }).get_or_init(|| {
+            let dir = net::models_dir().join(if dynamic { "model7" } else { "model8" });
+            ["saved_model.pb", "variables/variables.index", "variables/variables.data-00000-of-00001"]
+                .iter().all(|p| dir.join(p).is_file())
+        })
+    }
+    match mode {
+        MODE_DYNAMIC => present(true),
+        MODE_AUTO => present(false) || present(true),
+        MODE_NORMAL => present(false),
+        _ => false,
+    }
+}
+
+fn dbn() -> &'static dbn::Dbn {
+    static DBN: OnceLock<dbn::Dbn> = OnceLock::new();
+    DBN.get_or_init(dbn::Dbn::rekordbox)
 }
 
 /// The network + DBN + beat list stage for one window of the decode.
 pub fn madmom_stage(samples: &[f32], sr: u32, start: usize, len: usize, hendou: bool) -> Option<(Vec<dbn::ListBeat>, f64, Vec<(f32, i32)>)> {
     let pcm = samples.get(start.checked_mul(2)?..start.checked_add(len)?.checked_mul(2)?)?;
-    let net = if hendou { model(true).or_else(|| model(false))? } else { model(false)? };
+    let net = model(hendou)?;
     let mono: Vec<f32> = pcm.chunks_exact(2).map(|lr| (lr[0] + lr[1]) * 0.5).collect();
     let act = net.run(&mono);
-    static DBN: OnceLock<dbn::Dbn> = OnceLock::new();
-    let mut beats = DBN.get_or_init(dbn::Dbn::rekordbox).track(&act);
+    let mut beats = dbn().track(&act);
     scale_times(&mut beats, sr as i32);
     let list = dbn::get_beat_list(&beats, len as i64, sr as i32, 4);
     let bpm = dbn::get_bpm(&list);
@@ -286,59 +295,122 @@ pub struct HpOutcome {
     pub grid: BeatGrid,
     /// Beat positions (samples), beat numbers and bpm x 100 as rekordbox's `BA_GetBeatPos_Focus`.
     pub beats: Vec<(i32, i32, i32)>,
+    pub adaptive: bool,
     pub offset: i32,
     pub window: (usize, usize),
 }
 
-/// rekordbox's high precision analysis of decoded audio. `legacy` is the standard analysis'
-/// tempo and first beat (recordbox's own, standing in for `BeatAnalyzer_2_0`). Returns None
-/// when the models are not installed or the audio is not 44.1 / 48 kHz.
-pub fn analyze(dec: &crate::audio::Decoded, mode: u8, legacy: (f64, f64, u8)) -> Option<HpOutcome> {
-    let sr = dec.sr;
-    // UBA stores at most fifteen minutes of envelope data. Keep the existing grid
-    // for longer sets or for the still-unimplemented tempo-change focus pass.
-    if !matches!(sr, 44_100 | 48_000) || dec.frames() > 900 * sr as usize || mode == MODE_DYNAMIC {
-        return None;
-    }
-    if !available() {
-        return None;
-    }
-    let total = dec.frames();
-    let (std_bpm, std_t0, std_beat) = legacy;
-    let legacy = legacy_from_grid(legacy.0, legacy.1, sr, total)?;
-    let pcm16 = uba::to_i16(&dec.samples);
-    let env = Uba::new(sr as i32, &pcm16);
-    let offset = get_offset_calc(&env, sr as i32, &legacy);
-    let hendou = false;
-    let (start, len) = madmom_window(total as i64, sr as i64, offset as i64, hendou);
-    let (list, mbpm, _) = madmom_stage(&dec.samples, sr, start as usize, len as usize, hendou)?;
-    let bpm100 = (legacy.bpm as f64 * 100.0).round() as i32;
+const DYNAMIC_FALLBACK: &str = "retain the ordinary variable-tempo grid";
+const NO_GRID: &str = "the beat analysis could not establish a reliable grid";
+
+/// The legacy envelope and the implemented model path cover at most 15 minutes.
+/// Check eligibility before allocating converted audio or touching optional weights.
+pub(super) fn eligible(dec: &crate::audio::Decoded, mode: u8) -> bool {
+    dec.samples.len() % 2 == 0 && eligible_audio(dec.sr, dec.frames(), mode)
+}
+
+fn eligible_audio(sr: u32, frames: usize, mode: u8) -> bool {
+    matches!(mode, MODE_AUTO | MODE_NORMAL | MODE_DYNAMIC) && (8000..=200_000).contains(&sr) &&
+        sr % 50 == 0 && frames > 1 && frames <= 900 * sr as usize
+}
+
+fn analyze_model(dec: &crate::audio::Decoded, mode: u8, shared: Option<super::rb_beat1::Front>, cancelled: &dyn Fn() -> bool) -> Result<HpOutcome, &'static str> {
+    if cancelled() || !eligible(dec, mode) || !models_present(mode) { return Err("unsupported track or missing local beat model"); }
+    let sr = super::rb_beat1::analysis_rate(dec.sr);
+    let converted;
+    let samples = if sr == dec.sr { dec.samples.as_slice() } else {
+        converted = src::new(dec.sr, sr).ok_or("unsupported model conversion rate")?.run(&dec.samples);
+        &converted
+    };
+    let total = samples.len() / 2;
+    let analysed = total.saturating_sub(1);
+    let input = &samples[..2 * analysed];
+    let front = shared.or_else(|| super::rb_beat1::Front::from_audio(input, sr)).ok_or(NO_GRID)?;
+    if cancelled() { return Err(NO_GRID); }
+    let env = Uba::from_audio(sr, input);
+    let dynamic = mode == MODE_DYNAMIC;
+    let l = legacy::analyze(front, sr, dynamic, Some(&env.low)).ok_or(NO_GRID)?;
+    let varying = dynamic || (mode == MODE_AUTO && l.hendou);
+    let bpm100 = l.bpm100();
+    let legacy = Legacy { bpm: l.bpm, beats: l.beats.iter().map(|b| b.pos).collect() };
+    let offset = if varying { 0 } else { get_offset_calc(&env, sr as i32, &legacy) };
+    let (start, len) = madmom_window(total as i64, sr as i64, offset as i64, varying);
+    if cancelled() { return Err(NO_GRID); }
+    let (list, mbpm) = if varying {
+        // Each piece is processed and discarded before starting the next one.
+        let net = model(true).ok_or(DYNAMIC_FALLBACK)?;
+        tempo::madmom_tempo(net, dbn(), samples, sr, total, cancelled).ok_or(DYNAMIC_FALLBACK)?
+    } else {
+        let (list, bpm, _) = madmom_stage(samples, sr, start as usize, len as usize, false).ok_or(NO_GRID)?;
+        (list, bpm as i32)
+    };
+    if cancelled() { return Err(NO_GRID); }
     let ml: Vec<(i32, i32, i32)> = list.iter().map(|b| (b.pos as i32, b.num_bar, b.bpm)).collect();
-    let input = focus::FocusInput { sr: sr as i32, total: total as i32, offset, hendou, legacy_bpm100: bpm100, legacy_count: legacy.beats.len() as i32, madmom: &ml, madmom_bpm: mbpm as i32 };
-    // a reading past the end of a list in a branch not yet seen must not take the analysis down
-    let out = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| focus::analyze_focus(&env, &input))).ok().flatten()?;
-    if out.beats.is_empty() || out.bpm100 <= 0 {
-        return None;
-    }
-    let mut beats = out.beats;
-    // The bar-phase pass that follows UnitBeatAdjust in analyzeFocus (0x10116c050; decompiled
-    // lines 2250-5222 of the constant path: band integrals at every beat, intro / outro onsets,
-    // ranking and a vote over beat numbers) is not ported. The bar phase is taken from
-    // recordbox's own estimate instead: the number of its beat nearest to the first beat.
-    // PREPDECK_HP_BARPHASE=focus keeps the numbering the port has before that pass.
-    if std::env::var("PREPDECK_HP_BARPHASE").as_deref() != Ok("focus") && std_bpm > 0.0 {
-        let t = beats[0].0 as f64 / sr as f64;
-        let k = ((t - std_t0) / (60.0 / std_bpm)).round() as i64;
-        let n0 = (k + std_beat as i64 - 1).rem_euclid(4);
-        for (i, b) in beats.iter_mut().enumerate() {
-            b.1 = ((n0 + i as i64) % 4 + 1) as i32;
+    let input = focus::FocusInput { sr: sr as i32, total: analysed as i32, offset, hendou: varying,
+        legacy_bpm100: bpm100, legacy_count: legacy.beats.len() as i32, madmom: &ml, madmom_bpm: mbpm };
+    let failed = if varying { DYNAMIC_FALLBACK } else { NO_GRID };
+    let out = focus::analyze_focus(&env, &input).map_err(|_| failed)?;
+    let beats = out.beats;
+    if !valid_model_beats(&beats, out.bpm100, analysed) { return Err(failed); }
+    let bpm = f64::from(out.bpm100) / 100.0;
+    let grid = grid_from_list(&beats, sr);
+    if out.adaptive && !grid_replays(&grid, &beats, sr, total) { return Err(failed); }
+    Ok(HpOutcome { bpm, grid, beats, adaptive: out.adaptive, offset, window: (start as usize, len as usize) })
+}
+
+/// Bound both the tempo and the number of beats before replaying the grid.
+fn valid_model_beats(beats: &[(i32, i32, i32)], bpm100: i32, frames: usize) -> bool {
+    const TEMPO: std::ops::RangeInclusive<i32> = 100..=100_000;
+    // 15 minutes at the maximum supported 1,000 BPM, plus boundary beats.
+    (1..=focus2::MAX_BEATS).contains(&beats.len()) && TEMPO.contains(&bpm100) &&
+        beats.iter().all(|&(pos, bar, tempo)| pos >= 0 && pos as usize <= frames && (1..=4).contains(&bar) && TEMPO.contains(&tempo)) &&
+        beats.windows(2).all(|w| w[0].0 < w[1].0)
+}
+
+/// Microseconds of a beat position as `AnalyzeJobBeatDetector::convertToMicrosec` (0x102328b20)
+/// computes them: `1000000 * pos / sr` in integers; the analysis file keeps `us / 1000` (PQTZ).
+pub fn beat_us(pos: i32, sr: u32) -> i64 {
+    1_000_000i64 * pos as i64 / sr as i64
+}
+
+/// The grid for rekordbox's beat list (position, beat number, tempo x 100 per beat): rekordbox
+/// stores each beat, while recordbox extrapolates between grid anchors. Preserve
+/// each listed beat's microseconds, bar number and tempo for PQTZ and PQT2 exports.
+pub fn grid_from_list(beats: &[(i32, i32, i32)], sr: u32) -> BeatGrid {
+    let mut anchors: Vec<crate::model::GridAnchor> = vec![];
+    // `pt`: where `BeatGrid::beats` puts this beat (it adds the period beat by beat)
+    let (mut pt, mut a_bpm100, mut pn) = (0f64, 0i32, 0i32);
+    for (j, &(pos, num, bpm100)) in beats.iter().enumerate() {
+        let us = beat_us(pos, sr);
+        let t = us as f64 / 1e6;
+        let num = num.clamp(1, 4);
+        if j > 0 {
+            pt += 60.0 / (a_bpm100 as f64 / 100.0).max(1.0);
+            pn = pn % 4 + 1;
+        }
+        let fits = j > 0 && bpm100 == a_bpm100 && bpm100 > 0 && num == pn && (pt * 1e6).round() as i64 == us;
+        if !fits {
+            let bpm = if bpm100 > 0 { bpm100 as f64 / 100.0 } else { anchors.last().map(|a| a.bpm).unwrap_or(120.0) };
+            anchors.push(crate::model::GridAnchor { time: t, bpm, beat: num as u8 });
+            (pt, a_bpm100, pn) = (t, if bpm100 > 0 { bpm100 } else { (bpm * 100.0).round() as i32 }, num);
         }
     }
-    let first = beats[0];
-    let bpm = out.bpm100 as f64 / 100.0;
-    let t0 = first.0 as f64 / sr as f64;
-    let grid = BeatGrid::constant(t0, bpm, first.1.clamp(1, 4) as u8);
-    Some(HpOutcome { bpm, grid, beats, offset, window: (start as usize, len as usize) })
+    BeatGrid { anchors }
+}
+
+/// Some irregular interval/tempo combinations would cause the live grid to
+/// insert or drop a beat. Keep the ordinary result if positions, bar numbers
+/// and tempi cannot all be represented faithfully.
+fn grid_replays(grid: &BeatGrid, expected: &[(i32, i32, i32)], sr: u32, total: usize) -> bool {
+    let actual = grid.beats(total as f64 / f64::from(sr));
+    let us = |time: f64| (time * 1e6).round() as i64;
+    let first = beat_us(expected[0].0, sr);
+    let last = beat_us(expected[expected.len()-1].0, sr);
+    let start = actual.partition_point(|b| us(b.time) < first);
+    let end = actual.partition_point(|b| us(b.time) <= last);
+    let actual = &actual[start..end];
+    actual.len() == expected.len() && actual.iter().zip(expected).all(|(b, &(pos, bar, bpm))|
+        us(b.time) == beat_us(pos, sr) && i32::from(b.beat) == bar && (b.bpm * 100.0).round() as i32 == bpm)
 }
 
 /// Select the installed-model mode once per analysis job. Unspecialized callers use
@@ -352,39 +424,80 @@ pub fn mode_from_preferences(enabled: bool, analysis_mode: u8) -> u8 {
     }
 }
 
-/// Hook of `analysis::analyze_decoded`: with high precision on, the standard estimate becomes the
-/// legacy input of rekordbox's high precision analysis and its grid replaces the standard one.
-/// Falls back to the standard grid (and says so on stderr) when rekordbox's models are missing
-/// or a part of the pipeline that is not ported is needed.
-pub fn dispatch(dec: &crate::audio::Decoded, s: &super::AnalysisSettings, bpm: f64, grid: Option<BeatGrid>) -> (f64, Option<BeatGrid>) {
-    let mode = s.model_grid_mode;
-    // The model's dynamic focus pass is incomplete. Keep the fork's adaptive grid
-    // without loading weights or allocating the full-track legacy analysis.
-    if mode == 0 || mode == MODE_DYNAMIC || s.dynamic || !s.do_grid ||
-        !(s.bpm_min.is_finite() && s.bpm_max.is_finite() && s.bpm_min > 0.0 && s.bpm_min <= s.bpm_max) {
-        return (bpm, grid);
-    }
-    let Some((first, beat)) = grid.as_ref().and_then(|g| g.anchors.first()).map(|a| (a.time, a.beat)) else { return (bpm, grid) };
-    match analyze(dec, mode, (bpm, first, beat)) {
-        Some(o) => {
+/// Try the selected model for this job. A complete result can replace the
+/// standard one only within the user's requested BPM range.
+pub(super) fn dispatch(dec: &crate::audio::Decoded, mono: &[f32], s: &super::AnalysisSettings,
+    bpm: f64, grid: Option<BeatGrid>, shared: Option<super::rb_beat1::Front>, cancelled: &dyn Fn() -> bool) -> (f64, Option<BeatGrid>) {
+    if cancelled() || grid.as_ref().is_none_or(BeatGrid::is_empty) || !eligible(dec, s.model_grid_mode) { return (bpm, grid); }
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(||
+        analyze_model(dec, s.model_grid_mode, shared, cancelled)
+    )).unwrap_or(Err(NO_GRID));
+    if cancelled() { return (bpm, grid); }
+    match result {
+        Ok(o) => {
             let mut g = o.grid;
             let mut b = o.bpm;
-            // convertToMicrosec: halve or double into the BPM range (constant tempo only)
             let dur = dec.duration();
-            while b < s.bpm_min && b > 0.0 {
-                g = g.doubled(dur);
-                b *= 2.0;
-            }
-            while b > s.bpm_max {
-                g = g.halved(dur);
-                b *= 0.5;
-            }
-            (b, Some(g))
+            while !o.adaptive && b < s.bpm_min && b > 0.0 { g = g.doubled(dur); b *= 2.0; }
+            while !o.adaptive && b > s.bpm_max { g = g.halved(dur); b *= 0.5; }
+            if (s.bpm_min..=s.bpm_max).contains(&b) && !g.is_empty() { (b, Some(g)) } else { (bpm, grid) }
         }
-        None => {
-            eprintln!("high precision BeatGrid: not available for this track (mode {mode}); standard analysis used");
-            (bpm, grid)
+        Err(DYNAMIC_FALLBACK) if !s.dynamic && s.model_grid_mode == MODE_AUTO => {
+            // An unsupported change in tempo still needs the selected adaptive
+            // estimator. Explicit Dynamic already computed that grid.
+            let dynamic = super::AnalysisSettings { dynamic: true, model_grid_mode: 0, ..s.clone() };
+            let (b, g) = super::analyze_grid(dec, mono, &dynamic, cancelled);
+            if g.is_some() { (b, g) } else { (bpm, grid) }
         }
+        Err(_) => (bpm, grid),
+    }
+}
+
+#[cfg(test)]
+mod model_grid_tests {
+    use super::*;
+
+    #[test]
+    fn duration_and_rate_gates_apply_before_model_loading_and_resampling() {
+        assert!(eligible_audio(8000, 900 * 8000, MODE_AUTO));
+        assert!(!eligible_audio(8000, 900 * 8000 + 1, MODE_AUTO));
+        assert!(eligible_audio(96_000, 96_000, MODE_NORMAL));
+        assert!(!eligible_audio(11_025, 11_025, MODE_NORMAL));
+        assert!(!eligible_audio(384_000, 384_000, MODE_AUTO));
+        assert!(!eligible_audio(48_000, 1, MODE_NORMAL));
+        assert!(eligible_audio(48_000, 48_000, MODE_DYNAMIC));
+    }
+
+    #[test]
+    fn excessive_local_tempo_cannot_expand_the_replayed_grid() {
+        assert!(valid_model_beats(&[(4_800, 1, 12_000), (28_800, 2, 12_000)], 12_000, 48_000));
+        assert!(!valid_model_beats(&[(4_800, 1, 12_000), (4_801, 2, i32::MAX)], 12_000, 48_000));
+        assert!(!valid_model_beats(&[(4_800, 1, 12_000)], i32::MAX, 48_000));
+    }
+
+    #[test]
+    fn focus_grid_preserves_submillisecond_timing_and_bar_numbers() {
+        // All timing changes after beat one are below a millisecond. A single
+        // constant anchor (and checking integer milliseconds only) loses them.
+        let input = [(4_800, 3, 12_000), (28_801, 4, 12_000),
+            (52_840, 1, 12_000), (76_820, 2, 12_000)];
+        let grid = grid_from_list(&input, 48_000);
+        let result: Vec<_> = grid.beats(1.7).iter().map(|b|
+            ((b.time * 1e6).round() as i64, b.beat, (b.bpm * 100.0).round() as i32)).collect();
+        assert_eq!(result, [(100_000, 3, 12_000), (600_020, 4, 12_000),
+            (1_100_833, 1, 12_000), (1_600_416, 2, 12_000)]);
+    }
+
+    #[test]
+    fn sparse_envelopes_match_saturated_pcm_including_full_scale() {
+        let samples: Vec<_> = (0..4_001).flat_map(|i| {
+            let x = ((i % 101) as f32 - 50.0) / 44.0;
+            [x, 0.6*x]
+        }).collect();
+        let got = Uba::from_audio(48_000, &samples);
+        let want = Uba::new(48_000, &uba::to_i16(&samples));
+        assert_eq!((got.low, got.all, got.high), (want.low, want.all, want.high));
+        assert_eq!(uba::to_i16(&[-1.2, -1.0, 0.0, 1.0, 1.2]), [-32_768, -32_768, 0, 32_767, 32_767]);
     }
 }
 
@@ -558,7 +671,7 @@ mod stage_tests {
             let Some((list, mbpm, _)) = super::madmom_stage(&dec.samples, dec.sr, d.win.0, d.win.1, false) else { continue };
             let ml: Vec<(i32, i32, i32)> = list.iter().map(|b| (b.pos as i32, b.num_bar, b.bpm)).collect();
             let inp = super::focus::FocusInput { sr: dec.sr as i32, total: dec.frames() as i32, offset: d.offset as i32, hendou: false, legacy_bpm100: d.legacy_bpm, legacy_count: d.beat_num, madmom: &ml, madmom_bpm: mbpm as i32 };
-            let Some(out) = super::focus::analyze_focus(&env, &inp) else {
+            let Ok(out) = super::focus::analyze_focus(&env, &inp) else {
                 eprintln!("  #{k} focus returned nothing");
                 continue;
             };
@@ -676,7 +789,7 @@ mod reference_benchmark {
                         let t_std = t0.elapsed().as_secs_f64();
                         let Some(g) = grid else { continue };
                         let t1 = std::time::Instant::now();
-                        let out = super::analyze(&dec, mode, (bpm, g.anchors[0].time, g.anchors[0].beat));
+                        let out = super::analyze_model(&dec, mode, None, &|| false).ok();
                         let t_hp = t1.elapsed().as_secs_f64();
                         let row = match out {
                             Some(o) => {

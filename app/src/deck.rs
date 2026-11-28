@@ -1604,8 +1604,8 @@ pub fn sync_rate_hook(app: &mut App, ui: &mut egui::Ui, n: u8, sync_btn: egui::R
     let r = Rect::from_min_size(pos2(sync_btn.min.x - 27.0, sync_btn.max.y - 10.0), vec2(25.0, 10.0));
     let resp = ui.interact(r, ui.id().with(("syncrate", n)), Sense::click());
     let out = app.deck.x.dk.out_of_range;
-    ui.painter().rect_filled(r, 1.0, if resp.hovered() { crate::theme::hex(0x323232) } else { crate::theme::hex(0x282828) });
-    ui.painter().text(r.center(), Align2::CENTER_CENTER, app.sync_rate_label(), crate::theme::caps(7.5), if out { crate::theme::hex(0x646464) } else { crate::theme::hex(0xFFFF64) });
+    ui.painter().rect_filled(r, 1.0, if resp.hovered() { crate::theme::gy(0x323232) } else { crate::theme::gy(0x282828) });
+    ui.painter().text(r.center(), Align2::CENTER_CENTER, app.sync_rate_label(), crate::theme::caps(7.5), if out { crate::theme::gy(0x646464) } else { crate::theme::hex(0xFFFF64) });
     if resp.on_hover_text("Sync rate: follow the master at half, the same or double its tempo.").clicked() {
         app.sync_rate_toggle();
     }
@@ -1627,7 +1627,7 @@ pub fn again_hook(app: &mut App, ui: &mut egui::Ui, n: u8, knob_c: egui::Pos2, l
     }
     let orange = crate::theme::hex(0xFFA300);
     let p = ui.painter().clone();
-    let panel = crate::theme::hex(0x1E1E1E);
+    let panel = crate::theme::gy(0x1E1E1E);
     p.rect_filled(Rect::from_center_size(knob_c, vec2(26.0, 26.0)), 0.0, panel);
     p.rect_filled(lr, 0.0, panel);
     p.text(label_c, Align2::CENTER_CENTER, "A-GAIN", crate::theme::caps(8.0), orange);

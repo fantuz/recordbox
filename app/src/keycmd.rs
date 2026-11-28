@@ -165,7 +165,6 @@ pub fn missing_reason(id: u16) -> &'static str {
         0xa003 | 0xa007 | 0xa009 | 0xa100 | 0xa008 | 0xa002 | 0xa001 => "rekordbox's own online and registration pages.",
         0x2010 | 0x2018 => "greyed in recordbox's menu (no rekordbox 5 library, no device library backups).",
         0x3005 => "rekordbox's own name says it: \"Currently not working\".",
-        0xb054 => "the Light appearance is not drawn yet.",
         0xb11e | 0xb11f => "recordbox's Playlist Palette has one bank.",
         0x30e3 => "SP.SCRATCH is not built.",
         0x3053 => "the BPM field's command was not traced (what it focuses or switches is unknown).",
@@ -260,6 +259,7 @@ pub fn action(base: u16) -> Option<Ka> {
         0xb04c => Menu("split_screen"),
         0xb04e => Menu("fullscreen"),
         0xb053 => Menu("appearance_dark"),
+        0xb054 => Menu("appearance_light"),
         // ---- Browse
         0xb105 => Menu("filter"),
         0xb106 | 0xb107 => Menu("info_window"),
@@ -531,6 +531,29 @@ pub fn old_loop_runs(prefs: &Prefs, action: &str) -> bool {
     static WITH_ROWS: std::sync::OnceLock<std::collections::HashSet<&'static str>> = std::sync::OnceLock::new();
     let set = WITH_ROWS.get_or_init(|| keys::commands(Mode::Performance).iter().chain(keys::commands(Mode::Export).iter()).filter_map(|r| keys::action_of(r.id, &r.name)).collect());
     !set.contains(action)
+}
+
+/// F11 normally controls the native windows. An explicitly assigned command in the
+/// active keyboard mapping gets first use, including deck-specific and EDIT rows.
+pub(crate) fn custom_f11_binding(prefs: &Prefs) -> bool {
+    let mode = Mode::of(prefs.app_mode);
+    let mapping = keys::current(prefs, mode);
+    if keys::is_preset(&mapping, mode) {
+        return false;
+    }
+    if mode != Mode::Edit && prefs.keymap.iter().any(|(action, key)| {
+        action != "fullscreen" && key == "F11" && old_loop_runs(prefs, action)
+            && (mode == Mode::Performance || !crate::sampler_ext::is_sampler_action(action))
+    }) {
+        return true;
+    }
+    let Some(rows) = prefs.rb.key_mappings.get(&mapping) else { return false };
+    if !rows.values().any(|key| key.trim().eq_ignore_ascii_case("F11")) {
+        return false;
+    }
+    keys::commands(mode).iter().any(|row| {
+        row.id != 0xb04e && acts(row.id, mode) && keys::key_of(prefs, mode, &mapping, row).trim().eq_ignore_ascii_case("F11")
+    })
 }
 
 /// Once a frame (from main.rs, before recordbox's own key loop): the keys of the mapping in

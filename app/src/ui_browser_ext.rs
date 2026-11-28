@@ -67,10 +67,10 @@ pub fn bar_style(ui: &mut Ui) {
         interact_handle_opacity: 1.0,
         ..egui::style::ScrollStyle::solid()
     };
-    ui.visuals_mut().extreme_bg_color = Color32::BLACK;
-    ui.visuals_mut().widgets.inactive.bg_fill = hex(0x323232);
-    ui.visuals_mut().widgets.hovered.bg_fill = hex(0x4A4A4A);
-    ui.visuals_mut().widgets.active.bg_fill = hex(0x5A5A5A);
+    ui.visuals_mut().extreme_bg_color = FIELD.c();
+    ui.visuals_mut().widgets.inactive.bg_fill = gy(0x323232);
+    ui.visuals_mut().widgets.hovered.bg_fill = gy(0x4A4A4A);
+    ui.visuals_mut().widgets.active.bg_fill = gy(0x5A5A5A);
 }
 
 // ------------------------------------------------------------------------------ My Tag window
@@ -112,7 +112,7 @@ pub fn mytag_panel(app: &mut App, ui: &mut Ui, r: Rect) {
         for c in cats {
             // Category band.
             let (hr, hresp) = ui.allocate_exact_size(vec2(w, 24.0), Sense::click());
-            ui.painter().rect_filled(hr, 0.0, hex(0x191919));
+            ui.painter().rect_filled(hr, 0.0, gy(0x191919));
             let renaming = matches!(&app.dialogs.rename_tag, Some((id, _)) if *id == c.id);
             if renaming {
                 let mut n = app.dialogs.rename_tag.clone().map(|x| x.1).unwrap_or_default();
@@ -126,7 +126,7 @@ pub fn mytag_panel(app: &mut App, ui: &mut Ui, r: Rect) {
                     app.reload_tags();
                 }
             } else {
-                ui.painter().with_clip_rect(hr).text(pos2(hr.min.x + 7.5, hr.center().y + 0.75), Align2::LEFT_CENTER, &c.name, rb(MYTAG_FONT), DIM);
+                ui.painter().with_clip_rect(hr).text(pos2(hr.min.x + 7.5, hr.center().y + 0.75), Align2::LEFT_CENTER, &c.name, rb(MYTAG_FONT), DIM.c());
             }
             if hresp.double_clicked() {
                 app.dialogs.rename_tag = Some((c.id, c.name.clone()));
@@ -160,7 +160,7 @@ pub fn mytag_panel(app: &mut App, ui: &mut Ui, r: Rect) {
                 let mut plus_clicked = false;
                 if last && !adding {
                     let presp = ui.interact(plus, ui.id().with(("mytag_plus", c.id)), Sense::click());
-                    crate::icons_src::plus_disc(ui.painter(), plus.center(), if presp.hovered() { WHITE } else { hex(0xA0A0A0) }, BG);
+                    crate::icons_src::plus_disc(ui.painter(), plus.center(), crate::ui_feel::hl(&presp, gy(0xA0A0A0), WHITE.c()), BG.c());
                     let presp = if app.prefs.tooltips { presp.on_hover_text("Create a new My Tag.") } else { presp };
                     plus_clicked = presp.clicked();
                     if plus_clicked {
@@ -188,17 +188,17 @@ pub fn mytag_panel(app: &mut App, ui: &mut Ui, r: Rect) {
                 let filtering = app.filter_tags.contains(&tg.id);
                 let pt = ui.painter();
                 if resp.hovered() && !plus_clicked {
-                    pt.rect_filled(rr, 0.0, hex(0x141414));
+                    pt.rect_filled(rr, 0.0, gy(0x141414));
                 }
                 let bx = Rect::from_min_size(pos2(rr.min.x + 8.0, rr.center().y - 6.0), vec2(12.0, 12.0));
-                pt.rect_filled(bx, 0.0, hex(0x282828));
-                pt.rect_stroke(bx, 0.0, Stroke::new(0.5, hex(0x181818)), egui::StrokeKind::Inside);
+                pt.rect_filled(bx, 0.0, gy(0x282828));
+                pt.rect_stroke(bx, 0.0, Stroke::new(0.5, gy(0x181818)), egui::StrokeKind::Inside);
                 if on {
-                    crate::icons_src::tick(pt, bx.center(), 12.0, WHITE);
+                    crate::icons_src::tick(pt, bx.center(), 12.0, WHITE.c());
                 } else if partial {
                     pt.rect_filled(Rect::from_center_size(bx.center(), vec2(6.0, 1.5)), 0.0, DIM2);
                 }
-                pt.with_clip_rect(Rect::from_min_max(rr.min, pos2(rr.max.x - 24.0, rr.max.y))).text(pos2(rr.min.x + 28.5, rr.center().y + 0.75), Align2::LEFT_CENTER, &tg.name, rb(MYTAG_FONT), if filtering { CUE_ORANGE } else { WHITE });
+                pt.with_clip_rect(Rect::from_min_max(rr.min, pos2(rr.max.x - 24.0, rr.max.y))).text(pos2(rr.min.x + 28.5, rr.center().y + 0.75), Align2::LEFT_CENTER, &tg.name, rb(MYTAG_FONT), if filtering { CUE_ORANGE } else { WHITE.c() });
                 if resp.clicked() && !plus_clicked {
                     if ui.input(|i| i.modifiers.alt) {
                         if !app.filter_tags.insert(tg.id) {
@@ -337,14 +337,14 @@ pub fn related_window(app: &mut App, ui: &mut Ui, r: Rect, which: usize) {
     let tile = Rect::from_min_size(pos2(l + 11.0, t + 4.0), vec2(18.0, 18.0));
     let tresp = ui.interact(Rect::from_min_max(tile.min, pos2(right - 62.0, tile.max.y)), ui.id().with(("relwin_tile", which)), Sense::click());
     if which == 0 {
-        p.rect_filled(tile, 2.0, if tresp.hovered() { hex(0x3A3A3A) } else { BTN });
-        crate::icons_src::related(&p, tile, WHITE, BTN);
+        p.rect_filled(tile, 2.0, crate::ui_feel::hl(&tresp, BTN.c(), gy(0x3A3A3A)));
+        crate::icons_src::related(&p, tile, WHITE.c(), BTN.c());
         let name = app.prefs.related_lists.get(app.prefs.related_sel).map(|x| x.name.clone()).unwrap_or_else(|| "Related Tracks".into());
-        p.with_clip_rect(Rect::from_min_max(pos2(l, t), pos2(right - 62.0, t + 26.0))).text(pos2(l + 30.5, t + 13.0), Align2::LEFT_CENTER, name, rb(SUB_NAME_FONT), WHITE);
+        p.with_clip_rect(Rect::from_min_max(pos2(l, t), pos2(right - 62.0, t + 26.0))).text(pos2(l + 30.5, t + 13.0), Align2::LEFT_CENTER, name, rb(SUB_NAME_FONT), WHITE.c());
         p.rect_filled(Rect::from_min_max(pos2(right - 60.0, t), pos2(right - 59.0, t + 26.0)), 0.0, BG);
         let gc = pos2(right - 25.5, t + 13.0);
         let gresp = ui.interact(Rect::from_center_size(gc, vec2(20.0, 20.0)), ui.id().with("relwin_gear"), Sense::click());
-        crate::icons_src::gear(&p, gc, if app.ext.criteria_open { BLUE } else { WHITE }, BG2);
+        crate::icons_src::gear(&p, gc, if app.ext.criteria_open { BLUE.c() } else { WHITE.c() }, BG2.c());
         let gresp = if tips { gresp.on_hover_text("Customize the criteria") } else { gresp };
         if gresp.clicked() {
             app.ext.criteria_open = !app.ext.criteria_open;
@@ -378,11 +378,11 @@ pub fn related_window(app: &mut App, ui: &mut Ui, r: Rect, which: usize) {
     } else {
         // Skin subBrows_trackSuggestion_btn: a 16 pt #323232 tile with a #969696 atom.
         let st = Rect::from_center_size(tile.center(), vec2(16.0, 16.0));
-        p.rect_filled(st, 2.0, if tresp.hovered() { hex(0x3E3E3E) } else { hex(0x323232) });
-        crate::icons_src::atom(&p, st.center(), 6.0, 2.2, 1.0, DIM);
+        p.rect_filled(st, 2.0, crate::ui_feel::hl(&tresp, gy(0x323232), gy(0x3E3E3E)));
+        crate::icons_src::atom(&p, st.center(), 6.0, 2.2, 1.0, DIM.c());
         let kind = app.prefs.bx.suggest_kind.min(3);
         if kind > 0 {
-            p.text(pos2(l + 30.5, t + 13.0), Align2::LEFT_CENTER, SUGGEST_KINDS[kind as usize], rb(SUB_NAME_FONT), WHITE);
+            p.text(pos2(l + 30.5, t + 13.0), Align2::LEFT_CENTER, SUGGEST_KINDS[kind as usize], rb(SUB_NAME_FONT), WHITE.c());
         }
         let tresp = if tips { tresp.on_hover_text(SUGGEST_TIPS[kind as usize]) } else { tresp };
         dropdown(ui, &tresp, "sugwin_kinds", |ui| {
@@ -415,8 +415,8 @@ pub fn related_window(app: &mut App, ui: &mut Ui, r: Rect, which: usize) {
         let br = Rect::from_min_size(pos2(l + x, t + 32.0), vec2(w, 16.0));
         let resp = ui.interact(br, ui.id().with(("relwin_src", which, k)), Sense::click());
         let on = src_now == k;
-        p.rect_stroke(br, 2.0, Stroke::new(1.0, if on { BLUE } else if resp.hovered() { hex(0x8C8C8C) } else { OFF }), egui::StrokeKind::Inside);
-        p.text(br.center() + vec2(0.0, 0.5), Align2::CENTER_CENTER, label, rb_bold(if k >= 2 { 9.75 } else { 9.0 }), if k >= 2 { BLUE } else { WHITE });
+        p.rect_stroke(br, 2.0, Stroke::new(1.0, if on { BLUE.c() } else { crate::ui_feel::hl(&resp, OFF.c(), gy(0x8C8C8C)) }), egui::StrokeKind::Inside);
+        p.text(br.center() + vec2(0.0, 0.5), Align2::CENTER_CENTER, label, rb_bold(if k >= 2 { 9.75 } else { 9.0 }), if k >= 2 { BLUE.c() } else { WHITE.c() });
         let resp = if tips { resp.on_hover_text(tip) } else { resp };
         if resp.clicked() {
             if which == 0 {
@@ -429,26 +429,26 @@ pub fn related_window(app: &mut App, ui: &mut Ui, r: Rect, which: usize) {
         }
     }
     let src = app.panel_source(src_now);
-    crate::icons_src::sub_note(&p, Rect::from_min_size(pos2(right - 78.5, t + 33.0), vec2(14.0, 14.0)), WHITE);
+    crate::icons_src::sub_note(&p, Rect::from_min_size(pos2(right - 78.5, t + 33.0), vec2(14.0, 14.0)), WHITE.c());
     let src_name = src.and_then(|id| app.track(id)).map(|x| x.display_title()).unwrap_or_default();
-    p.text(pos2(right - 62.0, t + 40.0), Align2::LEFT_CENTER, format!(": {src_name}"), rb(SUB_NAME_FONT), WHITE);
+    p.text(pos2(right - 62.0, t + 40.0), Align2::LEFT_CENTER, format!(": {src_name}"), rb(SUB_NAME_FONT), WHITE.c());
     // Row 3: where to look and what to show.
     let tt = Rect::from_min_size(pos2(l + 11.0, t + 58.0), vec2(18.0, 18.0));
     let target = if which == 0 { app.prefs.bx.related_target } else { app.prefs.bx.suggest_target };
     let target = if app.node(target).is_some() { target } else { 0 };
     let tname = app.node(target).map(|n| n.name.clone()).unwrap_or_else(|| "Collection".into());
     let tr = ui.interact(Rect::from_min_max(tt.min, pos2(l + 160.0, tt.max.y)), ui.id().with(("relwin_target", which)), Sense::click());
-    p.rect_filled(tt, 2.0, if tr.hovered() { hex(0x3A3A3A) } else { BTN });
+    p.rect_filled(tt, 2.0, crate::ui_feel::hl(&tr, BTN.c(), gy(0x3A3A3A)));
     for y in [5.0, 8.5, 12.0] {
-        p.rect_filled(Rect::from_min_max(tt.min + vec2(4.5, y - 1.0), tt.min + vec2(13.5, y + 1.0)), 0.0, hex(0xC9C9C9));
+        p.rect_filled(Rect::from_min_max(tt.min + vec2(4.5, y - 1.0), tt.min + vec2(13.5, y + 1.0)), 0.0, gy(0xC9C9C9));
     }
-    p.with_clip_rect(Rect::from_min_max(pos2(l, t + 54.0), pos2(l + 160.0, t + 80.0))).text(pos2(l + 32.5, t + 67.0), Align2::LEFT_CENTER, tname, rb(SUB_NAME_FONT), WHITE);
+    p.with_clip_rect(Rect::from_min_max(pos2(l, t + 54.0), pos2(l + 160.0, t + 80.0))).text(pos2(l + 32.5, t + 67.0), Align2::LEFT_CENTER, tname, rb(SUB_NAME_FONT), WHITE.c());
     let tr = if tips { tr.on_hover_text("Select a search target list for \"Related tracks\"") } else { tr };
     dropdown(ui, &tr, if which == 0 { "relwin_target_menu" } else { "sugwin_target_menu" }, |ui| target_menu(app, ui, which));
     let info = if which == 0 { app.prefs.bx.related_info } else { app.prefs.bx.suggest_info }.min(4);
     let ir = ui.interact(Rect::from_min_max(pos2(l + 164.0, t + 58.0), pos2(l + 250.0, t + 76.0)), ui.id().with(("relwin_info", which)), Sense::click());
-    crate::icons_src::sub_sort(&p, pos2(l + 174.0, t + 67.0), if ir.hovered() { WHITE } else { DIM });
-    p.text(pos2(l + 185.0, t + 67.0), Align2::LEFT_CENTER, INFO_CHOICES[info as usize], rb(SUB_NAME_FONT), WHITE);
+    crate::icons_src::sub_sort(&p, pos2(l + 174.0, t + 67.0), crate::ui_feel::hl(&ir, DIM.c(), WHITE.c()));
+    p.text(pos2(l + 185.0, t + 67.0), Align2::LEFT_CENTER, INFO_CHOICES[info as usize], rb(SUB_NAME_FONT), WHITE.c());
     dropdown(ui, &ir, if which == 0 { "relwin_info_menu" } else { "sugwin_info_menu" }, |ui| {
         for (i, n) in INFO_CHOICES.iter().enumerate() {
             if ui.selectable_label(info as usize == i, *n).clicked() {
@@ -490,6 +490,8 @@ pub fn related_window(app: &mut App, ui: &mut Ui, r: Rect, which: usize) {
             let Some(tr) = app.track(id).cloned() else { continue };
             let (rr, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 30.0), Sense::click_and_drag());
             let sel = app.ext.panel_sel[which] == Some(id);
+            // (A selected row keeps rekordbox's fixed blue and white text in Light: `ListViewer::findTextColour`.)
+            let _sel_dark = crate::theme::dark_scope(sel);
             let pt = ui.painter().with_clip_rect(rr.intersect(ui.clip_rect()));
             pt.rect_filled(rr, 0.0, if sel { ROW_SEL } else if i % 2 == 0 { BG1 } else { BG2 });
             let ar = Rect::from_min_size(rr.min, vec2(30.0, 30.0));
@@ -498,14 +500,14 @@ pub fn related_window(app: &mut App, ui: &mut Ui, r: Rect, which: usize) {
                     pt.image(tex.id(), ar, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
                 }
                 None => {
-                    pt.rect_filled(ar, 0.0, hex(0x101010));
-                    pt.circle_filled(ar.center(), 10.0, hex(0x1E1E1E));
-                    pt.circle_filled(ar.center(), 2.6, hex(0x101010));
+                    pt.rect_filled(ar, 0.0, gy(0x101010));
+                    pt.circle_filled(ar.center(), 10.0, gy(0x1E1E1E));
+                    pt.circle_filled(ar.center(), 2.6, gy(0x101010));
                 }
             }
             let text_right = rr.max.x - 108.0;
-            pt.with_clip_rect(Rect::from_min_max(rr.min, pos2(rr.max.x - 6.0, rr.max.y)).intersect(ui.clip_rect())).text(pos2(rr.min.x + 35.5, rr.min.y + 8.5), Align2::LEFT_CENTER, tr.display_title(), rb(SUB_TITLE_FONT), if tr.missing { DIM } else { WHITE });
-            pt.with_clip_rect(Rect::from_min_max(rr.min, pos2(text_right, rr.max.y)).intersect(ui.clip_rect())).text(pos2(rr.min.x + 35.5, rr.min.y + 21.5), Align2::LEFT_CENTER, &tr.artist, rb(SUB_ARTIST_FONT), WHITE);
+            pt.with_clip_rect(Rect::from_min_max(rr.min, pos2(rr.max.x - 6.0, rr.max.y)).intersect(ui.clip_rect())).text(pos2(rr.min.x + 35.5, rr.min.y + 8.5), Align2::LEFT_CENTER, tr.display_title(), rb(SUB_TITLE_FONT), if tr.missing { DIM.c() } else { WHITE.c() });
+            pt.with_clip_rect(Rect::from_min_max(rr.min, pos2(text_right, rr.max.y)).intersect(ui.clip_rect())).text(pos2(rr.min.x + 35.5, rr.min.y + 21.5), Align2::LEFT_CENTER, &tr.artist, rb(SUB_ARTIST_FONT), WHITE.c());
             // The right-hand value: BPM and key (Auto) or another column; the window's right
             // edge is 12 pt past the row (BPM ends 70 pt and the key starts 59.5 pt before it).
             let edge = rr.max.x + 12.0;
@@ -513,30 +515,31 @@ pub fn related_window(app: &mut App, ui: &mut Ui, r: Rect, which: usize) {
             match info {
                 0 => {
                     if tr.bpm > 0.0 {
-                        pt.text(pos2(edge - 70.0, y), Align2::RIGHT_CENTER, format!("{:.2}", tr.bpm), rb(SUB_ARTIST_FONT), WHITE);
+                        pt.text(pos2(edge - 70.0, y), Align2::RIGHT_CENTER, format!("{:.2}", tr.bpm), rb(SUB_ARTIST_FONT), WHITE.c());
                     }
-                    pt.text(pos2(edge - 59.5, y), Align2::LEFT_CENTER, tr.key_label(alnum), rb(SUB_ARTIST_FONT), WHITE);
+                    pt.text(pos2(edge - 59.5, y), Align2::LEFT_CENTER, tr.key_label(alnum), rb(SUB_ARTIST_FONT), WHITE.c());
                 }
                 1 => {
-                    pt.text(pos2(edge - 20.0, y), Align2::RIGHT_CENTER, &tr.genre, rb(SUB_ARTIST_FONT), WHITE);
+                    pt.text(pos2(edge - 20.0, y), Align2::RIGHT_CENTER, &tr.genre, rb(SUB_ARTIST_FONT), WHITE.c());
                 }
                 2 => {
                     for s in 0..5u8 {
-                        crate::icons_src::star(&pt, pos2(edge - 98.0 + s as f32 * 14.0, y), tr.rating > s, if tr.rating > s { WHITE } else { OFF });
+                        crate::icons_src::star(&pt, pos2(edge - 98.0 + s as f32 * 14.0, y), tr.rating > s, if tr.rating > s { WHITE.c() } else { OFF.c() });
                     }
                 }
                 3 => {
                     if tr.duration > 0.0 {
-                        pt.text(pos2(edge - 20.0, y), Align2::RIGHT_CENTER, fmt_time(tr.duration, false), rb(SUB_ARTIST_FONT), WHITE);
+                        pt.text(pos2(edge - 20.0, y), Align2::RIGHT_CENTER, fmt_time(tr.duration, false), rb(SUB_ARTIST_FONT), WHITE.c());
                     }
                 }
                 _ => {
-                    pt.text(pos2(edge - 20.0, y), Align2::RIGHT_CENTER, tr.date_added.get(..10).unwrap_or(&tr.date_added), rb(SUB_ARTIST_FONT), WHITE);
+                    pt.text(pos2(edge - 20.0, y), Align2::RIGHT_CENTER, tr.date_added.get(..10).unwrap_or(&tr.date_added), rb(SUB_ARTIST_FONT), WHITE.c());
                 }
             }
             if which == 1 && tips && resp.hovered() {
                 resp.clone().on_hover_text(format!("{} {:.0} %", SUGGEST_KINDS[app.prefs.bx.suggest_kind.min(3) as usize], (score.min(1.0)) * 100.0));
             }
+            drop(_sel_dark);
             if resp.clicked() {
                 app.ext.panel_sel[which] = Some(id);
             }
@@ -610,10 +613,12 @@ pub fn node_row_extras(app: &mut App, ui: &mut Ui, n: &PlaylistNode, rr: Rect, s
         if br.min.x > rr.min.x + 60.0 {
             let resp = ui.interact(br, ui.id().with(("cue_start", n.id)), Sense::click());
             let busy = app.ext.cue_wait;
+            // (A selected row keeps rekordbox's fixed blue and white text in Light: `ListViewer::findTextColour`.)
+            let _sel_dark = crate::theme::dark_scope(sel);
             let col = if busy { BLUE } else if resp.hovered() { WHITE } else { DIM };
             ui.painter().rect_filled(br, 0.0, if sel { ROW_SEL } else { BG2 });
             ui.painter().rect_stroke(br, 0.0, Stroke::new(1.0, col), egui::StrokeKind::Inside);
-            ui.painter().text(br.center(), Align2::CENTER_CENTER, "Start", rb(9.5), col);
+            ui.painter().text(br.center(), Align2::CENTER_CENTER, "Start", rb(9.5), col.c());
             let resp = if tips {
                 resp.on_hover_text("Analyzes CUE points of tracks registered to this playlist and generates personal CUE Tendency Information.\nThe more track CUE point tendencies are collected, the more you will be capable of achieving CUE points similar to your CUE points.\nTo add/remove tracks in a playlist, click the button again and update the personal CUE Tendency Information.\nYour personal CUE Tendency information can be reset by pressing the button when there are no tracks registered to the playlist.")
             } else {
@@ -631,7 +636,7 @@ pub fn node_row_extras(app: &mut App, ui: &mut Ui, n: &PlaylistNode, rr: Rect, s
     if sel && !is_cue && n.kind != NodeKind::Smart {
         let c = pos2(rr.max.x - 10.5, rr.center().y);
         let resp = ui.interact(Rect::from_center_size(c, vec2(14.0, 14.0)), ui.id().with(("node_plus", n.id)), Sense::click());
-        crate::icons_src::plus_disc(ui.painter(), c, if resp.hovered() { WHITE } else { hex(0xA0A0A0) }, ROW_SEL);
+        crate::icons_src::plus_disc(ui.painter(), c, crate::ui_feel::hl(&resp, gy(0xA0A0A0), WHITE.c()), ROW_SEL.c());
         let parent = if n.kind == NodeKind::Folder { n.id } else { n.parent };
         dropdown(ui, &resp, "node_plus_menu", |ui| {
             for (label, kind) in [("Create New Playlist", NodeKind::Playlist), ("Create New Intelligent Playlist", NodeKind::Smart), ("Create New Folder", NodeKind::Folder)] {
@@ -747,7 +752,7 @@ pub fn column_view(app: &mut App, ui: &mut Ui, drop: &mut Vec<(Rect, i64)>) {
                     let on = *chosen == Some(n.id);
                     let resp = cv_row(ui, &n.name, icon, count.filter(|_| app.prefs.playlist_track_counts), n.kind == NodeKind::Folder, on);
                     if n.kind == NodeKind::Playlist {
-                        drop.push((resp.rect, n.id));
+                        crate::ui_browser::register_drop_target(ui, drop, resp.interact_rect, n.id);
                     }
                     if resp.clicked() {
                         app.set_view(View::Playlist(n.id));
@@ -788,26 +793,31 @@ pub fn column_view(app: &mut App, ui: &mut Ui, drop: &mut Vec<(Rect, i64)>) {
 fn cv_row(ui: &mut Ui, text: &str, icon: TreeIcon, count: Option<usize>, folder: bool, selected: bool) -> egui::Response {
     use crate::icons_src as src;
     let (rr, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 15.0), Sense::click());
+    if !ui.is_rect_visible(rr) {
+        return resp;
+    }
     let p = ui.painter().with_clip_rect(rr.intersect(ui.clip_rect()));
-    let bg = if selected { ROW_SEL } else if resp.hovered() { hex(0x262626) } else { BG2 };
-    if selected || resp.hovered() {
+    let bg = if selected { ROW_SEL.c() } else { crate::ui_feel::hl(&resp, BG2.c(), gy(0x262626)) };
+    // (A selected row keeps rekordbox's fixed blue and white text in Light: `ListViewer::findTextColour`.)
+    let _sel_dark = crate::theme::dark_scope(selected);
+    if selected || bg != BG2.c() {
         p.rect_filled(rr, 0.0, bg);
     }
     let col = if selected { WHITE } else { TREE_ICON };
     let ic = pos2(rr.min.x + 11.0, rr.center().y);
     match icon {
-        TreeIcon::Note => src::tree_note(&p, ic, col),
-        TreeIcon::FolderClosed | TreeIcon::FolderOpen => src::tree_folder(&p, ic, col),
-        TreeIcon::Smart => src::tree_smart(&p, ic + vec2(2.5, 2.5), col, bg),
-        TreeIcon::CuePlaylist => src::tree_cue_list(&p, ic, col),
-        _ => src::tree_list(&p, ic, col, bg),
+        TreeIcon::Note => src::tree_note(&p, ic, col.c()),
+        TreeIcon::FolderClosed | TreeIcon::FolderOpen => src::tree_folder(&p, ic, col.c()),
+        TreeIcon::Smart => src::tree_smart(&p, ic + vec2(2.5, 2.5), col.c(), bg),
+        TreeIcon::CuePlaylist => src::tree_cue_list(&p, ic, col.c()),
+        _ => src::tree_list(&p, ic, col.c(), bg),
     }
     let right = if folder { rr.max.x - 14.0 } else if count.is_some() { rr.max.x - 34.0 } else { rr.max.x - 4.0 };
-    p.with_clip_rect(Rect::from_min_max(rr.min, pos2(right, rr.max.y)).intersect(ui.clip_rect())).text(pos2(rr.min.x + 22.0, rr.center().y), Align2::LEFT_CENTER, text, rb(TREE_FONT), WHITE);
+    p.with_clip_rect(Rect::from_min_max(rr.min, pos2(right, rr.max.y)).intersect(ui.clip_rect())).text(pos2(rr.min.x + 22.0, rr.center().y), Align2::LEFT_CENTER, text, rb(TREE_FONT), WHITE.c());
     if folder {
-        src::tree_arrow(&p, pos2(rr.max.x - 8.0, rr.center().y), false, if selected { WHITE } else { DIM });
+        src::tree_arrow(&p, pos2(rr.max.x - 8.0, rr.center().y), false, if selected { WHITE.c() } else { DIM.c() });
     } else if let Some(c) = count {
-        p.text(pos2(rr.max.x - 6.0, rr.center().y), Align2::RIGHT_CENTER, c.to_string(), rb(TREE_FONT), WHITE);
+        p.text(pos2(rr.max.x - 6.0, rr.center().y), Align2::RIGHT_CENTER, c.to_string(), rb(TREE_FONT), WHITE.c());
     }
     resp
 }
@@ -820,6 +830,7 @@ pub struct SubState {
     pub view: View,
     pub side: SideMode,
     pub list: Vec<i64>,
+    list_totals: Option<(u64, String)>,
     pub list_dirty: bool,
     pub selected: HashSet<i64>,
     pub anchor: Option<usize>,
@@ -854,6 +865,7 @@ impl SubState {
             view: View::Collection,
             side: SideMode::Playlists,
             list: vec![],
+            list_totals: None,
             list_dirty: true,
             selected: HashSet::new(),
             anchor: None,
@@ -888,6 +900,7 @@ fn swap_state(app: &mut App, s: &mut SubState) {
     swap(&mut app.view, &mut s.view);
     swap(&mut app.side, &mut s.side);
     swap(&mut app.list, &mut s.list);
+    swap(&mut app.list_totals, &mut s.list_totals);
     swap(&mut app.list_dirty, &mut s.list_dirty);
     swap(&mut app.selected, &mut s.selected);
     swap(&mut app.anchor, &mut s.anchor);
@@ -913,6 +926,65 @@ fn swap_state(app: &mut App, s: &mut SubState) {
     swap(&mut app.colbrowse_values, &mut s.colbrowse_values);
     swap(&mut app.filter_tags, &mut s.filter_tags);
     swap(&mut app.prefs.palette_open, &mut s.palette_open);
+}
+
+#[cfg(test)]
+mod footer_tests {
+    use super::*;
+
+    #[test]
+    fn totals_follow_each_list_and_edits_in_the_sub_browser() -> anyhow::Result<()> {
+        const TEST: &str = "ui_browser_ext::footer_tests::totals_follow_each_list_and_edits_in_the_sub_browser";
+        const PROFILE: &str = "RECORDBOX_FOOTER_TEST_PROFILE";
+        if std::env::var_os(PROFILE).is_none() {
+            let dir = tempfile::tempdir()?;
+            let child = std::process::Command::new(std::env::current_exe()?)
+                .args(["--exact", TEST, "--nocapture"])
+                .env(PROFILE, dir.path()).env("PREPDECK_DATA", dir.path()).output()?;
+            let stdout = String::from_utf8_lossy(&child.stdout);
+            anyhow::ensure!(child.status.success() && stdout.contains("1 passed"), "{stdout}\n{}", String::from_utf8_lossy(&child.stderr));
+            return Ok(());
+        }
+        assert_eq!(std::env::var_os(PROFILE), std::env::var_os("PREPDECK_DATA"));
+        let mut app = App::open_library(&Default::default(), None, crate::DeckOptions { disable_play: true, disable_load: true });
+        let add = |title: &str, duration, file_size| app.db.insert_track(&Track {
+            title: title.into(), path: format!("{title}.wav"), duration, file_size, ..Default::default()
+        });
+        add("Footer Red", 60.0, 100_000_000)?;
+        let blue = add("Footer Blue", 120.0, 500_000_000)?;
+        app.reload_tracks();
+        app.search = "Footer".into();
+        app.rebuild_list();
+        assert_eq!(app.list_totals_label(), "2 Tracks, 0 hours 3 minutes, 0.6 GB");
+
+        let mut sub = SubState::new();
+        swap_state(&mut app, &mut sub);
+        app.ext.in_sub = true;
+        app.search = "Red".into();
+        app.rebuild_list();
+        assert_eq!(app.list_totals_label(), "1 Tracks, 0 hours 1 minutes, 0.1 GB");
+        // Changing the filter can keep the same count with completely different totals.
+        app.search = "Blue".into();
+        app.rebuild_list();
+        assert_eq!(app.list_totals_label(), "1 Tracks, 0 hours 2 minutes, 0.5 GB");
+        let track = app.track_mut(blue).unwrap();
+        track.duration = 3660.0;
+        track.file_size = 700_000_000;
+        app.save_track_quiet(blue);
+        assert_eq!(app.list_totals_label(), "1 Tracks, 1 hours 1 minutes, 0.7 GB");
+        swap_state(&mut app, &mut sub);
+        app.ext.in_sub = false;
+        assert_eq!(app.list_totals_label(), "2 Tracks, 1 hours 2 minutes, 0.8 GB");
+        // Library restores or imports can update the database while the visible list is parked.
+        let mut saved = app.db.track(blue).unwrap();
+        assert_eq!((saved.duration, saved.file_size), (3660.0, 700_000_000));
+        saved.duration = 600.0;
+        saved.file_size = 900_000_000;
+        app.db.update_track(&saved)?;
+        app.reload_tracks();
+        assert_eq!(app.list_totals_label(), "2 Tracks, 0 hours 11 minutes, 1.0 GB");
+        Ok(())
+    }
 }
 
 /// Sub-browser (references 14 and 15): a second browser with its own source strip (27 pt:
@@ -971,15 +1043,17 @@ pub fn sub_browser(app: &mut App, ui: &mut Ui, r: Rect, drop: &mut Vec<(Rect, i6
         let rr = Rect::from_center_size(pos2(r.min.x + 14.5, r.min.y + 12.0 + i as f32 * 20.0), vec2(18.0, 18.0));
         let on = *mode == Some(app.side);
         let resp = ui.interact(rr, ui.id().with(("sub_side", i)), Sense::click());
+        // (A selected row keeps rekordbox's fixed blue and white text in Light: `ListViewer::findTextColour`.)
+        let _sel_dark = crate::theme::dark_scope(on);
         let bg = if on {
             p.rect_filled(Rect::from_min_max(pos2(r.min.x, rr.min.y), pos2(r.min.x + 2.0, rr.max.y)), 0.0, ROW_SEL);
             p.rect_filled(rr, 1.5, ROW_SEL);
             p.rect_stroke(rr, 1.5, Stroke::new(1.0, WHITE), egui::StrokeKind::Inside);
-            ROW_SEL
+            ROW_SEL.c()
         } else {
-            src::tile(&p, rr, false, resp.hovered(), mode.is_some(), BG2)
+            src::tile(&p, rr, false, resp.hovered(), mode.is_some(), BG2.c())
         };
-        draw(&p, rr, if mode.is_none() { hex(0x4A4A4A) } else { WHITE }, bg);
+        draw(&p, rr, if mode.is_none() { gy(0x4A4A4A) } else { WHITE.c() }, bg);
         let resp = if app.prefs.tooltips { resp.on_hover_text(*name) } else { resp };
         if resp.clicked() {
             if let Some(m) = *mode {

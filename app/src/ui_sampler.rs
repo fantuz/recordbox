@@ -21,8 +21,9 @@ use std::sync::Arc;
 
 pub const SAMPLER_H: f32 = 118.0;
 const SLOT_H: f32 = 44.0;
-const PANEL: Color32 = hex(0x1E1E1E);
-const OFF: Color32 = hex(0x323232);
+/// Sampler panel face: id not traced; the #1E1E1E pane colour 0x03000009 (D #1E1E1E L #F0F0F0).
+const PANEL: Tc = tc(0x1E1E1E, 0xF0F0F0);
+const OFF: Tc = gr(0x323232);
 
 /// One loaded slot, as it is kept between sessions (rekordbox keeps the same values in its
 /// `SamplerSettings` file: loop, gate, mt, sync, gain 0..100, offset in ms).
@@ -461,16 +462,16 @@ impl App {
 /// A small text button without a box (Q, BPM SYNC, MASTER, MUTE, ERASE): grey, blue when on.
 fn text_button(ui: &mut Ui, r: Rect, id: impl std::hash::Hash, label: &str, on: bool, enabled: bool) -> egui::Response {
     let resp = ui.interact(r, ui.id().with(id), Sense::click());
-    let col = if !enabled { hex(0x424242) } else if on { BLUE } else if resp.hovered() { WHITE } else { hex(0x8C8C8C) };
+    let col = if !enabled { gy(0x424242) } else if on { BLUE.c() } else { crate::ui_feel::hl(&resp, gy(0x8C8C8C), WHITE.c()) };
     ui.painter().text(r.center(), Align2::CENTER_CENTER, label, caps(9.5), col);
     resp
 }
 
 fn box_button(ui: &mut Ui, r: Rect, id: impl std::hash::Hash, label: &str, on: bool) -> egui::Response {
     let resp = ui.interact(r, ui.id().with(id), Sense::click());
-    ui.painter().rect_filled(r, 2.0, if on { BLUE } else if resp.hovered() { lighten(BTN) } else { BTN });
+    ui.painter().rect_filled(r, 2.0, if on { BLUE.c() } else { crate::ui_feel::hl(&resp, BTN.c(), lighten(BTN.c())) });
     if !label.is_empty() {
-        ui.painter().text(r.center(), Align2::CENTER_CENTER, label, caps(8.0), WHITE);
+        ui.painter().text(r.center(), Align2::CENTER_CENTER, label, caps(8.0), WHITE.c());
     }
     resp
 }
@@ -479,7 +480,7 @@ fn box_button(ui: &mut Ui, r: Rect, id: impl std::hash::Hash, label: &str, on: b
 pub fn panel(app: &mut App, ui: &mut Ui, r: Rect) {
     let p = ui.painter().clone();
     p.rect_filled(r, 0.0, PANEL);
-    p.rect_filled(Rect::from_min_size(r.min, vec2(r.width(), 1.0)), 0.0, Color32::BLACK);
+    p.rect_filled(Rect::from_min_size(r.min, vec2(r.width(), 1.0)), 0.0, BG.c());
     let (x0, y0, w, h) = (r.min.x, r.min.y, r.width(), r.height());
     let at = |x: f32, y: f32, w: f32, h: f32| Rect::from_min_size(pos2(x0 + x, y0 + y), vec2(w, h));
     let bank = app.prefs.sampler.bank.min(3) as usize;
@@ -563,10 +564,10 @@ pub fn panel(app: &mut App, ui: &mut Ui, r: Rect) {
         let sr = slot_rect(pad);
         let (sx, sy, sw) = (sr.min.x, sr.min.y, sr.width());
         let s_at = |x: f32, y: f32, w: f32, h: f32| Rect::from_min_size(pos2(sx + x, sy + y), vec2(w, h));
-        p.rect_filled(sr.shrink(4.0), 0.0, Color32::BLACK);
+        p.rect_filled(sr.shrink(4.0), 0.0, SLOT.c());
         if pad >= pads_on {
             // SLOT 8: pads 9 to 16 are out of use (the bank still holds their samples).
-            p.rect_filled(sr.shrink(4.0), 0.0, hex(0x141414));
+            p.rect_filled(sr.shrink(4.0), 0.0, gy(0x141414));
             continue;
         }
         let slot = app.prefs.sampler.slots.get(idx).cloned().flatten();
@@ -606,7 +607,7 @@ pub fn panel(app: &mut App, ui: &mut Ui, r: Rect) {
                 let hh = (v * wr.height() / 2.0).max(0.5);
                 let x = wr.min.x + i as f32;
                 let done = playing && (i as f32 / n as f32) < frac;
-                bars.rect(Rect::from_min_max(pos2(x, wr.center().y - hh), pos2(x + 1.0, wr.center().y + hh)), if done { hex(0x5A5A5A) } else { hex(0xC8C8C8) });
+                bars.rect(Rect::from_min_max(pos2(x, wr.center().y - hh), pos2(x + 1.0, wr.center().y + hh)), if done { gy(0x5A5A5A) } else { gy(0xC8C8C8) });
             }
             bars.paint(&p);
             if playing {
@@ -614,7 +615,7 @@ pub fn panel(app: &mut App, ui: &mut Ui, r: Rect) {
                 p.rect_filled(Rect::from_min_max(pos2(x - 0.5, wr.min.y - 1.0), pos2(x + 0.5, wr.max.y + 1.0)), 0.0, hex(0xE61E1E));
             }
         } else if loading {
-            p.text(wr.left_center(), Align2::LEFT_CENTER, "Loading…", FontId::proportional(9.5), DIM);
+            p.text(wr.left_center(), Align2::LEFT_CENTER, "Loading…", FontId::proportional(9.5), DIM.c());
         }
 
         // PLAY (26 x 14): fires on mouse-down; Shift + PLAY stops; the release stops gate modes.
@@ -632,7 +633,7 @@ pub fn panel(app: &mut App, ui: &mut Ui, r: Rect) {
         let presp = ui.interact(pr, ui.id().with(("smp_play", idx)), Sense::click_and_drag());
         let code = app.sampler_color_code(idx);
         let col = crate::sampler_ext::pad_color(code);
-        p.rect_filled(pr, 2.0, if !loaded { OFF } else if playing { hex(crate::sampler_ext::PAD_COLORS[code as usize]) } else if presp.hovered() { lighten(col) } else { col });
+        p.rect_filled(pr, 2.0, if !loaded { OFF.c() } else if playing { hex(crate::sampler_ext::PAD_COLORS[code as usize]) } else { crate::ui_feel::hl(&presp, col, lighten(col)) });
         if loaded {
             let c = pr.center();
             p.add(egui::Shape::convex_polygon(vec![c + vec2(-3.0, -4.0), c + vec2(4.0, 0.0), c + vec2(-3.0, 4.0)], WHITE, Stroke::NONE));
@@ -681,7 +682,7 @@ pub fn panel(app: &mut App, ui: &mut Ui, r: Rect) {
             let tx = if tools { 74.0 } else if mute_mode { 54.0 } else { 38.0 };
             let tw = sw - 53.0 - (tx - 38.0) - if tools || erase_mode { 34.0 } else { 0.0 };
             let clip = p.with_clip_rect(s_at(tx, 24.0, tw.max(10.0), 14.0));
-            clip.text(pos2(sx + tx, sy + 31.0), Align2::LEFT_CENTER, &s.name, FontId::proportional(10.5), WHITE);
+            clip.text(pos2(sx + tx, sy + 31.0), Align2::LEFT_CENTER, &s.name, FontId::proportional(10.5), WHITE.c());
             if tools || mute_mode {
                 // Mute (16 x 14).
                 let muted = app.px.sampler.mute[idx];
@@ -696,7 +697,7 @@ pub fn panel(app: &mut App, ui: &mut Ui, r: Rect) {
                 let er = s_at(sw - 47.0, 23.0, 30.0, 14.0);
                 let eresp = ui.interact(er, ui.id().with(("smp_seq_erase", idx)), Sense::click());
                 let down = eresp.is_pointer_button_down_on();
-                p.rect_filled(er, 2.0, if down { hex(0x007DE1) } else { OFF });
+                p.rect_filled(er, 2.0, if down { hex(0x007DE1) } else { OFF.c() });
                 let (c, xc) = (er.center(), if down { WHITE } else { DIM });
                 p.line_segment([c + vec2(-3.5, -3.5), c + vec2(3.5, 3.5)], Stroke::new(1.4_f32, xc));
                 p.line_segment([c + vec2(-3.5, 3.5), c + vec2(3.5, -3.5)], Stroke::new(1.4_f32, xc));
@@ -732,8 +733,10 @@ pub fn panel(app: &mut App, ui: &mut Ui, r: Rect) {
 
         // A track dragged from the browser or from a deck loads here.
         if let Some(ids) = app.drag.clone() {
-            if hovered {
+            if crate::ui_feel::drop_glow(ui, ui.id().with(("sampler_drop", idx)), sr, hovered, 0.0) {
                 p.rect_stroke(sr.shrink(3.0), 0.0, Stroke::new(2.0_f32, BLUE), egui::StrokeKind::Inside);
+            }
+            if hovered {
                 if released {
                     if let Some(id) = ids.first() {
                         app.sampler_load(idx, *id);
@@ -743,8 +746,10 @@ pub fn panel(app: &mut App, ui: &mut Ui, r: Rect) {
         }
         // Sampler list rows dragged here (sampler_lib.rs).
         crate::ui_sampler_lib::note_slot(app, idx, sr);
-        if app.mixx.lib.drag.is_some() && app.drag.is_none() && hovered {
+        if app.mixx.lib.drag.is_some() && app.drag.is_none() && crate::ui_feel::drop_glow(ui, ui.id().with(("sampler_drop", idx)), sr, hovered, 0.0) {
             p.rect_stroke(sr.shrink(3.0), 0.0, Stroke::new(2.0_f32, BLUE), egui::StrokeKind::Inside);
+        }
+        if app.mixx.lib.drag.is_some() && app.drag.is_none() && hovered {
             if released {
                 app.smplib_drop_on_slot(idx);
             }
@@ -764,7 +769,7 @@ pub fn panel(app: &mut App, ui: &mut Ui, r: Rect) {
             let lp = ui.ctx().layer_painter(egui::LayerId::new(egui::Order::Tooltip, egui::Id::new("smp_dragl")));
             let rr = Rect::from_min_size(pp + vec2(12.0, 6.0), vec2(8.0 + s.name.chars().count().min(40) as f32 * 6.5, 18.0));
             lp.rect_filled(rr, 3.0, app.sampler_color(from));
-            lp.with_clip_rect(rr).text(rr.left_center() + vec2(4.0, 0.0), Align2::LEFT_CENTER, &s.name, FontId::proportional(10.5), WHITE);
+            lp.with_clip_rect(rr).text(rr.left_center() + vec2(4.0, 0.0), Align2::LEFT_CENTER, &s.name, FontId::proportional(10.5), WHITE.c());
             ui.ctx().request_repaint();
         }
         if released || !ui.input(|i| i.pointer.any_down()) {
@@ -779,16 +784,16 @@ pub fn panel(app: &mut App, ui: &mut Ui, r: Rect) {
     let c = ((w - 80.0) / 2.0).floor();
     let mut sp = app.prefs.sampler.clone();
     let mut changed = false;
-    if let Some(v) = crate::ui_perf::knob(ui, pos2(x0 + c + 22.0, y0 + 24.0), "smp_gain", sp.gain / 100.0, 0.5, BLUE) {
+    if let Some(v) = crate::ui_perf::knob(ui, pos2(x0 + c + 22.0, y0 + 24.0), "smp_gain", sp.gain / 100.0, 0.5, BLUE.c()) {
         sp.gain = (v * 100.0).round();
         changed = true;
     }
-    p.text(pos2(x0 + c + 22.0, y0 + 39.0), Align2::CENTER_CENTER, "GAIN", caps(8.0), hex(0x8C8C8C));
+    p.text(pos2(x0 + c + 22.0, y0 + 39.0), Align2::CENTER_CENTER, "GAIN", caps(8.0), gy(0x8C8C8C));
     let hp_on = crate::audio::HP_ACTIVE.load(std::sync::atomic::Ordering::Relaxed);
     let cr = at(c + 7.0, 50.0, 30.0, 14.0);
     let cresp = ui.interact(cr, ui.id().with("smp_cue"), Sense::click());
-    p.rect_filled(cr, 2.0, if sp.cue { hex(0xFFA500) } else if cresp.hovered() { lighten(BTN) } else { BTN });
-    p.text(cr.center(), Align2::CENTER_CENTER, "CUE", caps(8.0), if sp.cue { BG } else { hex(0x8C8C8C) });
+    p.rect_filled(cr, 2.0, if sp.cue { gy(0xFFA500) } else { crate::ui_feel::hl(&cresp, BTN.c(), lighten(BTN.c())) });
+    p.text(cr.center(), Align2::CENTER_CENTER, "CUE", caps(8.0), if sp.cue { BG.c() } else { gy(0x8C8C8C) });
     if cresp.on_hover_text(if hp_on { "Headphones CUE of the sampler" } else { "Headphones CUE of the sampler.\nNo headphones output is set: choose one in Preferences > Audio > Input/Output." }).clicked() {
         sp.cue = !sp.cue;
         changed = true;
@@ -804,7 +809,7 @@ pub fn panel(app: &mut App, ui: &mut Ui, r: Rect) {
     let hy = fb - sp.volume / 100.0 * (fb - ft);
     p.rect_filled(Rect::from_min_max(pos2(fx - 1.0, ft), pos2(fx + 1.0, fb)), 0.0, OFF);
     p.rect_filled(Rect::from_min_max(pos2(fx - 1.0, hy), pos2(fx + 1.0, fb)), 0.0, BLUE);
-    p.rect_filled(Rect::from_center_size(pos2(fx, hy), vec2(24.0, 2.0)), 0.0, if fresp.hovered() || fresp.dragged() { WHITE } else { hex(0x646464) });
+    p.rect_filled(Rect::from_center_size(pos2(fx, hy), vec2(24.0, 2.0)), 0.0, crate::ui_feel::hot_col(&fresp, gy(0x646464), WHITE.c()));
 
     // BPM (bold 18, 52 x 20): drag up or down, or the wheel; + and - under it.
     // (While it follows the master deck, + / - and typing are off; as the MASTER it is free.)
@@ -836,12 +841,12 @@ pub fn panel(app: &mut App, ui: &mut Ui, r: Rect) {
     } else {
         let whole = format!("{}", shown.floor() as i32);
         let frac = format!(".{:02}", ((shown - shown.floor()) * 100.0).round().min(99.0) as i32);
-        let g1 = p.layout_no_wrap(whole, bold(16.5), WHITE);
-        let g2 = p.layout_no_wrap(frac, bold(12.5), WHITE);
+        let g1 = p.layout_no_wrap(whole, bold(16.5), WHITE.c());
+        let g2 = p.layout_no_wrap(frac, bold(12.5), WHITE.c());
         let tx = br.center().x - (g1.size().x + g2.size().x) / 2.0;
         let base = br.center().y + g1.size().y / 2.0;
-        p.galley(pos2(tx, base - g1.size().y), g1.clone(), WHITE);
-        p.galley(pos2(tx + g1.size().x, base - g2.size().y - 1.0), g2, WHITE);
+        p.galley(pos2(tx, base - g1.size().y), g1.clone(), WHITE.c());
+        p.galley(pos2(tx + g1.size().x, base - g2.size().y - 1.0), g2, WHITE.c());
         if bresp.double_clicked() && !synced {
             app.px.sampler.bpm_edit = Some(format!("{:.2}", sp.bpm));
         }
@@ -863,7 +868,7 @@ pub fn panel(app: &mut App, ui: &mut Ui, r: Rect) {
     for (dir, x, label) in [(1.0f32, w / 2.0 - 22.0, "+"), (-1.0, w / 2.0 + 2.0, "-")] {
         let rr = at(x, h - 25.0, 20.0, 20.0);
         let resp = ui.interact(rr, ui.id().with(("smp_bpm_step", label)), Sense::click_and_drag());
-        let col = if synced { hex(0x424242) } else if resp.hovered() { WHITE } else { hex(0xC8C8C8) };
+        let col = if synced { gy(0x424242) } else { crate::ui_feel::hl(&resp, gy(0xC8C8C8), WHITE.c()) };
         p.rect_filled(Rect::from_center_size(rr.center(), vec2(9.0, 1.2)), 0.0, col);
         if dir > 0.0 {
             p.rect_filled(Rect::from_center_size(rr.center(), vec2(1.2, 9.0)), 0.0, col);
@@ -895,11 +900,11 @@ pub fn panel(app: &mut App, ui: &mut Ui, r: Rect) {
     }
 
     // ---- the bottom line: BANK, Q, BPM SYNC, MASTER
-    p.text(pos2(x0 + 6.0, y0 + h - 13.0), Align2::LEFT_CENTER, "BANK", caps(9.5), hex(0xC8C8C8));
+    p.text(pos2(x0 + 6.0, y0 + h - 13.0), Align2::LEFT_CENTER, "BANK", caps(9.5), gy(0xC8C8C8));
     for b in 0..4usize {
         let rr = at(43.0 + 28.0 * b as f32, h - 19.0, 22.0, 10.0);
         let resp = ui.interact(rr, ui.id().with(("smp_bank", b)), Sense::click());
-        p.rect_filled(rr, 1.0, if bank == b { BLUE } else if resp.hovered() { lighten(hex(0x282828)) } else { hex(0x282828) });
+        p.rect_filled(rr, 1.0, if bank == b { BLUE.c() } else { crate::ui_feel::hl(&resp, gy(0x282828), lighten(gy(0x282828))) });
         if crate::ui_player::press_fired(ui, &resp) && bank != b {
             sp.bank = b as u8;
             // Changing the bank closes an open EDIT panel.
@@ -993,8 +998,8 @@ fn sequencer_strip(app: &mut App, ui: &mut Ui, so: Pos2, sv: &SeqView, sp: &mut 
     // REC: arms recording; it runs while the pattern plays (a pad starts it).
     let rr = q_at(0.0, 5.0, 21.0, 20.0);
     let resp = ui.interact(rr, ui.id().with("seq_rec"), Sense::click());
-    let o = seq_box(&p, rr, if sv.rec { RED } else { BTN });
-    let ic = if sv.rec { WHITE } else { RED };
+    let o = seq_box(&p, rr, if sv.rec { RED } else { BTN.c() });
+    let ic = if sv.rec { WHITE.c() } else { RED };
     p.circle_filled(o + vec2(9.5, 9.0), 3.0, ic);
     p.circle_stroke(o + vec2(9.5, 9.0), 4.5, Stroke::new(1.0_f32, ic));
     if tip(resp, app, "Sequence Rec:\nRec Sampler Sequence").clicked() {
@@ -1004,7 +1009,7 @@ fn sequencer_strip(app: &mut App, ui: &mut Ui, so: Pos2, sv: &SeqView, sp: &mut 
     // PLAY: from the start of the pattern; again: stop (REC goes off, every pad stops).
     let pr = q_at(25.0, 5.0, 21.0, 20.0);
     let resp = ui.interact(pr, ui.id().with("seq_play"), Sense::click());
-    let o = seq_box(&p, pr, if sv.playing { BLUE } else { BTN });
+    let o = seq_box(&p, pr, if sv.playing { BLUE.c() } else { BTN.c() });
     p.add(egui::Shape::convex_polygon(vec![o + vec2(6.2, 5.7), o + vec2(12.2, 9.0), o + vec2(6.2, 12.3)], WHITE, Stroke::new(0.5_f32, WHITE)));
     if tip(resp, app, "Sequence Play:\nPlay Sampler sequence").clicked() {
         app.sampler_action(crate::sampler_ext::SmpAct::SeqPlay);
@@ -1013,18 +1018,18 @@ fn sequencer_strip(app: &mut App, ui: &mut Ui, so: Pos2, sv: &SeqView, sp: &mut 
     // SAVE: the pattern as it is goes into its slot (a paid function in rekordbox; free here).
     let save = q_at(50.0, 5.0, 46.0, 20.0);
     let resp = ui.interact(save, ui.id().with("seq_save"), Sense::click());
-    p.rect_filled(save, 2.0, hex(0x0A0A0A));
-    p.text(save.center(), Align2::CENTER_CENTER, "SAVE", caps(10.5), if !sv.dirty { hex(0x303030) } else if resp.hovered() { WHITE } else { hex(0x8C8C8C) });
+    p.rect_filled(save, 2.0, gy(0x0A0A0A));
+    p.text(save.center(), Align2::CENTER_CENTER, "SAVE", caps(10.5), if !sv.dirty { gy(0x303030) } else { crate::ui_feel::hl(&resp, gy(0x8C8C8C), WHITE.c()) });
     if tip(resp, app, "Sequence Save:\nSave Sampler sequence").clicked() && sv.dirty {
         app.sampler_seq_save();
     }
 
     // The pattern between its arrows (`LengthRoll_ArrowL/R.svg`, 5 x 8, rgb 150).
-    let arrow = hex(0x969696);
+    let arrow = gy(0x969696);
     for (dir, x, id) in [(-1i32, 105.0f32, "seq_prev"), (1, 200.0, "seq_next")] {
         let ar = q_at(x, 11.0, 5.0, 8.0);
         let resp = ui.interact(ar.expand2(vec2(4.0, 6.0)), ui.id().with(id), Sense::click());
-        let col = if resp.hovered() { WHITE } else { arrow };
+        let col = crate::ui_feel::hl(&resp, arrow, WHITE.c());
         let (tipx, backx) = if dir < 0 { (ar.min.x, ar.max.x) } else { (ar.max.x, ar.min.x) };
         let s = if dir < 0 { 1.0 } else { -1.0 };
         // The chevron of the SVG: tip at (0, 4.07), arms to the far edge, 1.8 thick.
@@ -1053,7 +1058,7 @@ fn sequencer_strip(app: &mut App, ui: &mut Ui, so: Pos2, sv: &SeqView, sp: &mut 
             let lp = ui.ctx().layer_painter(egui::LayerId::new(egui::Order::Tooltip, egui::Id::new("seq_dragl")));
             let rr = Rect::from_min_size(pp + vec2(12.0, 6.0), vec2(110.0, 18.0));
             lp.rect_filled(rr, 3.0, BLUE);
-            lp.text(rr.center(), Align2::CENTER_CENTER, "Sequence Load", FontId::proportional(10.5), WHITE);
+            lp.text(rr.center(), Align2::CENTER_CENTER, "Sequence Load", FontId::proportional(10.5), WHITE.c());
             if let Some(d) = over {
                 lp.rect_stroke(app.px.sampler.deck_rects[d as usize].shrink(1.0), 0.0, Stroke::new(2.0_f32, BLUE), egui::StrokeKind::Inside);
             }
@@ -1085,8 +1090,8 @@ fn sequencer_strip(app: &mut App, ui: &mut Ui, so: Pos2, sv: &SeqView, sp: &mut 
     let blink = (ui.input(|i| i.time) / 0.3) as i64 % 2 == 0;
     let (name_no, name_col) = match sv.reserved {
         // A change waiting for its bar: the pattern to come blinks.
-        Some(n) => (n, if blink { WHITE } else { hex(0x505050) }),
-        None => (sv.cur, if saved_slot && !sv.dirty { WHITE } else { hex(0x505050) }),
+        Some(n) => (n, if blink { WHITE.c() } else { gy(0x505050) }),
+        None => (sv.cur, if saved_slot && !sv.dirty { WHITE.c() } else { gy(0x505050) }),
     };
     if let Some((slot, mut text)) = app.px.sampler.name_edit.take() {
         // The pattern's name being typed (Enter keeps it; empty: back to "PATTERN n").
@@ -1116,7 +1121,7 @@ fn sequencer_strip(app: &mut App, ui: &mut Ui, so: Pos2, sv: &SeqView, sp: &mut 
     if slot_hover && (saved_slot || sv.has_events || sv.dirty) && sv.reserved.is_none() {
         let dr = q_at(185.0, 9.0, 12.0, 12.0);
         let dresp = ui.interact(dr, ui.id().with("seq_delete"), Sense::click());
-        let col = if dresp.hovered() { WHITE } else { hex(0xA0A0A0) };
+        let col = crate::ui_feel::hl(&dresp, gy(0xA0A0A0), WHITE.c());
         let c = dr.center();
         p.line_segment([c + vec2(-3.5, -3.5), c + vec2(3.5, 3.5)], Stroke::new(1.3_f32, col));
         p.line_segment([c + vec2(-3.5, 3.5), c + vec2(3.5, -3.5)], Stroke::new(1.3_f32, col));
@@ -1129,8 +1134,8 @@ fn sequencer_strip(app: &mut App, ui: &mut Ui, so: Pos2, sv: &SeqView, sp: &mut 
     let len = q_at(213.0, 6.0, 48.0, 18.0);
     let resp = ui.interact(len, ui.id().with("seq_len"), Sense::click());
     let bars_label = |b: u8| if b == 1 { "1Bar".to_string() } else { format!("{b}Bars") };
-    p.text(len.left_center() + vec2(5.5, -0.5), Align2::LEFT_CENTER, bars_label(sv.bars), FontId::proportional(11.0), WHITE);
-    crate::icons_player::chevron_down(&p, len.right_center() + vec2(-4.0, 0.5), 1.0, WHITE);
+    p.text(len.left_center() + vec2(5.5, -0.5), Align2::LEFT_CENTER, bars_label(sv.bars), FontId::proportional(11.0), WHITE.c());
+    crate::icons_player::chevron_down(&p, len.right_center() + vec2(-4.0, 0.5), 1.0, WHITE.c());
     let mut new_bars = None;
     crate::ui_browser::dropdown(ui, &resp, "seq_len_pop", |ui| {
         ui.set_min_width(70.0);
@@ -1149,20 +1154,20 @@ fn sequencer_strip(app: &mut App, ui: &mut Ui, so: Pos2, sv: &SeqView, sp: &mut 
     // Beat counter (163 x 12): a black bar with a mark per beat, and the play position.
     let beat = q_at(270.0, 10.0, 163.0, 12.0);
     let resp = ui.interact(beat, ui.id().with("seq_beat"), Sense::hover());
-    p.rect_filled(Rect::from_min_size(beat.min + vec2(0.0, 3.0), vec2(163.0, 6.0)), 0.0, Color32::BLACK);
+    p.rect_filled(Rect::from_min_size(beat.min + vec2(0.0, 3.0), vec2(163.0, 6.0)), 0.0, gy(0x000000));
     let marks = sv.bars.max(1) as usize * 4;
     for k in 0..=marks {
         // Every bar line (1 Bar: every second beat) is the brighter mark.
         let strong = if sv.bars == 1 { k % 2 == 0 } else { k % 4 == 0 };
         let x = beat.min.x + 1.0 + 160.0 * k as f32 / marks as f32;
-        p.rect_filled(Rect::from_min_size(pos2(x, beat.min.y + 4.0), vec2(1.0, 4.0)), 0.0, if strong { hex(0x808080) } else { hex(0x404040) });
+        p.rect_filled(Rect::from_min_size(pos2(x, beat.min.y + 4.0), vec2(1.0, 4.0)), 0.0, if strong { gy(0x808080) } else { gy(0x404040) });
     }
     // The marker (`p13019_plyposition`, drawn at twice its size: 8 x 12): white, red while
     // recording.
     let frac = (sv.pos / sv.beats.max(1.0)).clamp(0.0, 1.0) as f32;
     let mk = Rect::from_min_size(pos2(beat.min.x + frac * (163.0 - 8.0), beat.min.y), vec2(8.0, 12.0));
-    p.rect_filled(mk, 1.5, Color32::BLACK);
-    p.rect_filled(mk.shrink2(vec2(2.0, 1.5)), 0.0, if sv.rec && sv.playing { hex(0xFE0000) } else { WHITE });
+    p.rect_filled(mk, 1.5, gy(0x000000));
+    p.rect_filled(mk.shrink2(vec2(2.0, 1.5)), 0.0, if sv.rec && sv.playing { hex(0xFE0000) } else { WHITE.c() });
     let _ = tip(resp, app, "Beat Counter:\nIndicates sequence length and beats.\nDuring recording or playback of a sequence, a marker that indicates playback position is moving.");
 
     // MUTE and ERASE: pad modes of the sequencer, one at a time, only while it plays.
@@ -1174,7 +1179,7 @@ fn sequencer_strip(app: &mut App, ui: &mut Ui, so: Pos2, sv: &SeqView, sp: &mut 
         // (Arial 12 in rekordbox: a little larger than Q and BPM SYNC.)
         let mr = q_at(x, 5.0, 46.0, 20.0);
         let resp = ui.interact(mr, ui.id().with(id), Sense::click());
-        let col = if !sv.playing { hex(0x484848) } else if on { BLUE } else if resp.hovered() { WHITE } else { hex(0x8C8C8C) };
+        let col = if !sv.playing { gy(0x484848) } else if on { BLUE.c() } else { crate::ui_feel::hl(&resp, gy(0x8C8C8C), WHITE.c()) };
         p.text(mr.center(), Align2::CENTER_CENTER, label, caps(10.5), col);
         if tip(resp, app, hint).clicked() {
             if sv.playing {
@@ -1208,7 +1213,7 @@ fn sequencer_strip(app: &mut App, ui: &mut Ui, so: Pos2, sv: &SeqView, sp: &mut 
     let resp = ui.interact(vr, ui.id().with("seq_metro_vol"), Sense::click());
     let vol = sp.seq.metronome_vol.min(2);
     for (k, (x, y0, y1)) in [(3.0f32, 5.0f32, 13.0f32), (8.0, 3.0, 15.0), (13.0, 1.0, 17.0)].into_iter().enumerate() {
-        p.rect_filled(Rect::from_min_max(vr.min + vec2(x, y0), vr.min + vec2(x + 3.0, y1)), 0.0, if k as u8 <= vol { BLUE } else { OFF });
+        p.rect_filled(Rect::from_min_max(vr.min + vec2(x, y0), vr.min + vec2(x + 3.0, y1)), 0.0, if k as u8 <= vol { BLUE.c() } else { OFF.c() });
     }
     if tip(resp, app, "Metronome Volume").clicked() {
         sp.seq.metronome_vol = (vol + 1) % 3;
@@ -1220,8 +1225,8 @@ fn edit_panel(app: &mut App, ui: &mut Ui, er: Rect, idx: usize, slot_w: f32) {
     let p = ui.painter().clone();
     // Swallow clicks so the slots underneath do not react.
     let _ = ui.interact(er, ui.id().with(("smp_editbg", idx)), Sense::click());
-    p.rect_filled(er, 2.0, hex(0x141414));
-    p.rect_stroke(er, 2.0, Stroke::new(1.0_f32, hex(0x3C3C3C)), egui::StrokeKind::Inside);
+    p.rect_filled(er, 2.0, gy(0x141414));
+    p.rect_stroke(er, 2.0, Stroke::new(1.0_f32, gy(0x3C3C3C)), egui::StrokeKind::Inside);
     let Some(mut s) = app.prefs.sampler.slots[idx].clone() else { return };
     let o = er.min;
     let v = 2.0 + ((slot_w - 148.0) / 2.0).max(0.0).floor();
@@ -1260,8 +1265,8 @@ fn edit_panel(app: &mut App, ui: &mut Ui, er: Rect, idx: usize, slot_w: f32) {
         let on = if label == "MT" { s.mt } else { s.sync };
         let rr = at(x, 8.0, 30.0, 14.0);
         let resp = ui.interact(rr, ui.id().with((id, idx)), Sense::click());
-        p.rect_filled(rr, 2.0, if on && s.looped { BLUE } else if resp.hovered() && s.looped { lighten(BTN) } else { BTN });
-        p.text(rr.center(), Align2::CENTER_CENTER, label, caps(8.0), if s.looped { WHITE } else { hex(0x424242) });
+        p.rect_filled(rr, 2.0, if on && s.looped { BLUE.c() } else { crate::ui_feel::hl_if(&resp, s.looped, BTN.c(), lighten(BTN.c())) });
+        p.text(rr.center(), Align2::CENTER_CENTER, label, caps(8.0), if s.looped { WHITE.c() } else { gy(0x424242) });
         let hint = if label == "MT" { "MASTER TEMPO: the sample keeps its pitch when its tempo changes" } else { "SYNC: the loop sample follows the sampler's BPM" };
         if tip(resp, app, hint).clicked() && s.looped {
             if label == "MT" {
@@ -1273,22 +1278,22 @@ fn edit_panel(app: &mut App, ui: &mut Ui, er: Rect, idx: usize, slot_w: f32) {
         }
     }
     // GAIN knob (24 x 24) with its label, and the sample's BPM (64 x 20).
-    if let Some(g) = crate::ui_perf::knob(ui, pos2(o.x + v + 37.0, o.y + 41.0), ("smp_slot_gain", idx), s.gain / 100.0, 0.5, WHITE) {
+    if let Some(g) = crate::ui_perf::knob(ui, pos2(o.x + v + 37.0, o.y + 41.0), ("smp_slot_gain", idx), s.gain / 100.0, 0.5, WHITE.c()) {
         s.gain = (g * 100.0).round();
         changed = true;
     }
-    p.text(pos2(o.x + v + 38.0, o.y + 55.5), Align2::CENTER_CENTER, "GAIN", caps(8.0), hex(0x8C8C8C));
+    p.text(pos2(o.x + v + 38.0, o.y + 55.5), Align2::CENTER_CENTER, "GAIN", caps(8.0), gy(0x8C8C8C));
     let bpm_r = at(75.0, 34.0, 64.0, 20.0);
-    p.text(bpm_r.center(), Align2::CENTER_CENTER, if s.bpm > 0.0 { format!("{:.2}", s.bpm) } else { "---.--".to_string() }, bold(13.0), if s.bpm > 0.0 { WHITE } else { hex(0x646464) });
+    p.text(bpm_r.center(), Align2::CENTER_CENTER, if s.bpm > 0.0 { format!("{:.2}", s.bpm) } else { "---.--".to_string() }, bold(13.0), if s.bpm > 0.0 { WHITE.c() } else { gy(0x646464) });
     // Shift the start 1 ms earlier / later; halve / double the sample's BPM (40..499).
     let sl = box_button(ui, at(4.0, 64.0, 30.0, 14.0), ("smp_shl", idx), "", false);
-    crate::icons_player::chevron_left(&p, sl.rect.center(), 0.9, WHITE);
+    crate::icons_player::chevron_left(&p, sl.rect.center(), 0.9, WHITE.c());
     if tip(sl, app, "Move the start point 1 ms earlier").clicked() {
         s.offset_ms = (s.offset_ms - 1.0).max(0.0);
         changed = true;
     }
     let sr = box_button(ui, at(38.0, 64.0, 30.0, 14.0), ("smp_shr", idx), "", false);
-    crate::icons_player::chevron_right(&p, sr.rect.center(), 0.9, WHITE);
+    crate::icons_player::chevron_right(&p, sr.rect.center(), 0.9, WHITE.c());
     if tip(sr, app, "Move the start point 1 ms later").clicked() {
         s.offset_ms += 1.0;
         changed = true;

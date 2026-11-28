@@ -631,7 +631,7 @@ fn controls(app: &mut App, ui: &mut Ui, o: Pos2, export: bool) {
     };
     // ---- source selector: "Master Out" is what there is to record without DJ hardware.
     let src = ui.interact(b[0], ui.id().with("recsrc"), Sense::click());
-    p.text(pos2(b[0].min.x + 6.0, b[0].center().y + 0.25), Align2::LEFT_CENTER, "Master Out", caps(11.75), WHITE);
+    p.text(pos2(b[0].min.x + 6.0, b[0].center().y + 0.25), Align2::LEFT_CENTER, "Master Out", caps(11.75), WHITE.c());
     let cc = pos2(b[0].max.x - 4.25, b[0].center().y + 0.25);
     p.add(egui::Shape::line(vec![cc + vec2(-3.6, -2.0), cc + vec2(0.0, 2.0), cc + vec2(3.6, -2.0)], Stroke::new(1.0_f32, WHITE)));
     crate::ui_browser::dropdown(ui, &src, "recsrcpop", |ui| {
@@ -656,7 +656,7 @@ fn controls(app: &mut App, ui: &mut Ui, o: Pos2, export: bool) {
     }
     let ang = |x: f32| (-225.0 + 270.0 * x).to_radians();
     let ring: Vec<Pos2> = (0..=36).map(|i| kc + vec2(ang(i as f32 / 36.0).cos(), ang(i as f32 / 36.0).sin()) * 8.75).collect();
-    p.add(egui::Shape::line(ring, Stroke::new(2.5_f32, if kresp.hovered() || kresp.dragged() { hex(0x464646) } else { hex(0x323232) })));
+    p.add(egui::Shape::line(ring, Stroke::new(2.5_f32, crate::ui_feel::hot_col(&kresp, gy(0x323232), gy(0x464646)))));
     let a = ang((v + 1.0) / 2.0);
     p.line_segment([kc + vec2(a.cos(), a.sin()) * 5.5, kc + vec2(a.cos(), a.sin()) * 10.0], Stroke::new(2.0_f32, WHITE));
     if v != level {
@@ -677,7 +677,7 @@ fn controls(app: &mut App, ui: &mut Ui, o: Pos2, export: bool) {
     let bar_h = if export { 4.0 } else { 3.0 };
     for c in 0..2 {
         let br = Rect::from_min_size(pos2(b[2].min.x, if c == 0 { b[2].min.y } else { b[2].max.y - bar_h }), vec2(b[2].width(), bar_h));
-        p.rect_filled(br, 0.0, hex(0x323232));
+        p.rect_filled(br, 0.0, gy(0x323232));
         let lit = rec::meter_segments(app.rec.shown_db[c]);
         let seg = br.width() / 88.0;
         if let Some(cols) = &app.rec.colours {
@@ -701,8 +701,8 @@ fn controls(app: &mut App, ui: &mut Ui, o: Pos2, export: bool) {
     let k = (b[3].width() / 21.0).min(b[3].height() / 19.0);
     let tile = Rect::from_center_size(b[3].center(), vec2(21.0 * k, 19.0 * k));
     let red = Color32::from_rgb(200, 0, 0);
-    p.rect_filled(tile, 2.0 * k, if lit { red } else if rresp.hovered() { hex(0x343434) } else { hex(0x292929) });
-    p.circle_filled(tile.center() + vec2(0.0, -0.5 * k), 5.0 * k, if lit { Color32::from_rgb(175, 175, 175) } else { red });
+    p.rect_filled(tile, 2.0 * k, if lit { red } else { crate::ui_feel::hl(&rresp, gy(0x292929), gy(0x343434)) });
+    p.circle_filled(tile.center() + vec2(0.0, -0.5 * k), 5.0 * k, if lit { gy(0xAFAFAF) } else { red });
     if rresp.clicked() {
         app.rec_button();
     }
@@ -710,9 +710,9 @@ fn controls(app: &mut App, ui: &mut Ui, o: Pos2, export: bool) {
     // ---- recorded time / time left
     let elapsed = if recording { rec::engine().elapsed() as u64 } else { 0 };
     let left = rec::remaining_secs(elapsed, app.rec.free);
-    let grey = hex(0x878787);
+    let grey = gy(0x878787);
     let (f_el, f_sl, f_re) = if export { (rb(17.0), rb(12.5), rb(13.4)) } else { (rb(9.0), rb(9.0), rb(9.0)) };
-    p.text(pos2(b[4].max.x + 0.25, b[4].center().y + 0.25), Align2::RIGHT_CENTER, rec::hms(elapsed), f_el, if export { grey } else { WHITE });
+    p.text(pos2(b[4].max.x + 0.25, b[4].center().y + 0.25), Align2::RIGHT_CENTER, rec::hms(elapsed), f_el, if export { grey } else { WHITE.c() });
     p.text(pos2(b[5].center().x - 0.5, b[5].center().y + 0.25), Align2::CENTER_CENTER, "/", f_sl, grey);
     p.text(pos2(b[6].min.x, b[6].center().y + 0.25), Align2::LEFT_CENTER, rec::hms(left), f_re, grey);
     let _ = tip(ui.interact(b[4].union(b[6]), ui.id().with("rectime"), Sense::hover()), app, TIP_TIME);
@@ -815,7 +815,7 @@ fn split_window(app: &mut App, ctx: &egui::Context, post: &mut Post) {
         split_o = Some(o);
         let p = ui.painter().clone();
         let text = |x: f32, y: f32, s: &str| {
-            p.text(pos2(o.x + x, o.y + y + 12.0), Align2::LEFT_CENTER, s, inter(13.0), WHITE);
+            p.text(pos2(o.x + x, o.y + y + 12.0), Align2::LEFT_CENTER, s, inter(13.0), WHITE.c());
         };
         text(30.0, 30.0, "You can separate the recorded file and save them as follows:");
         text(60.0, 80.0, "Total :");
@@ -910,11 +910,11 @@ fn tag_window(app: &mut App, ctx: &egui::Context, post: &mut Post) {
         let text = |x: f32, y: f32, s: &str, c: Color32| {
             p.text(pos2(o.x + x, o.y + y + 12.0), Align2::LEFT_CENTER, s, inter(13.0), c);
         };
-        text(30.0, 20.0, if perf { "Enter the DJ name, album title and mix title." } else { "Enter an artist name, an album name and a track title." }, WHITE);
+        text(30.0, 20.0, if perf { "Enter the DJ name, album title and mix title." } else { "Enter an artist name, an album name and a track title." }, WHITE.c());
         let labels = if perf { ["DJ", "Album", "Mix Title"] } else { ["Artist", "Album", "Track Title"] };
         for (i, l) in labels.iter().enumerate() {
             let y = 68.0 + 58.0 * i as f32;
-            text(80.0, y, l, WHITE);
+            text(80.0, y, l, WHITE.c());
             let field = Rect::from_min_size(o + vec2(90.0, y + 24.0), vec2(400.0, 24.0));
             // (rekordbox keeps the characters a file name cannot hold out of these fields.)
             let resp = ui.put(field, egui::TextEdit::singleline(&mut post.fields[i]).id(egui::Id::new(("rec_tag_field", i))).font(inter(13.0)));
@@ -930,12 +930,12 @@ fn tag_window(app: &mut App, ctx: &egui::Context, post: &mut Post) {
         if next.clicked() {
             go = 1;
         }
-        text(240.0, 266.0, "Track : ", DIM2);
-        text(300.0, 266.0, &format!("{} / {}", post.cur + 1, n), WHITE);
-        text(360.0, 266.0, "Time : ", DIM2);
-        text(420.0, 266.0, &hms_ms(post.files[post.cur].1), WHITE);
+        text(240.0, 266.0, "Track : ", DIM2.c());
+        text(300.0, 266.0, &format!("{} / {}", post.cur + 1, n), WHITE.c());
+        text(360.0, 266.0, "Time : ", DIM2.c());
+        text(420.0, 266.0, &hms_ms(post.files[post.cur].1), WHITE.c());
         if post.confirm_delete {
-            text(90.0, 310.0, "Are you sure you want to delete the selected file(s)?", WHITE);
+            text(90.0, 310.0, "Are you sure you want to delete the selected file(s)?", WHITE.c());
             if ui.put(Rect::from_min_size(o + vec2(150.0, 348.0), vec2(120.0, 24.0)), btn("Ok").exact(vec2(120.0, 24.0))).clicked() {
                 delete = true;
             }
@@ -1210,7 +1210,7 @@ pub fn list(app: &mut App, ui: &mut Ui, dir: &str) {
         Ok(rel) if !rel.as_os_str().is_empty() => format!("Recordings / {} ({} Tracks)", rel.to_string_lossy().replace('/', " / "), files.len()),
         _ => format!("Recordings ({} Tracks)", files.len()),
     };
-    p.text(pos2(bar.min.x + 10.0, bar.center().y), Align2::LEFT_CENTER, title, rb(crate::ui_browser::TITLE_FONT), WHITE);
+    p.text(pos2(bar.min.x + 10.0, bar.center().y), Align2::LEFT_CENTER, title, rb(crate::ui_browser::TITLE_FONT), WHITE.c());
     let mut body = ui.new_child(egui::UiBuilder::new().max_rect(Rect::from_min_max(pos2(r.min.x, r.min.y + 26.0), r.max)));
     // The collection's columns in its order and widths (the ones drawn rather than written,
     // such as the artwork and the attribute icons, stay empty: a recording has none).
@@ -1219,7 +1219,7 @@ pub fn list(app: &mut App, ui: &mut Ui, dir: &str) {
     body.painter().rect_filled(hdr, 0.0, BG2);
     let mut x = hdr.min.x;
     for (c, w) in &cols {
-        body.painter().with_clip_rect(Rect::from_min_max(pos2(x, hdr.min.y), pos2(x + w - 2.0, hdr.max.y))).text(pos2(x + 4.0, hdr.center().y), Align2::LEFT_CENTER, c.label(), rb(10.5), WHITE);
+        body.painter().with_clip_rect(Rect::from_min_max(pos2(x, hdr.min.y), pos2(x + w - 2.0, hdr.max.y))).text(pos2(x + 4.0, hdr.center().y), Align2::LEFT_CENTER, c.label(), rb(10.5), WHITE.c());
         body.painter().rect_filled(Rect::from_min_max(pos2(x + w - 1.0, hdr.min.y), pos2(x + w, hdr.max.y)), 0.0, BG);
         x += w;
     }
@@ -1229,16 +1229,18 @@ pub fn list(app: &mut App, ui: &mut Ui, dir: &str) {
             let (f, _, _) = &files[i];
             let fs = f.to_string_lossy().to_string();
             let (rr, resp) = ui.allocate_exact_size(vec2(ui.available_width(), crate::ui_browser::ROW_H), Sense::click_and_drag());
+            // (A selected row keeps rekordbox's fixed blue and white text in Light: `ListViewer::findTextColour`.)
+            let _sel_dark = crate::theme::dark_scope(sel.as_deref() == Some(fs.as_str()));
             if sel.as_deref() == Some(fs.as_str()) {
                 ui.painter().rect_filled(rr, 0.0, ROW_SEL);
             } else if i % 2 == 1 {
-                ui.painter().rect_filled(rr, 0.0, hex(0x0E0E0E));
+                ui.painter().rect_filled(rr, 0.0, gy(0x0E0E0E));
             }
             let t = &rows[i];
             let mut x = rr.min.x;
             for (c, w) in &cols {
                 let v = if *c == Col::Num { (i + 1).to_string() } else { crate::ui_library_ext::col_text(app, t, *c).unwrap_or_default() };
-                ui.painter().with_clip_rect(Rect::from_min_max(pos2(x, rr.min.y), pos2(x + w - 4.0, rr.max.y))).text(pos2(x + 4.0, rr.center().y), Align2::LEFT_CENTER, v, rb(10.5), WHITE);
+                ui.painter().with_clip_rect(Rect::from_min_max(pos2(x, rr.min.y), pos2(x + w - 4.0, rr.max.y))).text(pos2(x + 4.0, rr.center().y), Align2::LEFT_CENTER, v, rb(10.5), WHITE.c());
                 x += w;
             }
             if resp.clicked() || resp.drag_started() {
@@ -1288,7 +1290,7 @@ pub fn list(app: &mut App, ui: &mut Ui, dir: &str) {
 fn sub_t(ui: &mut Ui, text: &str, tracking: f32) {
     kit::row_at(ui, kit::Kind::Sub, 20.0, 57.0, |ui| {
         let r = ui.max_rect();
-        kit::paint_text(ui, pos2(r.min.x, r.center().y), Align2::LEFT_CENTER, text, inter_bold(15.75), WHITE, tracking);
+        kit::paint_text(ui, pos2(r.min.x, r.center().y), Align2::LEFT_CENTER, text, inter_bold(15.75), WHITE.c(), tracking);
     });
     kit::indent(ui, 84.0);
 }
@@ -1302,7 +1304,7 @@ pub fn prefs_page(app: &mut App, ui: &mut Ui) {
     let top = ui.cursor().min;
     let mut title_ui = ui.new_child(egui::UiBuilder::new().max_rect(ui.max_rect()));
     card(ui, "", |ui| {
-        kit::paint_text(&title_ui, pos2(top.x + 25.0, top.y + 31.0), Align2::LEFT_CENTER, "Recordings", inter_bold(17.0), WHITE, 0.6);
+        kit::paint_text(&title_ui, pos2(top.x + 25.0, top.y + 31.0), Align2::LEFT_CENTER, "Recordings", inter_bold(17.0), WHITE.c(), 0.6);
         let _ = &mut title_ui;
         // ---- Location of Files
         sub_t(ui, "Location of Files", 0.12);
@@ -1345,14 +1347,14 @@ pub fn prefs_page(app: &mut App, ui: &mut Ui) {
         let p = ui.painter().clone();
         let hr = Rect::from_min_size(pos2(top.x + 327.0, sub_y - 7.0), vec2(14.0, 12.0));
         let hresp = ui.interact(hr, ui.id().with("rec_silence_help"), Sense::hover());
-        p.rect_stroke(hr, 1.5, Stroke::new(1.0_f32, if hresp.hovered() { hex(0x8A8A8A) } else { hex(0x4A4A4A) }), egui::StrokeKind::Inside);
-        p.text(pos2(hr.center().x, hr.center().y + 0.25), Align2::CENTER_CENTER, "?", inter_bold(9.5), if hresp.hovered() { WHITE } else { hex(0x8A8A8A) });
+        p.rect_stroke(hr, 1.5, Stroke::new(1.0_f32, crate::ui_feel::hl(&hresp, gy(0x4A4A4A), gy(0x8A8A8A))), egui::StrokeKind::Inside);
+        p.text(pos2(hr.center().x, hr.center().y + 0.25), Align2::CENTER_CENTER, "?", inter_bold(9.5), crate::ui_feel::hl(&hresp, gy(0x8A8A8A), WHITE.c()));
         let _ = hresp.on_hover_text(HELP_SILENCE);
         ui.add_space(13.5);
         let (row, _) = ui.allocate_exact_size(vec2(ui.available_width(), 20.0), Sense::hover());
         let o = row.min;
         let vr = Rect::from_min_size(pos2(o.x + 84.0, o.y), vec2(100.0, 20.0));
-        p.rect_filled(vr, 0.0, WHITE);
+        p.rect_filled(vr, 0.0, ON_ACCENT);
         p.text(vr.center(), Align2::CENTER_CENTER, format!("{}dB", app.prefs.rec.silence_db.round() as i32), inter(13.5), Color32::BLACK);
         let tr = Rect::from_min_size(pos2(o.x + 200.0, o.y), vec2(398.0, 20.0));
         let resp = ui.interact(tr, ui.id().with("rec_silence"), Sense::click_and_drag());
@@ -1368,9 +1370,9 @@ pub fn prefs_page(app: &mut App, ui: &mut Ui) {
                 changed = true;
             }
         }
-        p.rect_filled(Rect::from_min_max(pos2(tr.min.x, tr.center().y - 2.0), pos2(tr.max.x, tr.center().y + 2.0)), 0.0, hex(0x0F0F0F));
+        p.rect_filled(Rect::from_min_max(pos2(tr.min.x, tr.center().y - 2.0), pos2(tr.max.x, tr.center().y + 2.0)), 0.0, gy(0x0F0F0F));
         let hx = tr.min.x + (app.prefs.rec.silence_db + 78.0) / 72.0 * (tr.width() - handle) + 2.5;
-        p.rect_filled(Rect::from_min_size(pos2(hx, tr.min.y), vec2(handle, 20.0)), 0.5, hex(0xE6E6E6));
+        p.rect_filled(Rect::from_min_size(pos2(hx, tr.min.y), vec2(handle, 20.0)), 0.5, gy(0xE6E6E6));
         ui.add_space(16.0);
         // The live level, -78 dB at the left end and -6 dB at the right: two rows 300 x 15.
         let (mr, _) = ui.allocate_exact_size(vec2(ui.available_width(), 45.0), Sense::hover());
@@ -1402,8 +1404,8 @@ pub fn prefs_page(app: &mut App, ui: &mut Ui) {
                 p.rect_filled(Rect::from_min_max(pos2(hx, br.min.y), pos2((hx + 2.0).min(br.max.x), br.max.y)), 0.0, Color32::BLACK);
             }
         }
-        p.text(m + vec2(5.0, 37.5), Align2::LEFT_CENTER, "-78dB", inter(12.0), WHITE);
-        p.text(m + vec2(294.5, 37.5), Align2::RIGHT_CENTER, "-6dB", inter(12.0), WHITE);
+        p.text(m + vec2(5.0, 37.5), Align2::LEFT_CENTER, "-78dB", inter(12.0), WHITE.c());
+        p.text(m + vec2(294.5, 37.5), Align2::RIGHT_CENTER, "-6dB", inter(12.0), WHITE.c());
         if app.rec.noise.iter().any(|d| *d > -100.0) {
             ui.ctx().request_repaint_after(std::time::Duration::from_millis(36));
         }
@@ -1443,7 +1445,7 @@ pub fn prefs_page(app: &mut App, ui: &mut Ui) {
         kit::row_at(ui, kit::Kind::Ctl, 22.0, 55.0, |ui| {
             ui.spacing_mut().interact_size.y = 22.0;
             let (lr, _) = ui.allocate_exact_size(vec2(345.0, 22.0), Sense::hover());
-            kit::paint_text(ui, pos2(lr.min.x, lr.center().y), Align2::LEFT_CENTER, "When silence continues for:", inter(14.0), WHITE, -0.21);
+            kit::paint_text(ui, pos2(lr.min.x, lr.center().y), Align2::LEFT_CENTER, "When silence continues for:", inter(14.0), WHITE.c(), -0.21);
             let s = app.prefs.rec.silence_secs.clamp(1, 10);
             kit::combo("rec_silence_secs", 200.0, format!("{s}second"), 14.0).show_ui(ui, |ui| {
                 for k in 1..=10u8 {

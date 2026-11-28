@@ -12,6 +12,7 @@ mod cfx;
 mod cfx_space;
 mod browser_ext;
 mod collection_cleanup;
+mod contrast;
 mod db;
 mod cue_tools;
 mod deck;
@@ -27,7 +28,24 @@ mod edit_selftest;
 mod export;
 mod fx;
 mod fx_core;
+mod fx_lfo;
+mod fx_verb;
+mod fx_spin;
+mod fx_spiral;
+mod fx_helix;
+mod fx_noise;
+mod fx_roll;
+mod fx_sweep;
+mod fx_rev;
+mod fx_echo;
+mod fx_echo_plus;
+mod feel_selftest;
+#[cfg(test)]
+mod fx7b_tests;
+#[cfg(test)]
+mod fx9_tests;
 mod mfx;
+mod mfx_att;
 mod icons;
 mod icons_player;
 mod icons_src;
@@ -60,6 +78,8 @@ mod sampler_lib;
 mod sequencer;
 mod ui_sampler;
 mod model;
+mod motion;
+mod artwork_thumbs;
 mod manual;
 mod phrase;
 mod phrase_rb;
@@ -93,6 +113,8 @@ mod prefs_shell;
 mod rbimport;
 mod recorder;
 mod stems;
+mod stem_export;
+mod ui_stem_export;
 mod smart;
 mod playlist_art;
 mod theme;
@@ -104,6 +126,7 @@ mod ui_dialogs;
 mod ui_edit;
 mod ui_edit_view;
 mod ui_kit;
+mod ui_feel;
 mod ui_library_ext;
 mod ui_midi;
 mod ui_mpl;
@@ -248,9 +271,21 @@ fn window_input(app: &mut App, ctx: &egui::Context) {
     }
 }
 
+/// A close confirmation applies to this quit attempt. If a live library write keeps
+/// the process open, future editor changes or recordings need a fresh confirmation.
+fn guard_library_write_close(ctx: &egui::Context, writing: bool, editor_quit_ok: &mut bool, recorder_quit_ok: &mut bool) {
+    if writing && ctx.viewport_id() == egui::ViewportId::ROOT && ctx.input(|i| i.viewport().close_requested()) {
+        *editor_quit_ok = false;
+        *recorder_quit_ok = false;
+        ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+    }
+}
+
 fn library_panel(app: &mut App, ctx: &egui::Context) {
-    egui::CentralPanel::default().frame(egui::Frame::default().fill(theme::BG)).show(ctx, |ui| {
+    egui::CentralPanel::default().frame(egui::Frame::default().fill(theme::BG.c())).show(ctx, |ui| {
+        let rect = ui.max_rect();
         ui_browser::browser(app, ui);
+        ui_feel::watch_library(app, rect);
     });
 }
 
@@ -260,6 +295,9 @@ impl eframe::App for Gui {
     fn raw_input_hook(&mut self, _ctx: &egui::Context, raw: &mut egui::RawInput) {
         ui_groove::frame_hook(&mut self.app, raw);
         app_hooks::raw_input(&mut self.app, raw);
+        if self.app.screenshot.is_some() && raw.viewport_id == egui::ViewportId::ROOT {
+            feel_selftest::raw_input(&mut self.app, raw);
+        }
         let Some((_, frame)) = self.app.screenshot.clone() else { return };
         self.app.shot_player_events(frame, raw);
         self.app.shot_perf_events(frame, raw);
@@ -321,6 +359,7 @@ impl eframe::App for Gui {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         let bench_t0 = std::time::Instant::now();
         let app = &mut self.app;
+        ui_feel::begin_frame(app, ctx);
         if self.pending_docked_size.is_some() && windowed(ctx) {
             restore_docked_size(ctx, self.pending_docked_size.take());
         }
@@ -356,6 +395,7 @@ impl eframe::App for Gui {
         step!(menus::sync(app));
         step!(ui_edit::frame(app, ctx));
         window_input(app, ctx);
+        theme::sync(ctx, app.prefs.rb.color_theme == 2 && !ui_edit::is_edit(app));
         // Preferences > View > Tooltips off: no hover text anywhere, including the ones drawn
         // with egui's own `on_hover_text` (a delay that never runs out; infinity would panic
         // in egui's repaint timer).
@@ -367,7 +407,7 @@ impl eframe::App for Gui {
         let recording_strip = !app.performance() && app.prefs.rec.panel_export;
         let deck_height = if ui_edit::is_edit(app) { 293.0 } else { app.player_height() };
         let deck_height = deck_height + if recording_strip { ui_rec::EXPORT_H } else { 0.0 };
-        let toggle_library = egui::TopBottomPanel::top("header").exact_height(28.0).show_separator_line(false).frame(egui::Frame::default().fill(theme::BG1)).show(ctx, |ui| {
+        let toggle_library = egui::TopBottomPanel::top("header").exact_height(28.0).show_separator_line(false).frame(egui::Frame::default().fill(theme::HEADER.c())).show(ctx, |ui| {
             ui_browser::header_bar(app, ui)
         }).inner;
         let menu_toggle = std::mem::take(&mut app.toggle_library_window);
@@ -380,16 +420,20 @@ impl eframe::App for Gui {
                 app.library_window = Some(window);
             }
         }
-        egui::TopBottomPanel::bottom("footer").exact_height(28.0).show_separator_line(false).frame(egui::Frame::default().fill(theme::BG)).show(ctx, |ui| {
+        egui::TopBottomPanel::bottom("footer").exact_height(28.0).show_separator_line(false).frame(egui::Frame::default().fill(theme::BG.c())).show(ctx, |ui| {
             ui_browser::footer(app, ui);
         });
         // EXPORT mode's recording panel, a strip under the top bar.
         if recording_strip {
-            egui::TopBottomPanel::top("recstrip").exact_height(ui_rec::EXPORT_H).show_separator_line(false).frame(egui::Frame::default().fill(theme::BG2)).show(ctx, |ui| ui_rec::export_strip(app, ui));
+            egui::TopBottomPanel::top("recstrip").exact_height(ui_rec::EXPORT_H).show_separator_line(false).frame(egui::Frame::default().fill(theme::BG2.c())).show(ctx, |ui| ui_rec::export_strip(app, ui));
         }
         let decks_visible = !ui_edit::is_edit(app) && (!app.full_browser() || app.performance());
         if ui_edit::is_edit(app) {
-            step!(ui_edit_view::top_panel(app, ctx));
+            if app.library_window.is_some() {
+                app.with_detached_player_drag(ctx, |app| ui_edit_view::top_panel(app, ctx));
+            } else {
+                step!(ui_edit_view::top_panel(app, ctx));
+            }
         } else if decks_visible {
             // The header is 28 pt and 1 Player / 2 Players 256 pt tall with no rule between them
             // (measured on rekordbox: the player ends 284 pt below the window top); the Simple
@@ -397,7 +441,7 @@ impl eframe::App for Gui {
             let h = app.player_height();
             let perf = app.performance();
             let draw_players = |app: &mut App| {
-                egui::TopBottomPanel::top(egui::Id::new(("player", if perf { 9 } else { app.prefs.player_layout.min(3) }))).exact_height(h).show_separator_line(false).frame(egui::Frame::default().fill(theme::BG)).show(ctx, |ui| match app.prefs.player_layout {
+                egui::TopBottomPanel::top(egui::Id::new(("player", if perf { 9 } else { app.prefs.player_layout.min(3) }))).exact_height(h).show_separator_line(false).frame(egui::Frame::default().fill(theme::BG.c())).show(ctx, |ui| match app.prefs.player_layout {
                     _ if perf => step!(ui_perf::performance(app, ui)),
                     1 | 3 => step!(ui_player2::two_players(app, ui)),
                     2 => step!(ui_player2::simple_player(app, ui)),
@@ -429,8 +473,11 @@ impl eframe::App for Gui {
                     request.finish(child);
                 }
                 window_input(app, child);
-                step!(library_panel(app, child));
-                step!(ui_dialogs::library_dialogs(app, child));
+                theme::sync(child, app.prefs.rb.color_theme == 2 && !ui_edit::is_edit(app));
+                ui_feel::library_frame(app, child, |app| {
+                    step!(library_panel(app, child));
+                    step!(ui_dialogs::library_dialogs(app, child));
+                });
                 false
             });
             if reattach {
@@ -453,16 +500,20 @@ impl eframe::App for Gui {
                 }
             });
         }
-        collection_cleanup::ui::guard_app_close(app, ctx);
         app.update_transport(ctx, decks_visible);
         // Preferences rows of other files' features take effect (prefs_bridge.rs).
         if app.dialogs.prefs_open || app.ctx.cumulative_pass_nr() < 3 {
             app.prefs_bridge();
         }
+        step!(ui_stem_export::frame(app, ctx));
         step!(dupes::windows(app, ctx));
         step!(cue_tools::windows(app, ctx));
         step!(ui_midi::window(app, ctx));
         step!(ui_rec::windows(app, ctx));
+        let library_writing = collection_cleanup::ui::applying(app)
+            || app.dialogs.library_sync_review.as_ref().is_some_and(ui_sync::Review::writing);
+        guard_library_write_close(ctx, library_writing, &mut app.edit.quit_ok, &mut app.rec.quit_ok);
+        ui_feel::end_frame(app, ctx);
 
         if app.analysis_total > 0 || app.importing.is_some() || app.export_job.is_some() {
             ctx.request_repaint_after(std::time::Duration::from_millis(250));
@@ -470,7 +521,7 @@ impl eframe::App for Gui {
 
         // PREPDECK_BENCH=<frames> (with --screenshot): play the loaded track muted for that many
         // frames before the picture and print how long building each frame took.
-        let bench: u32 = std::env::var("PREPDECK_BENCH").ok().and_then(|v| v.parse().ok()).unwrap_or(0);
+        let bench = feel_selftest::bench_frames();
         if bench > 0 {
             if let Some((_, frames)) = app.screenshot.clone() {
                 static TIMES: std::sync::Mutex<Vec<f32>> = std::sync::Mutex::new(Vec::new());
@@ -527,13 +578,16 @@ impl eframe::App for Gui {
             // synced library (up to ~20 s).
             static ASKED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
             if frames >= 120 + bench && (app.rb_job.is_none() || frames >= 1200 + bench) && !ASKED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                if let Ok(report) = std::env::var("PREPDECK_CONTRAST") {
+                    contrast::dump(ctx, &report);
+                }
                 ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(egui::UserData::default()));
             }
             if frames > 1500 + bench {
                 std::process::exit(1);
             }
             app.screenshot = Some((path, frames + 1));
-            ctx.request_repaint();
+            if !feel_selftest::idle_probe() { ctx.request_repaint(); }
         }
     }
 
@@ -562,7 +616,7 @@ fn window_fullscreen(prefs: &app::Prefs, ctx: &egui::Context, library: Option<&m
         let mut toggle = false;
         i.events.retain(|event| {
             if let egui::Event::Key { key: egui::Key::F11, pressed: true, repeat, modifiers, .. } = event {
-                if modifiers.is_none() && !prefs.keymap.iter().any(|(action, key)| action != "fullscreen" && key == "F11") {
+                if modifiers.is_none() && !keycmd::custom_f11_binding(prefs) {
                     toggle |= !repeat;
                     return false;
                 }

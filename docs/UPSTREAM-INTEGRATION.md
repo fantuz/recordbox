@@ -2,6 +2,81 @@
 
 The integration brings Adam Sardo’s EDIT timeline, additional Performance layouts, MIDI and keyboard mappings, recorder, sampler and effects into the fork. New beat analysis also uses his port of the AlphaTheta Rekordbox 7.2.19 Normal and Dynamic detector. The fork’s library and device-export tools continue to use its existing database and ANLZ checks. [Upstream beat detector](https://github.com/adamsardo/recordbox/blob/74ba5e9/app/src/analysis/rb_beat1.rs) · [Integration PR](https://github.com/fantuz/recordbox/pull/28)
 
+## Changes through upstream ae3d557
+
+Eight upstream snapshots followed the November 27 comparison at `26a4cca`. This integration is based on fork main after the whole-library memory fix and the Homebrew update. It also includes earlier effect and beat-analyzer components on which the new snapshots depend. [Compared upstream revisions](https://github.com/adamsardo/recordbox/compare/26a4ccaebbe55dd0b2f8eb0b57bec525951208eb...ae3d557ed1551ee86211f7e305921bff14050fb2) · [Fork baseline](https://github.com/fantuz/recordbox/tree/fa8db4f247949884b5d868b7d547f6bedba2d5ee)
+
+The follow-up audit covered 36 upstream commits. It recovered Low- and Mid-mood type-2 phrase analysis, additional mapped controller actions, and USB vocal-level encoding from earlier revisions. Six generated audio fixtures produced byte-identical phrase sections to upstream. Existing desktop and USB phrase data retain priority. The fork retains the virtualized library, native detached browser, and direct MIDI paths for time-sensitive controls. [Phrase revision](https://github.com/adamsardo/recordbox/commit/6604e0a) · [Controller revision](https://github.com/adamsardo/recordbox/commit/4c33514) · [USB protocol revision](https://github.com/adamsardo/recordbox/commit/9dac758)
+
+| Upstream change | What it brings to the fork |
+| --- | --- |
+| `5d4889c` and `a913c9f` | Model the band-pass, high-pass, low-pass and crush echoes, including their feedback and modulation. Prepare first-use rack buffers outside the audio callback lock. The fork already did this for some effects. |
+| `c6da4b0` and `921b571` | Update SPIRAL, HELIX, NOISE, reverb, filtering, stretch and vinyl-brake behavior. MERGE FX smooths discontinuities when clips restart. The master meter samples the signal before the limiter, so it can show peaks that the limiter subsequently reduces. |
+| `4891eed` | Add a selectable Light appearance to EXPORT and PERFORMANCE. The fork applies the palette to the detached library as well. EDIT keeps its dark appearance. |
+| `8e4f60f` | Add the legacy beat analyzer’s constant-versus-changing-tempo decision to the optional installed-model path. Extend its sample-rate coverage. The fork retains its classic and compatible estimators, optional transient refinement and memory-aware collection queue. |
+| `3eae535` | Export vocals and instrumentals to standalone files, add the results to the collection and optionally to the source playlist. Extend contrast coverage across the browser and dialogs. |
+| `ae3d557` | Extend the optional model to changing-tempo tracks. Run the downbeat network in sections, repair the joins and estimate local tempo. The fork limits the model’s working memory and falls back to the selected ordinary Dynamic estimator when a section cannot be resolved. |
+
+The MIDI window gains the new palette. The controller protocol change in this integration comes from a separate fork contribution. The experimental OPUS-QUAD profile maps the manufacturer's published messages through the same input, feedback and map-restoration paths as the XDJ-RX3 trial. A physical OPUS-QUAD is still needed to check jog calibration, lamps and audio routing. Its standalone player reads OneLibrary. [OPUS-QUAD setup and hardware checks](studies/OPUS-QUAD.md) · [USB compatibility](USB-COMPATIBILITY.md)
+
+On Linux/X11, the native detached library showed both sync directions and their source and destination paths in Light appearance. Choosing a vocal export in the child brought the main window forward for confirmation. The Light EXPORT and PERFORMANCE headers measured 18.43:1 text contrast on the rendered fixture. [Desktop sync and write-back](LIBRARY-SYNC.md)
+
+### Interface motion from ef454ed
+
+The next upstream commit adds visual feedback for mouse presses, selection, drops, knobs and faders, plus smoother waveform drawing and scrolling to a selected track. Choose **Preferences → Advanced → Others → recordbox → Interface motion** for Full, Reduced or Off. Full also follows the system’s reduced-motion setting on macOS and Windows. [Upstream implementation](https://github.com/adamsardo/recordbox/commit/ef454ed0536aad897bb1c4da1d6215c419de8595)
+
+The fork keeps waveform repainting under the existing playback frame-rate setting. A hardware fader movement takes effect immediately. Waveform clicks use the geometry the user sees, and relative seeks and grid edits use the audio clock. Native wheel and trackpad events keep their original deltas and modifiers in both windows.
+
+A headless egui test showed why each browser pane needs its own animation state. With the same track visible in two panes and selected in just one, upstream requested 120 repaints over 120 idle test frames. Using a separate key per pane brought that to zero after the transition settled. The library decodes visible album covers on a background thread even when motion is Off. It limits the request and result queues to 16 each, uploads at most four thumbnails per viewport pass, and keeps up to 256 list thumbnails. Replacing album art invalidates a pending read of the older file.
+
+### Fullscreen and the detached library
+
+Both implementations draw the library in a native child window using egui’s immediate viewport API. They share application state, so playlist selection and deck actions reach the same library. Upstream deliberately redocks the browser when the main window enters fullscreen. The fork keeps the two windows open and toggles both with F11 from either one. Closing the library returns its navigation and scroll position to the player. Space controls transport outside text fields. Both windows can be resized or maximized independently. [Upstream split-window implementation](https://github.com/adamsardo/recordbox/blob/ef454ed0536aad897bb1c4da1d6215c419de8595/app/src/split.rs)
+
+The paired behavior has an implementation cost. The fork coordinates fullscreen commands and restores geometry after the window manager completes a transition. Its X11 path also handles focus and fullscreen through the window manager. Using a single application state avoids a second catalog, player or MIDI engine in the child.
+
+A three-second X11 sample with a generated track and a clocked null audio sink recorded 59 window updates during docked playback. With the library detached and focused, it recorded 62 updates in the player and 61 in the library. Pressing Space in the library paused playback, after which there was one update in each window. The counts measure visible updates on that Linux test machine. They do not measure GPU utilization or predict frame times on Vega. In a separate empty-deck test, Full and Off each drew once in eight seconds after transient messages cleared.
+
+### What the precision checks establish
+
+With generated 44.1 kHz audio, the ported tempo classifier reported 124.00 BPM and constant tempo on a steady 124 BPM track. On a track stepping from 128 to 86 BPM it reported 128.00 BPM with the changing-tempo flag. Those match the two published reference observations. The 128.00 figure is the detector’s reported track tempo. The flag determines how Auto handles the changing section. The optional model can now convert eligible rates such as 32, 88.2, 96 and 192 kHz. A track that exceeds the 15-minute limit stays on the selected ordinary estimator. Dynamic and Auto can use the new changing-tempo pipeline. Too few beats, unresolved half-beat offsets and some half/double or fractional tempo interpretations still need the ordinary estimator. [Upstream tempo classifier](https://github.com/adamsardo/recordbox/blob/8e4f60f/app/src/analysis/rb_hp_bia2.rs)
+
+The ordinary compatible estimator returned identical BPM and grid anchors on the fork baseline, upstream and the integration for the three synthetic tracks under **Preparing tracks** below. The median timing errors were 0.25–0.29 ms. Those fixtures test steady tempo.
+
+A separate test compared 88 generated beat sequences at 44.1 and 48 kHz with upstream’s window-join repair. Timestamps and beat numbers matched on all 88. A generated 118–126 BPM ramp returned the same 240 beat positions and 122.00014 BPM at the dynamic focus stage. These tests begin with beat candidates and measure the stages downstream of the neural network.
+
+The fork shares intermediate analysis data within the current track. Each track owns that data, which avoids reusing a prior song’s results when a worker receives a buffer at the same address. The grid keeps timestamp changes below one millisecond for formats that can store them. A synthetic 48 kHz test retains beat positions at 100000, 600020, 1100833 and 1600416 microseconds and checks their bar numbers. This measures how accurately the fork stores detected beats. Assessing musical accuracy across recordings requires reference grids and, for the full optional model, locally installed weights.
+
+### Effect selection and playback cost
+
+At 48 kHz, one selection of a preallocated single-mode BPF Echo cleared 68,464,000 bytes of delay buffers in the upstream implementation. The fork marks the old samples unreadable and reuses the allocated buffers. On one Linux Xeon core, selecting the effect took a median 2.744 ms upstream and 0.345 µs with this change. Ten batches of twenty selections were timed for each implementation after warm-up. Forward and reverse output matched sample for sample after a reset, including silence between the old and new input. The port keeps effect-specific kernels in their own modules. Control-thread preparation and the audio callback share an explicit set of prepared buffers. An optional external coefficient table requires an explicitly supplied compatible local file. Portable coefficients are the default.
+
+The processing cost while an effect is playing also changed. These are mean microseconds to process 512 stereo frames at 48 kHz on one pinned Linux Xeon core, averaged over two runs for each revision in alternating order. The comparison is with the fork immediately before this integration.
+
+| Active effect or combination | Previous fork (µs) | This integration (µs) |
+| --- | ---: | ---: |
+| MT DELAY | 82.7 | 25.1 |
+| BPF ECHO | 71.8 | 27.1 |
+| LPF ECHO | 74.6 | 28.0 |
+| SPIRAL | 36.6 | 26.0 |
+| REVERB | 20.1 | 47.4 |
+| FLANGER | 11.5 | 38.0 |
+| STRETCH | 50.8 | 108.1 |
+| REVERB + PHASER + UP ECHO | 70.5 | 122.3 |
+
+The three-effect combination used about 1.15% of a 10,667 µs block interval on that machine. Real audio deadlines also include other decks, mixing, drivers and scheduling. In a separate single-worker test, default analysis of four 30-second inputs took 1.498 s on the previous fork and 1.485 s on this revision. The small difference gives little reason to expect a change in everyday analysis throughput. Neither test ran on Vega.
+
+### Exporting vocals and instrumentals
+
+Use **Track → Export Stems**, the track context menu, or the deck’s STEMS strip. **Vocals** writes the separated vocal. **Instrumental** subtracts the vocal from the original mix, which preserves material the separator did not assign to a part. Each result gets an unused filename and its own recordbox entry. The first export explains the destination and offers playlist placement. Library Protection applies to this write.
+
+- A completed separation can be reused from the deck or the cache for the chosen model. The worker can read the two vocal channels from disk in blocks. It may still decode the original to bounded stereo PCM. The export queue runs one track at a time.
+- An uncached track already on a deck can use the existing separation engine and its device limits. For an uncached track elsewhere in the library, load it on a free deck and separate it before export. This keeps a bulk export from replacing a playing deck or launching competing GPU jobs.
+- Choose WAV, AIFF or FLAC for lossless output. MP3 uses the bundled encoder. AAC uses the system encoder on macOS. With **Same as the original**, an unavailable AAC encoder produces FLAC with a format notice. For lossy exports, recordbox measures the codec delay on its own decoder when placing the copied cues and grid. Another player can use a different MP3 time origin.
+- The application stages the file in the destination folder, then publishes it under an unused name. It imports metadata, cues, grid and playlist placement in a database transaction. If the database import fails after publication, the error gives the path of the finished audio.
+
+The exported files are separate from the reusable four-part STEMS cache. Desktop sync and USB export keep their own review and write rules.
+
 ## Preparing tracks
 
 In **Preferences → Analysis**, **Rekordbox-compatible** is the default beat grid estimator. Choose **recordbox classic** for the fork’s earlier estimator. Normal and Dynamic modes support both choices. **High precision: refine beat timing** aligns a detected grid to consistent transients. It is a separate option from the locally installed beat model. The compatible detector retries with classic when it cannot produce a usable grid or the track exceeds its 15-minute limit. The choice applies when analysis runs. A previously prepared collection can be explored as it is.
@@ -17,6 +92,14 @@ In a local comparison, we generated three 32-second, 44.1 kHz tracks with known 
 All three settings found every kick. These measurements cover constant tempo and clean attacks. Recorded drums, downbeat labels, total analysis time and playback on a physical deck require different tests.
 
 MP3 timing can be tried separately with `recordbox --mp3-timeline rekordbox`. This opens a separate recordbox collection. An unchanged cue timestamp can refer to a different sound when the decoder counts encoder delay differently. With a 44.1 kHz test impulse, switching clocks moved the impulse by 25.06 ms for one FFmpeg-tagged MP3 and 26.12 ms for the LAME-tagged and untagged samples. Starting recordbox normally opens the usual collection. [MP3 trial and cache details](PLAYBACK-PERFORMANCE.md#auditioning-rekordbox-mp3-timing)
+
+### Tempo, key and vocal data in a prepared collection
+
+The collection saves the track-wide BPM returned by Dynamic analysis. A track with a 118 BPM intro and a 126 BPM later section can display 122 BPM in the browser while the deck follows each local tempo. A waveform-only refresh preserves a previously saved collection BPM. USB preparation uses the same whole-track memory limit as library analysis, checks Stop during decoding and between model windows, and reports tracks it could not prepare. An existing device copy can still occupy its place in the playlist. Sync stops before deleting unreferenced audio if preparation fails. [Analysis persistence and USB changes](https://github.com/fantuz/recordbox/commit/361bec9fe164b64b153814341ed3579b52eb44c8)
+
+At 44.1 and 48 kHz, recordbox feeds stereo frames directly to its key detector in one-second blocks. Its standard compatible beat detector uses the existing sinc converter at other rates. The optional beat model uses the reconstructed 29-tap converter on supported input. Upstream also changed key detection to use 16-bit reader samples and two-second blocks. Adopting those changes would require checking key labels against reference recordings across genres and sample rates. The synthetic kick and tempo tests above measure beat timing only. [Upstream reader and key changes](https://github.com/adamsardo/recordbox/commit/9dac7589c5c31eace36d94b40d1abfdf9788b31e)
+
+Vocal detection uses the local graph selected through `RECORDBOX_VOCAL_GRAPH` when configured. The fork keeps existing vocal markers when upgrading. Upstream’s background conversion clears stored vocal levels and fills them again from the installed library or a new analysis. [Upstream vocal conversion](https://github.com/adamsardo/recordbox/commit/75d21a2b2d9f310e7fedc9b8fa4028428d37daeb)
 
 ## STEMS by device
 
@@ -40,6 +123,8 @@ The 0.9.0 integration includes upstream through `3cc12d9`. The next upstream rev
 | Vega 8 on Linux | Vulkan accelerates the transformer's linear layers. The CPU handles convolutions, attention scoring and audio transforms. Each offloaded projection uploads weights and reads its output back. | Upstream has no Vulkan path. Measuring transfer, GPU and CPU time separately would tell us whether a bounded cache of weights or buffers is worth implementing. |
 
 In **speed mode**, upstream can move windows containing the playhead, hot cues or a requested range ahead of ordinary background work. The fork and upstream process **quality mode** in track order. With early quality preview enabled and sufficient GPU memory, a four-minute track needs four network evaluations for the first playable section. The fallback needs 127. Both require 168 for the complete track. A late cue still waits for preceding sections. [Upstream scheduling](https://github.com/adamsardo/recordbox/blob/c5e839e/app/src/stems/mod.rs#L597-L649) · [Fork implementation](../app/src/stems/htdemucs.rs)
+
+There is a concrete reason to defer playhead-first scheduling in the fork. The player currently publishes a continuous prefix of finished audio. Publishing a later window with the same progress counter could mark intervening audio ready before it has been separated. At 44.1 kHz a cue at 2:00 lies in the 21st speed-model window. Prioritizing it could make that cue audible after one window, provided the player can represent disjoint ready ranges. That estimate counts windows. It does not measure end-to-end GPU time. A production port needs seek and cancellation tests plus a comparison of completed caches.
 
 Before admitting four quality networks, recordbox checks the driver's current budget. It reserves the normal preview scratch allowance, 512 MiB per unloaded network, 256 MiB for staging, and space for the full result, normalization weights and immutable preview. It checks again while loading. CPU, Windows DirectML, Linux Vulkan and Pascal use the completed-result path.
 

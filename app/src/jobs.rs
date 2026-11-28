@@ -1,7 +1,7 @@
 //! Background work: analysis workers, file import, player loading and device export.
 
 use eframe::egui;
-use crate::analysis::{analyze_file_on_worker, AnalysisResult, AnalysisSettings};
+use crate::analysis::{analyze_file_bounded, AnalysisResult, AnalysisSettings};
 use crate::audio::{decode_until, Decoded};
 use crate::model::Track;
 use crossbeam_channel::{bounded, unbounded, Receiver, Sender, TryRecvError};
@@ -23,7 +23,7 @@ impl AnalysisJob {
         if self.duration.is_finite() && self.duration > 0.0 {
             // Imported durations may be rounded; allow a little extra before
             // falling back to a second decode with the whole batch budget.
-            crate::analysis::estimated_working_bytes(self.duration * 1.05 + 2.0, self.sample_rate).min(budget)
+            self.settings.estimated_batch_bytes(self.duration * 1.05 + 2.0, self.sample_rate).min(budget)
         } else {
             budget
         }
@@ -69,7 +69,7 @@ impl Batch {
     fn run(self: &Arc<Self>, mut job: AnalysisJob, bytes: u64, cancel: Arc<AtomicBool>) {
         let stopped = || cancel.load(Ordering::Relaxed);
         let result = std::panic::catch_unwind(||
-            analyze_file_on_worker(&job.path, &job.settings, bytes, stopped)
+            analyze_file_bounded(&job.path, &job.settings, bytes, true, stopped)
         ).unwrap_or_else(|_| Err(anyhow::anyhow!("track analysis panicked")));
 
         if result.as_ref().is_err_and(|e| e.is::<crate::analysis::AnalysisMemoryLimit>()) {
@@ -157,6 +157,11 @@ fn batch_memory_bytes() -> Option<u64> {
 #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
 fn batch_memory_bytes() -> Option<u64> { None }
 
+/// Share the same available-memory policy between library jobs and USB preparation.
+pub(crate) fn analysis_memory_budget() -> u64 {
+    batch_memory_bytes().unwrap_or(512 * 1024 * 1024)
+}
+
 impl AnalysisPool {
     pub fn new(ctx: egui::Context, requested: usize) -> AnalysisPool {
         let available = std::thread::available_parallelism().map(usize::from).unwrap_or(1);
@@ -192,7 +197,7 @@ impl AnalysisPool {
     }
 
     pub fn submit(&self, job: AnalysisJob) {
-        self.submit_with_budget(job, || batch_memory_bytes().unwrap_or(512 * 1024 * 1024));
+        self.submit_with_budget(job, analysis_memory_budget);
     }
 
     fn submit_with_budget(&self, job: AnalysisJob, memory_budget: impl FnOnce() -> u64) {
@@ -440,7 +445,7 @@ mod analysis_pool_tests {
         ] {
             let settings = AnalysisSettings { dynamic, high_precision, do_grid, do_key, ..Default::default() };
             let a = crate::analysis::analyze_file(path, &settings).unwrap();
-            let b = workers.install(|| analyze_file_on_worker(path, &settings, 512 << 20, || false)).unwrap();
+            let b = workers.install(|| analyze_file_bounded(path, &settings, 512 << 20, true, || false)).unwrap();
             assert_eq!((a.duration.to_bits(), a.raw_samples, a.sample_rate, a.bpm.to_bits(), a.key),
                        (b.duration.to_bits(), b.raw_samples, b.sample_rate, b.bpm.to_bits(), b.key));
             assert_eq!(serde_json::to_value(a.grid).unwrap(), serde_json::to_value(b.grid).unwrap());

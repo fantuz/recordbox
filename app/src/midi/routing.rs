@@ -89,19 +89,6 @@ pub(super) fn momentary(act: Act) -> bool {
 struct Held {
     dev: Arc<Device>,
     event: Event,
-    /// Physical binding at press time for a held Drum Release FX lever. Importing
-    /// a replacement map can reuse the entry index for a different input.
-    drum_binding: Option<(u16, u8, Kind)>,
-}
-
-fn is_drum_release(event: &Event) -> bool {
-    registry().get(event.tag).is_some_and(|f| f.act == Act::DrumRelease)
-}
-
-fn drum_binding(dev: &Device, event: &Event) -> Option<(u16, u8, Kind)> {
-    let map = dev.map.lock();
-    let input = map.inputs.get(event.entry)?.as_ref()?;
-    (input.tag == event.tag).then_some((input.e.code, input.e.deck, input.e.kind))
 }
 
 #[derive(Default)]
@@ -148,7 +135,6 @@ impl Routing {
             self.held.push(Held {
                 dev: dev.clone(),
                 event: *event,
-                drum_binding: if is_drum_release(event) { drum_binding(dev, event) } else { None },
             });
             return !duplicate;
         }
@@ -237,9 +223,8 @@ impl Hub {
         }
     }
 
-    /// A removed, reassigned or synthetic peer binding may no longer be able
-    /// to deliver the lever's release. An unrelated output edit keeps a
-    /// physical lever on the same input, deck and message type.
+    /// An input edit or import can remove a held button or reuse its entry for
+    /// another wire address. Release its original action before input resumes.
     pub(crate) fn try_edit_mapping(
         &self,
         dev: &Arc<Device>,
@@ -248,15 +233,20 @@ impl Hub {
         // Keep MIDI input outside the interval between changing the table and
         // tagging its entries, including when an import keeps the same binding.
         let mut route = self.routing.lock();
-        if dev.rx3_trial_active() {
+        if dev.profile_trial_active() {
             return Err(crate::midi_map::Reject::Revert);
         }
-        edit(&mut dev.map.lock())?;
-        dev.reindex();
-        self.release_matching(&mut route, |h| {
-            Arc::ptr_eq(&h.dev, dev) && is_drum_release(&h.event)
-                && (h.drum_binding.is_none() || h.drum_binding != drum_binding(dev, &h.event))
-        });
+        let mut map = dev.map.lock();
+        // Compare the bindings only while editing a map. Ordinary controller
+        // presses and releases have no additional lookup or lock on the fast path.
+        let mut held: Vec<_> = route.held.iter().filter(|h| Arc::ptr_eq(&h.dev, dev))
+            .map(|h| (h.event, map.release_binding(&h.event))).collect();
+        edit(&mut map)?;
+        dev.reindex_map(&mut map, &[]);
+        held.retain(|(event, previous)| previous.is_none() || *previous != map.release_binding(event));
+        drop(map);
+        self.release_matching(&mut route, |h| Arc::ptr_eq(&h.dev, dev)
+            && held.iter().any(|(event, _)| event.entry == h.event.entry));
         Ok(())
     }
 
@@ -269,12 +259,13 @@ impl Hub {
 
     /// A manual, reversible switch for this connection. The usual factory and
     /// user loaders also remain authoritative when the device next connects.
-    pub(crate) fn set_rx3_trial(&self, dev: &Arc<Device>, on: bool) {
-        if !crate::midi_csv::rx3_primary_input(&dev.name) || dev.needs_auth {
+    pub(crate) fn set_profile_trial(&self, dev: &Arc<Device>, on: bool) {
+        let Some(profile) = crate::midi_csv::trial_profile(&dev.name) else { return };
+        if dev.needs_auth {
             return;
         }
         let mut route = self.routing.lock();
-        let mut original = dev.rx3_original.lock();
+        let mut original = dev.profile_original.lock();
         if !dev.alive.load(Relaxed) || original.is_some() == on {
             return;
         }
@@ -286,21 +277,35 @@ impl Hub {
         let mut offs = Vec::new();
         if let Some(previous) = original.take() {
             if dev.has_output {
-                // A pending OFF for one of the trial's four transport lamps
+                // A pending OFF for one of the trial's lamps
                 // may still be queued when the old map is restored.
                 offs.extend(map.outputs.iter().map(|e| (map.led_message(e, 0), e.opts.priority)));
             }
             *map = previous;
         } else {
-            let pilot = MidiMap::load(&dev.name, Some(include_bytes!("profiles/XDJ-RX3.csv")), None)
-                .expect("built-in XDJ-RX3 profile");
+            let csv: &[u8] = match profile {
+                crate::midi_csv::TrialProfile::Rx3 => include_bytes!("profiles/XDJ-RX3.csv"),
+                crate::midi_csv::TrialProfile::OpusQuad => include_bytes!("profiles/OPUS-QUAD.csv"),
+            };
+            let pilot = MidiMap::load(&dev.name, Some(csv), None).expect("built-in MIDI profile");
             *original = Some(std::mem::replace(&mut *map, pilot));
         }
         dev.reindex_map(&mut map, &offs);
     }
 
-    pub(super) fn release_hidden_drum_decks(&self, count: u8) {
-        self.release_matching(&mut self.routing.lock(), |h| h.event.deck > count && is_drum_release(&h.event));
+    pub(super) fn release_hidden_decks(&self, count: u8) {
+        let mut route = self.routing.lock();
+        // Per-deck holds are recorded as 1..=4. Shared FX units retain deck 0.
+        self.release_matching(&mut route, |h| h.event.deck > count);
+        for n in usize::from(count)..4 {
+            if route.jog_owner[n].take().is_some() {
+                self.reset_jog(n);
+            }
+            for dev in self.devices.lock().iter() {
+                dev.jog.lock()[n].reset();
+                dev.scan.lock()[n] = Default::default();
+            }
+        }
     }
 
     fn release_holds(&self, route: &mut Routing, device: Option<&Arc<Device>>) {
@@ -327,7 +332,7 @@ impl Hub {
 
     pub(crate) fn set_learning(&self, device: &Arc<Device>, on: bool) {
         let mut route = self.routing.lock();
-        if on && device.rx3_trial_active() { return; }
+        if on && device.profile_trial_active() { return; }
         if device.learning.swap(on, Relaxed) != on {
             device.input_epoch.fetch_add(1, Relaxed);
             if on {
@@ -469,17 +474,42 @@ mod tests {
     }
 
     #[test]
+    fn remapping_a_held_fast_cue_stops_its_preview_on_the_original_deck() {
+        let (hub, _) = hub();
+        hub.routing.lock().performance = true;
+        let dev = controller("Deck");
+        let map = |note| {
+            let csv = format!("@file,1,Deck\nCue,,Button,{note:04X},,,,,,,,,,Fast;,\n");
+            MidiMap::load("Deck", None, Some(csv.as_bytes())).unwrap()
+        };
+        hub.edit_mapping(&dev, |m| *m = map(0x9011));
+        hub.input_message(&dev, [0x90, 0x11, 127], 1.0, 0, 0);
+        assert!(hub.decks[0].lock().playing);
+        hub.snap.lock().active = 1;
+        // Importing the same binding retains its hold. A new wire address in
+        // the same row cannot release the old press.
+        hub.edit_mapping(&dev, |m| *m = map(0x9011));
+        assert!(hub.decks[0].lock().playing);
+        hub.edit_mapping(&dev, |m| *m = map(0x9012));
+        assert!(!hub.decks[0].lock().playing);
+        assert!(hub.routing.lock().held.is_empty());
+        hub.decks[1].lock().playing = true;
+        hub.input_message(&dev, [0x80, 0x11, 0], 2.0, 0, 0);
+        assert!(hub.decks[1].lock().playing);
+    }
+
+    #[test]
     fn rx3_trial_releases_a_held_cue_drops_old_input_and_resets_only_its_lamps() {
         let (hub, _) = hub();
         hub.routing.lock().performance = true;
         let mut rx3 = controller("XDJ-RX3");
         Arc::get_mut(&mut rx3).unwrap().has_output = true;
         let peer = controller("Other controller");
-        hub.set_rx3_trial(&peer, true);
-        assert!(!peer.rx3_trial_active());
+        hub.set_profile_trial(&peer, true);
+        assert!(!peer.profile_trial_active());
         let tag = registry().tag("PlayPause");
-        hub.set_rx3_trial(&rx3, true);
-        assert!(rx3.rx3_trial_active());
+        hub.set_profile_trial(&rx3, true);
+        assert!(rx3.profile_trial_active());
         assert_eq!(rx3.map.lock().live_inputs().count(), 39);
         assert_eq!(rx3.out_keys().len(), 4);
         hub.input_message(&rx3, [0x90, 0x01, 127], 0.0, 0, 0);
@@ -487,8 +517,8 @@ mod tests {
         hub.input_message(&rx3, [0x90, 0x01, 127], 1.0, 0, 1);
         assert!(hub.decks[0].lock().playing);
         rx3.set_led(tag, 2, Led::On);
-        hub.set_rx3_trial(&rx3, false);
-        assert!(!rx3.rx3_trial_active());
+        hub.set_profile_trial(&rx3, false);
+        assert!(!rx3.profile_trial_active());
         assert!(hub.routing.lock().held.is_empty());
         assert!(!hub.decks[0].lock().playing);
         assert_eq!(rx3.map.lock().live_inputs().count(), 1);
@@ -501,6 +531,32 @@ mod tests {
         assert!(!hub.decks[0].lock().playing, "queued during the trial");
         hub.input_message(&peer, [0x90, 0x0B, 127], 3.0, 0, 0);
         assert!(hub.decks[0].lock().playing, "other port keeps its epoch and map");
+    }
+
+    #[test]
+    fn opus_quad_fourth_deck_plays_and_trial_stop_restores_the_user_map() {
+        let (hub, _) = hub();
+        hub.routing.lock().performance = true;
+        hub.snap.lock().count = 4;
+        let audio = hub.decks[0].lock().audio.clone();
+        hub.decks[3].lock().audio = audio;
+        let mut opus = controller("MIDIIN (OPUS-QUAD)");
+        Arc::get_mut(&mut opus).unwrap().has_output = true;
+        hub.set_profile_trial(&opus, true);
+        assert!(opus.profile_trial_active());
+        assert_eq!(opus.map.lock().live_inputs().count(), 162);
+        assert_eq!(opus.out_keys().len(), 12);
+        hub.input_message(&opus, [0x93, 0, 127], 1.0, 0, 1);
+        assert!(hub.decks[3].lock().playing);
+        assert!(!hub.decks[0].lock().playing);
+        hub.set_profile_trial(&opus, false);
+        assert!(!opus.profile_trial_active());
+        assert_eq!(opus.map.lock().live_inputs().count(), 1);
+        let mut out = opus.out.lock();
+        let mut messages: Vec<_> = std::iter::from_fn(|| out.queue.pop()).collect();
+        messages.sort();
+        let expected: Vec<_> = (0x90..=0x93).flat_map(|ch| [[ch, 0, 0], [ch, 1, 0], [ch, 0x12, 0]]).collect();
+        assert_eq!(messages, expected);
     }
 
     fn drum_map(name: &str, code: u16) -> MidiMap {
@@ -571,13 +627,91 @@ mod tests {
         hub.input_message(&b, [0x90, 0x24, 127], 1.0, 0, 0);
         assert_eq!(drum_edges(&rx), [(1, true), (4, true)]);
         hub.snap.lock().count = 2;
-        hub.release_hidden_drum_decks(2);
+        hub.release_hidden_decks(2);
         assert_eq!(drum_edges(&rx), [(4, false)]);
         let mut route = hub.routing.lock();
         route.performance = false;
         hub.release_holds(&mut route, None);
         assert_eq!(drum_edges(&rx), [(1, false)]);
         assert!(route.held.is_empty());
+    }
+
+    #[test]
+    fn collapsing_four_decks_releases_parked_pad_fx_and_bend_and_keeps_other_owners() {
+        // Use the real UI poll and application state without opening host MIDI/audio
+        // ports or reading the developer's settings.
+        const TEST: &str = "midi::routing::tests::collapsing_four_decks_releases_parked_pad_fx_and_bend_and_keeps_other_owners";
+        const PROFILE: &str = "RECORDBOX_MIDI_LAYOUT_TEST_PROFILE";
+        if std::env::var_os(PROFILE).is_none() {
+            let dir = tempfile::tempdir().unwrap();
+            let child = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", TEST, "--nocapture"])
+                .env(PROFILE, dir.path()).env("PREPDECK_DATA", dir.path()).output().unwrap();
+            let stdout = String::from_utf8_lossy(&child.stdout);
+            assert!(child.status.success() && stdout.contains("1 passed"), "{stdout}\n{}", String::from_utf8_lossy(&child.stderr));
+            return;
+        }
+        assert_eq!(std::env::var_os(PROFILE), std::env::var_os("PREPDECK_DATA"));
+        let mut app = App::open_library(&Default::default(), None, crate::DeckOptions { disable_play: true, disable_load: true });
+        app.prefs.app_mode = 1;
+        app.prefs.perf_four = true;
+        app.px.pad_mode = [crate::ui_padfx::PAD_FX; 4];
+        app.poll_decks();
+        let (hub, rx) = Hub::new(app.player.decks.clone(), PathBuf::new(), false);
+        hub.routing.lock().performance = true;
+        app.midi.hub = Some(hub.clone());
+        app.midi.rx = Some(rx);
+        app.midi.started = true;
+        let port = |name: &str| {
+            let csv = format!("@file,1,{name}\n\
+                PAD1_PadFx1,,Button,,9010,9110,9210,9310,,,,,,,\n\
+                PitchBendUp,,Button,,9011,9111,9211,9311,,,,,,,\n\
+                FX1ReleaseFXOn,,Button,9012,,,,,,,,,,,\n");
+            let map = MidiMap::load(name, None, Some(csv.as_bytes())).unwrap();
+            Device::mapped(name, name.to_owned(), map, false, None)
+        };
+        let (a, b) = (port("A"), port("B"));
+        hub.devices.lock().extend([a.clone(), b.clone()]);
+        let send = |dev, channel: u8, note: u8, down: bool| {
+            hub.input_message(dev, [0x90 | channel, note, if down { 127 } else { 0 }], 0.0, 0, 0);
+        };
+        app.activate_deck(3);
+        poll(&mut app);
+        for dev in [&a, &b] {
+            for channel in [0, 3] {
+                send(dev, channel, 0x10, true);
+                send(dev, channel, 0x11, true);
+            }
+            send(dev, 0, 0x12, true);
+        }
+        poll(&mut app);
+        for n in [0, 3] {
+            assert_eq!(app.px.fxx.pad.decks[n].held, [0]);
+            assert_eq!(app.deck_of(n as u8).x.bend, 1);
+        }
+        assert!(app.px.fx[0].params.release.is_some());
+
+        app.prefs.perf_four = false;
+        app.poll_decks();
+        poll(&mut app);
+        assert!(app.px.fxx.pad.decks[3].held.is_empty());
+        assert_eq!(app.deck_of(3).x.bend, 0);
+        // Releasing A and the old fourth-deck keys cannot release B's visible
+        // pad, bend or shared FX unit, even after the fourth deck reappears.
+        app.prefs.perf_four = true;
+        poll(&mut app);
+        hub.release_device(&a);
+        for note in [0x10, 0x11] { send(&b, 3, note, false); }
+        poll(&mut app);
+        assert_eq!(app.px.fxx.pad.decks[0].held, [0]);
+        assert_eq!(app.deck_of(0).x.bend, 1);
+        assert!(app.px.fx[0].params.release.is_some());
+        for note in [0x10, 0x11, 0x12] { send(&b, 0, note, false); }
+        poll(&mut app);
+        assert!(app.px.fxx.pad.decks[0].held.is_empty());
+        assert_eq!(app.deck_of(0).x.bend, 0);
+        assert!(app.px.fx[0].params.release.is_none());
+        assert!(hub.routing.lock().held.is_empty());
     }
 
     #[test]

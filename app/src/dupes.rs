@@ -95,7 +95,7 @@ const PATH_W: f32 = 20.0;
 
 /// rekordbox's `brws_list_pathsystem_pulldown.svg`: two grey chevrons, 10 x 16 pt.
 fn path_icon(p: &egui::Painter, c: egui::Pos2) {
-    let col = hex(0x646464);
+    let col = gy(0x646464);
     let o = c - vec2(5.0, 8.0);
     let up = vec![o + vec2(5.092, 0.0), o + vec2(10.0, 5.998), o + vec2(7.817, 5.998), o + vec2(5.089, 2.79), o + vec2(2.367, 5.998), o + vec2(0.0, 5.998)];
     let down = vec![o + vec2(4.908, 16.0), o + vec2(0.0, 10.001), o + vec2(2.183, 10.001), o + vec2(4.911, 13.21), o + vec2(7.633, 10.001), o + vec2(10.0, 10.001)];
@@ -125,14 +125,14 @@ fn track_table(app: &mut App, ui: &mut egui::Ui, table: Rect, ids: &[i64]) {
     egui::ScrollArea::horizontal().id_salt((salt, "h")).auto_shrink([false, false]).show(&mut tui, |ui| {
         ui.spacing_mut().item_spacing = vec2(0.0, 0.0);
         let (hr, _) = ui.allocate_exact_size(vec2(content_w, 22.0), Sense::hover());
-        ui.painter().rect_filled(hr, 0.0, hex(0x1A1A1A));
+        ui.painter().rect_filled(hr, 0.0, gy(0x1A1A1A));
         let mut x = hr.min.x;
         for (i, (c, cw)) in cols.iter().enumerate() {
             if i > 0 {
                 ui.painter().rect_filled(Rect::from_min_max(pos2(x - 1.0, hr.min.y), pos2(x, hr.max.y)), 0.0, BG);
             }
             let label = if *c == Col::Status { "" } else { c.label() };
-            ui.painter().with_clip_rect(Rect::from_min_size(pos2(x, hr.min.y), vec2(if *cw > 0.0 { *cw } else { loc }, hr.height()))).text(pos2(x + 6.0, hr.center().y), Align2::LEFT_CENTER, label, font.clone(), DIM);
+            ui.painter().with_clip_rect(Rect::from_min_size(pos2(x, hr.min.y), vec2(if *cw > 0.0 { *cw } else { loc }, hr.height()))).text(pos2(x + 6.0, hr.center().y), Align2::LEFT_CENTER, label, font.clone(), DIM.c());
             x += if *cw > 0.0 { *cw } else { loc };
         }
         ui.painter().rect_filled(Rect::from_min_max(pos2(x - 1.0, hr.min.y), pos2(x, hr.max.y)), 0.0, BG);
@@ -140,10 +140,12 @@ fn track_table(app: &mut App, ui: &mut egui::Ui, table: Rect, ids: &[i64]) {
             for i in range {
                 let Some(t) = app.track(ids[i]).cloned() else { continue };
                 let (rr, resp) = ui.allocate_exact_size(vec2(content_w, row_h), Sense::click());
-                if app.dupes.sel.contains(&t.id) {
+                let selected = app.dupes.sel.contains(&t.id);
+                let _selected_theme = crate::theme::dark_scope(selected);
+                if selected {
                     ui.painter().rect_filled(rr, 0.0, ROW_SEL);
                 } else if i % 2 == 1 {
-                    ui.painter().rect_filled(rr, 0.0, hex(0x0A0A0A));
+                    ui.painter().rect_filled(rr, 0.0, gy(0x0A0A0A));
                 }
                 let mut x = rr.min.x;
                 for (c, cw) in cols.iter() {
@@ -192,7 +194,7 @@ fn track_table(app: &mut App, ui: &mut egui::Ui, table: Rect, ids: &[i64]) {
         let list = app.dupes.paths.get(&id).cloned().unwrap_or_default();
         let mut close = false;
         let area = egui::Area::new(egui::Id::new((salt, "paths"))).order(egui::Order::Tooltip).fixed_pos(at).show(ui.ctx(), |ui| {
-            egui::Frame::popup(ui.style()).fill(hex(0x202020)).show(ui, |ui| {
+            egui::Frame::popup(ui.style()).fill(gy(0x202020)).show(ui, |ui| {
                 ui.set_min_width(200.0);
                 for l in &list {
                     if ui.add(egui::Label::new(egui::RichText::new(l).font(rb(11.5)).color(WHITE)).sense(Sense::click())).clicked() {

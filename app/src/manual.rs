@@ -9,7 +9,7 @@ fn esc(s: &str) -> String {
 }
 
 /// (anchor, title, body as HTML).
-const CHAPTERS: [(&str, &str, &str); 14] = [
+const CHAPTERS: [(&str, &str, &str); 15] = [
     ("start", "Getting started", r#"
 <p>recordbox is a local DJ library: it analyses your tracks, lets you prepare cues, loops, beat grids and playlists, and exports USB drives that Pioneer DJ / AlphaTheta players (CDJ, XDJ) read.</p>
 <ul>
@@ -118,6 +118,11 @@ const CHAPTERS: [(&str, &str, &str); 14] = [
 <p>Recordbox can split a loaded track into vocal, instrument, bass and drum parts with a local separation model. Choose the model in <i>Preferences &gt; Extensions &gt; STEMS</i>. After a successful separation, Recordbox saves a <code>.stems</code> file for reuse with that track and model. The header starts with <code>PDSTEMS1</code>. Desktop library sync handles track edits separately from these audio caches.</p>
 <p>Export and Performance decks share saved parts. Quality and speed each save four stereo parts in a separate file. The three-part layout groups bass with instruments. A four-minute track uses about 169 MB per model, or 339 MB for both. Completed results survive a restart. In STEMS preferences, set a shared storage budget (20 GB by default) or choose <i>Keep all saved stems</i>. Copy the stems folder separately when backing up your library.</p>
 <p>The part buttons mute, unmute or solo a part. Preferences controls three or four parts, sound quality or speed, and whether muted parts come back when a track is loaded. The same model detects vocal positions, shown above the overview.</p>
+"#),
+    ("stemexport", "Export vocals or an instrumental", r#"
+<p>Choose <b>Track → Export Stems → Vocals</b> or <b>Instrumental</b> for selected library tracks. You can also start an export from the deck’s STEMS strip. Instrumental subtracts the separated vocal from the original mix.</p>
+<p>The first export shows the destination and playlist option. Each finished file gets its own name. The new collection entry receives the source’s BPM, key, grid and cues. If the export began in a regular playlist you can place the new entry after the source. Choose the folder and format under <b>Preferences → Extensions → STEMS</b>.</p>
+<p>A completed separation for the selected model can be exported while another track plays. If an uncached track is already on a deck, export can request separation there under the usual hardware limits. For an uncached library track, load it on a free deck and choose <b>STEMS → Separate</b>. Choose WAV, FLAC or AIFF for lossless audio and sample-aligned cue timing. MP3 introduces codec delay, which recordbox measures with its current decoder when copying cue and grid times. Other players may interpret MP3 priming differently.</p>
 "#),
     ("export", "Exporting to USB", r#"
 <ol>

@@ -504,6 +504,15 @@ impl Default for PadFxState {
 }
 
 impl PadFxState {
+    fn press(&mut self, n: usize, pads: &[Pad], idx: u8) -> Option<DeckAsk> {
+        let deck = &mut self.decks[n];
+        let ask = deck.press(pads, idx);
+        // A MIDI or keyboard pad can sound before this deck's pad grid is drawn.
+        // Keep the unit alive after release so its delay/reverb tails can finish.
+        self.made[n] |= deck.beat.is_some() || deck.color.is_some() || deck.release.is_some();
+        ask
+    }
+
     /// What each deck's unit is asked for (for the audio thread).
     pub fn sets(&self, prefs: &PadFxPrefs) -> [PadSet; 4] {
         std::array::from_fn(|d| {
@@ -513,7 +522,7 @@ impl PadFxState {
         })
     }
 
-    /// A deck's unit has to exist (it shows PAD FX or something is held).
+    /// Decks whose PAD FX grid was shown or whose effect was activated.
     pub fn wanted(&self) -> [bool; 4] {
         self.made
     }
@@ -557,8 +566,9 @@ pub fn pad_down(app: &mut App, n: usize, idx: u8) {
         app.toast_err("Invalid operation. PAD FX cannot be operated when MERGE FX is ON.");
         return;
     }
-    let pads = app.prefs.fx.padfx.all(n.min(3), &app.px.fxx.pad.decks[n.min(3)].shift);
-    let ask = app.px.fxx.pad.decks[n.min(3)].press(&pads, idx);
+    let n = n.min(3);
+    let pads = app.prefs.fx.padfx.all(n, &app.px.fxx.pad.decks[n].shift);
+    let ask = app.px.fxx.pad.press(n, &pads, idx);
     deck_ask(app, n, ask);
 }
 
@@ -605,20 +615,20 @@ pub fn pads(app: &mut App, ui: &mut Ui, n: u8, pad: &dyn Fn(usize, usize) -> Rec
         }
         let lit = app.px.fxx.pad.decks[d].lit(idx);
         let resp = ui.interact(pr, ui.id().with(("padfx", n, i)), Sense::click_and_drag());
-        p.rect_filled(pr, 0.0, if lit { hex(0x2C2C2C) } else if resp.hovered() { hex(0x1E1E1E) } else { hex(0x161616) });
+        p.rect_filled(pr, 0.0, if lit { gy(0x2C2C2C) } else { crate::ui_feel::hl(&resp, gy(0x161616), gy(0x1E1E1E)) });
         if lit {
             p.rect_stroke(pr, 0.0, Stroke::new(1.0_f32, BLUE), egui::StrokeKind::Inside);
         }
         // The effect's colour: an 8 x 8 square, 6 in from the left.
         let col = pad_fx_color(&app.prefs.rb.pad_fx_colors, info.fx);
         p.rect_filled(Rect::from_min_size(pos2(pr.min.x + 6.0, (pr.center().y - 4.0).round()), vec2(8.0, 8.0)), 0.0, if lit { lighten(col) } else { col });
-        let text = hex(0xF4F4F4);
+        let text = gy(0xF4F4F4);
         let mut x = pr.min.x + 20.0;
         if group(info.fx) == 3 {
             // RELEASE FX pads: an "R" in a box.
             let b = Rect::from_min_size(pos2(x, (pr.center().y - 5.5).round()), vec2(11.0, 11.0));
             p.rect_filled(b, 0.0, text);
-            p.text(b.center(), Align2::CENTER_CENTER, "R", bold(8.5), hex(0x161616));
+            p.text(b.center(), Align2::CENTER_CENTER, "R", bold(8.5), gy(0x161616));
             x += 14.0;
         }
         let [p1, p2] = params_of(info.fx);
@@ -658,8 +668,8 @@ pub fn pads(app: &mut App, ui: &mut Ui, n: u8, pad: &dyn Fn(usize, usize) -> Rec
         let r = cell(30.0);
         app.px.fxx.pad.rects[d][8 + b] = r;
         let resp = ui.interact(r, ui.id().with(("padfxbank", n, b)), Sense::click());
-        p.rect_filled(r, 2.0, if bank == b { BLUE } else if resp.hovered() { lighten(BTN) } else { PANEL });
-        p.text(r.center(), Align2::CENTER_CENTER, format!("{}", b + 1), bold(9.5), WHITE);
+        p.rect_filled(r, 2.0, if bank == b { BLUE.c() } else { crate::ui_feel::hl(&resp, PANEL, lighten(BTN.c())) });
+        p.text(r.center(), Align2::CENTER_CENTER, format!("{}", b + 1), bold(9.5), WHITE.c());
         if resp.on_hover_text(format!("PAD FX{}", b + 1)).clicked() && bank != b {
             stop_deck(app, d);
             app.prefs.fx.padfx.bank[d] = b as u8;
@@ -669,7 +679,7 @@ pub fn pads(app: &mut App, ui: &mut Ui, n: u8, pad: &dyn Fn(usize, usize) -> Rec
     let r = cell(20.0);
     app.px.fxx.pad.rects[d][10] = r;
     let resp = ui.interact(r, ui.id().with(("padfxedit", n)), Sense::click());
-    p.rect_filled(r, 2.0, if edit { BLUE } else if resp.hovered() { lighten(BTN) } else { PANEL });
+    p.rect_filled(r, 2.0, if edit { BLUE.c() } else { crate::ui_feel::hl(&resp, PANEL, lighten(BTN.c())) });
     // (A small gear: a ring with six teeth.)
     let c = r.center();
     p.circle_stroke(c, 3.2, Stroke::new(1.6_f32, WHITE));
@@ -684,8 +694,8 @@ pub fn pads(app: &mut App, ui: &mut Ui, n: u8, pad: &dyn Fn(usize, usize) -> Rec
     let r = cell(40.0);
     app.px.fxx.pad.rects[d][11] = r;
     let resp = ui.interact(r, ui.id().with(("padfxpage", n)), Sense::click());
-    p.rect_filled(r, 2.0, if resp.hovered() { lighten(BTN) } else { PANEL });
-    p.text(r.center(), Align2::CENTER_CENTER, if page == 0 { "1 - 8" } else { "9 - 16" }, FontId::proportional(9.0), DIM2);
+    p.rect_filled(r, 2.0, crate::ui_feel::hl(&resp, PANEL, lighten(BTN.c())));
+    p.text(r.center(), Align2::CENTER_CENTER, if page == 0 { "1 - 8" } else { "9 - 16" }, FontId::proportional(9.0), DIM2.c());
     if resp.on_hover_text("Page").clicked() {
         app.deck.x.pad_page = 1 - page as u8;
     }
@@ -779,6 +789,21 @@ mod tests {
         assert!(e.on && e.kind == Kind::Echo && (e.level - 0.3).abs() < 1e-6 && e.value == 1.0);
         assert_eq!(Pad { color: 80, ..Pad::of(25) }.engine().color, Some((7, 0.9, 0.5)));
         assert_eq!(Pad::of(31).engine().release, Some((2, 1.0)));
+    }
+
+    #[test]
+    fn an_unrendered_controller_pad_requests_only_its_own_effect_unit_and_keeps_its_tail() {
+        let pads = [Pad::of(SLIP_LOOP), Pad::of(1), Pad::of(25), Pad { hold: 0, ..Pad::of(30) }];
+        for (i, fx) in pads.iter().enumerate() {
+            let mut state = PadFxState::default();
+            assert_eq!(state.wanted(), [false; 4]);
+            state.press(2, &pads, i as u8);
+            let expected = [false, false, fx.fx != SLIP_LOOP, false];
+            assert_eq!(state.wanted(), expected);
+            assert_eq!(state.decks[2].engine(&pads).any(), expected[2]);
+            state.decks[2].release(&pads, i as u8);
+            assert_eq!(state.wanted(), expected);
+        }
     }
 
     #[test]

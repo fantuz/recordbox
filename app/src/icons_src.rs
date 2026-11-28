@@ -408,7 +408,7 @@ pub fn tile(p: &Painter, r: Rect, on: bool, hovered: bool, enabled: bool, panel:
     if on {
         p.rect_filled(r, 1.5, blue);
         p.rect_stroke(r, 1.5, Stroke::new(1.0, Color32::WHITE), egui::StrokeKind::Inside);
-        blue
+        blue.c()
     } else {
         let edge = if !enabled {
             Color32::from_rgb(0x3A, 0x3A, 0x3A)

@@ -430,6 +430,7 @@ pub struct Prefs {
     pub stem_reset_on_load: bool,
     /// STEMS > STEM Waveform Display: the waveform shows only the parts that sound.
     pub stem_waveform: bool,
+    pub stemx: crate::stem_export::StemExportPrefs,
     /// The settings of rekordbox's Preferences that came with the full window (prefs_rb.rs).
     #[serde(default = "crate::prefs_rb::legacy_library_preferences")]
     pub rb: crate::prefs_rb::RbPrefs,
@@ -912,7 +913,7 @@ mod pvdi_tests {
         let v = super::parse_pvdi(&s).unwrap();
         assert!((v.0 - 1024.0 / 22050.0).abs() < 1e-9);
         assert_eq!(v.1, vec![0, 2, 4, 1]);
-        // Scrambled (negative discriminator) and truncated sections are refused.
+        // Unknown versions and truncated sections are refused.
         let mut neg = s.clone();
         neg[12] = 0xff;
         assert!(super::parse_pvdi(&neg).is_none());
@@ -1126,6 +1127,7 @@ impl Default for Prefs {
             stem_solo: false,
             stem_reset_on_load: true,
             stem_waveform: true,
+            stemx: Default::default(),
             delete_device_tracks: false,
             // rekordbox's standard: gain = -10 - integrated loudness.
             target_lufs: -10.0,
@@ -1181,8 +1183,8 @@ pub enum StemMsg {
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct StemCacheKey {
     track: i64,
-    model: &'static str,
-    path: std::path::PathBuf,
+    pub(crate) model: &'static str,
+    pub(crate) path: std::path::PathBuf,
 }
 
 /// Stem separation status: hardware, model, download and the current separation.
@@ -1213,6 +1215,10 @@ pub struct StemState {
 }
 
 impl StemState {
+    pub(crate) fn pending_for(&self, track: i64) -> bool {
+        self.pending.as_ref().is_some_and(|(key, _)| key.track == track)
+    }
+
     fn update_cache_limit(&self, prefs: &Prefs) {
         *self.cache_limit.lock() = prefs.stem_cache_limit();
     }
@@ -1624,6 +1630,8 @@ pub struct App {
     pub side: SideMode,
     pub expanded: HashSet<i64>,
     pub list: Vec<i64>,
+    pub(crate) list_totals: Option<(u64, String)>,
+    track_metadata_revision: u64,
     pub list_dirty: bool,
     pub selected: HashSet<i64>,
     pub anchor: Option<usize>,
@@ -1726,8 +1734,10 @@ pub struct App {
     /// A track being dragged between the decks or sampler while the library is in another window.
     detached_player_drag: Option<Vec<i64>>,
     pub textures: HashMap<String, Option<egui::TextureHandle>>,
+    pub(crate) list_artwork: crate::artwork_thumbs::Cache,
     pub ctx: egui::Context,
     pub screenshot: Option<(String, u32)>,
+    pub(crate) screenshot_devices: Vec<crate::device_ext::ScreenshotDevice>,
     pub scroll_to_selected: bool,
     /// The track list's vertical scroll position set by dragging its scroll bar (applied on the
     /// next frame).
@@ -1742,6 +1752,7 @@ pub struct App {
     pub midi: crate::midi::MidiState,
     /// EDIT mode: the open project and the editor's state (ui_edit.rs).
     pub edit: crate::ui_edit::EditState,
+    pub stemx: crate::stem_export::StemExport,
 }
 
 impl App {
@@ -1809,6 +1820,8 @@ impl App {
             side: SideMode::Collection,
             expanded: HashSet::new(),
             list: vec![],
+            list_totals: None,
+            track_metadata_revision: 0,
             list_dirty: true,
             selected: HashSet::new(),
             anchor: None,
@@ -1874,8 +1887,10 @@ impl App {
             library_window: None,
             detached_player_drag: None,
             textures: HashMap::new(),
+            list_artwork: Default::default(),
             ctx: ctx.clone(),
             screenshot: screenshot.map(|s| (s, 0)),
+            screenshot_devices: Vec::new(),
             scroll_to_selected: false,
             list_scroll_to: None,
             menu: None,
@@ -1883,6 +1898,7 @@ impl App {
             ext: Default::default(),
             midi: Default::default(),
             edit: Default::default(),
+            stemx: Default::default(),
         }
     }
 
@@ -1941,6 +1957,11 @@ impl App {
             // Several states can be combined with commas (PREPDECK_SHOT_VIEW=playlists,mytag).
             for v in std::env::var("PREPDECK_SHOT_VIEW").unwrap_or_default().split(',').filter(|v| !v.is_empty()).map(|v| v.to_string()) {
                 match v.as_str() {
+                    "light" => app.prefs.rb.color_theme = 2,
+                    "padeditor" => app.pads.editor_open = true,
+                    "automix" => crate::ui_automix::toggle_pane(&mut app),
+                    "automixset" => app.mixx.automix.settings_open = true,
+                    "toast" => app.toast("Appearance check"),
                     "playlists" | "smart" => {
                         app.side = SideMode::Playlists;
                         if app.nodes.is_empty() {
@@ -2050,9 +2071,7 @@ impl App {
                         // End-to-end check of player cue edits: export two tracks with hot cues to
                         // a scratch folder device, move one cue in its analysis file as a player
                         // would, then scan.
-                        let root = std::path::PathBuf::from(std::env::var("PREPDECK_SHOT_DEVICE").unwrap_or_else(|_| std::env::temp_dir().join("recordbox_shot_device").to_string_lossy().to_string()));
-                        let _ = std::fs::remove_dir_all(&root);
-                        let _ = std::fs::create_dir_all(&root);
+                        let Some(root) = app.screenshot_device(false).map(|d| d.path().to_path_buf()) else { continue };
                         let ids: Vec<i64> = app.tracks.iter().filter(|t| !t.missing && app.db.cues(t.id).map(|c| c.iter().any(|c| c.kind == CueKind::Hot)).unwrap_or(false)).take(2).map(|t| t.id).collect();
                         let mut tracks = HashMap::new();
                         for id in &ids {
@@ -2064,7 +2083,10 @@ impl App {
                         let cancel = std::sync::atomic::AtomicBool::new(false);
                         match crate::export::usb::run_export(req, &|_| {}, &cancel) {
                             Ok(m) => eprintln!("shot export: {m}"),
-                            Err(e) => eprintln!("shot export failed: {e}"),
+                            Err(e) => {
+                                eprintln!("Player edits screenshot export failed: {e}");
+                                continue;
+                            }
                         }
                         if let Ok(lib) = crate::export::usb::read_device(&root) {
                             if let Some(t) = lib.tracks.values().next() {
@@ -2082,35 +2104,34 @@ impl App {
                             }
                         }
                         let r = root.to_string_lossy().to_string();
-                        if !app.prefs.devices_extra.contains(&r) {
-                            app.prefs.devices_extra.push(r.clone());
-                        }
                         app.scan_devices();
                         if app.dialogs.player_edits.is_none() {
                             app.check_player_cue_edits(&r, true);
                         }
                     }
                     "updatedevice" => {
-                        // Check of Update Playlists on This Device: the drive has "Update Check"
-                        // with one track; the library's "Update Check" has three.
-                        let root = std::path::PathBuf::from(std::env::var("PREPDECK_SHOT_DEVICE").unwrap_or_else(|_| std::env::temp_dir().join("recordbox_shot_update").to_string_lossy().to_string()));
-                        let _ = std::fs::remove_dir_all(&root);
-                        let _ = std::fs::create_dir_all(&root);
-                        let ids: Vec<i64> = app.tracks.iter().filter(|t| !t.missing && t.analyzed == 1).take(3).map(|t| t.id).collect();
-                        let pl = app.nodes.iter().find(|n| n.name == "Update Check").map(|n| n.id).unwrap_or_else(|| app.db.create_node(0, "Update Check", NodeKind::Playlist, None).unwrap_or(0));
-                        let _ = app.db.set_playlist_tracks(pl, &ids);
-                        app.reload_playlists();
+                        // Export the first track of a prepared playlist to a new temporary device.
+                        // The normal update operation then copies the remaining tracks to it.
+                        let mut named = app.nodes.iter().filter(|n| n.parent == 0 && n.kind != NodeKind::Folder && n.name == "Update Check");
+                        let prepared = named.next()
+                            .filter(|n| n.kind == NodeKind::Playlist && named.next().is_none())
+                            .and_then(|node| app.db.playlist_tracks(node.id).ok())
+                            .filter(|ids| (2..=3).contains(&ids.len()) && ids.iter().all(|id| app.track(*id).is_some_and(|t| !t.missing && t.analyzed == 1)));
+                        let Some(ids) = prepared else {
+                            eprintln!("Update screenshot needs a prepared top-level Update Check playlist with two or three local analyzed tracks.");
+                            continue;
+                        };
+                        let Some(t) = app.track(ids[0]).cloned() else { continue };
+                        let Some(root) = app.screenshot_device(false).map(|d| d.path().to_path_buf()) else { continue };
                         let mut tracks = HashMap::new();
-                        if let Some(t) = ids.first().and_then(|id| app.track(*id).cloned()) {
-                            tracks.insert(t.id, crate::export::usb::ExportTrack { cues: vec![], grid: app.db.grid(t.id), wave: app.db.wave(t.id), track: t, tags: vec![], rb_anlz: None, grid_same: false, vocal: None, phrases: None });
-                        }
+                        tracks.insert(t.id, crate::export::usb::ExportTrack { cues: vec![], grid: app.db.grid(t.id), wave: app.db.wave(t.id), track: t, tags: vec![], rb_anlz: None, grid_same: false, vocal: None, phrases: None });
                         let req = crate::export::usb::ExportRequest { root: root.clone(), nodes: vec![crate::export::usb::ExportNode { id: 0, name: "Update Check".into(), folder: false, children: vec![], tracks: ids[..1].to_vec() }], tracks, tag_categories: vec![], skipped: vec![], analysis: app.analysis_settings(), settings: Default::default(), browse: Default::default(), phrases: false, ..Default::default() };
                         let cancel = std::sync::atomic::AtomicBool::new(false);
-                        let _ = crate::export::usb::run_export(req, &|_| {}, &cancel);
-                        let r = root.to_string_lossy().to_string();
-                        if !app.prefs.devices_extra.contains(&r) {
-                            app.prefs.devices_extra.push(r.clone());
+                        if let Err(error) = crate::export::usb::run_export(req, &|_| {}, &cancel) {
+                            eprintln!("Device update screenshot export failed: {error}");
+                            continue;
                         }
+                        let r = root.to_string_lossy().to_string();
                         app.scan_devices();
                         app.update_device_playlists(&r);
                         // Let the export finish before the screenshot (the app exits after it).
@@ -2121,21 +2142,20 @@ impl App {
                         }
                     }
                     "relocate" => {
-                        // Check of Relocate Missing Files: move one track's file into a subfolder of
-                        // PREPDECK_SHOT_MOVED, then search that folder.
-                        let dest = std::path::PathBuf::from(std::env::var("PREPDECK_SHOT_MOVED").unwrap_or_default());
-                        if let Some(t) = app.tracks.iter().find(|t| !t.missing).cloned() {
-                            let to = dest.join("nested").join(std::path::Path::new(&t.path).file_name().unwrap());
-                            let _ = std::fs::create_dir_all(to.parent().unwrap());
-                            if std::fs::rename(&t.path, &to).is_ok() {
-                                app.reload_tracks();
-                                app.relocate_missing(&dest);
-                                let t0 = std::time::Instant::now();
-                                while app.relocate_rx.is_some() && t0.elapsed() < std::time::Duration::from_secs(30) {
-                                    app.poll_relocate();
-                                    std::thread::sleep(std::time::Duration::from_millis(20));
-                                }
+                        // Use a prepared missing reference and its replacement in a fixture folder.
+                        let fixture = std::env::var_os("PREPDECK_SHOT_MOVED")
+                            .filter(|value| !value.is_empty()).map(std::path::PathBuf::from);
+                        let profile = std::env::var_os("PREPDECK_DATA").is_some_and(|value| !value.is_empty());
+                        let missing = app.tracks.iter().find(|track| track.missing).map(|track| track.id);
+                        if let (true, Some(folder), Some(id)) = (profile, fixture.filter(|path| path.is_dir()), missing) {
+                            app.start_relocation_scan(vec![folder], Some(vec![id]));
+                            let start = std::time::Instant::now();
+                            while app.relocate_rx.is_some() && start.elapsed() < std::time::Duration::from_secs(30) {
+                                app.poll_relocate();
+                                std::thread::sleep(std::time::Duration::from_millis(20));
                             }
+                        } else {
+                            eprintln!("Relocate screenshot needs a missing track in PREPDECK_DATA and its replacement in PREPDECK_SHOT_MOVED.");
                         }
                     }
                     "subbrowser" => {
@@ -2315,7 +2335,7 @@ impl App {
         self.reload_tags();
     }
     pub fn reload_tracks(&mut self) {
-        self.collection_categories.clear();
+        self.invalidate_track_metadata();
         let queued: HashSet<i64> = self.tracks.iter().filter(|t| t.analyzed == 3).map(|t| t.id).collect();
         self.tracks = self.db.all_tracks().unwrap_or_default();
         let mut replaced: Vec<i64> = vec![];
@@ -2404,9 +2424,35 @@ impl App {
         let i = *self.index.get(&id)?;
         // Metadata dialogs, inline edits, tag reloads and Undo/Redo can update a track
         // without reloading the library. Invalidate before handing out mutable access.
-        self.collection_categories.clear();
+        self.invalidate_track_metadata();
         Some(&mut self.tracks[i])
     }
+    pub(crate) fn invalidate_track_metadata(&mut self) {
+        self.collection_categories.clear();
+        self.track_metadata_revision = self.track_metadata_revision.wrapping_add(1);
+    }
+
+    /// Each browser keeps its own materialized list. A track edit in either browser can
+    /// change both totals, including the total parked while the sub-browser is active.
+    pub(crate) fn list_totals_label(&mut self) -> &str {
+        let revision = self.track_metadata_revision;
+        if self.list_totals.as_ref().is_none_or(|(old, _)| *old != revision) {
+            let mut count = 0usize;
+            let mut seconds = 0.0;
+            let mut bytes = 0u128;
+            for track in self.list.iter().filter_map(|id| self.track(*id)) {
+                count += 1;
+                seconds += track.duration;
+                bytes += u128::from(track.file_size);
+            }
+            let hours = (seconds / 3600.0).floor();
+            let minutes = ((seconds - hours * 3600.0) / 60.0).floor();
+            let label = format!("{count} Tracks, {hours} hours {minutes} minutes, {:.1} GB", bytes as f64 / 1e9);
+            self.list_totals = Some((revision, label));
+        }
+        &self.list_totals.as_ref().unwrap().1
+    }
+
     /// Save a track without recording an undo step (analysis, sync and other system updates).
     pub fn save_track_quiet(&mut self, id: i64) {
         if let Some(t) = self.track(id).cloned() {
@@ -2781,6 +2827,7 @@ impl App {
         });
         self.ext.list_num = v.iter().map(|id| order[id] + 1).collect();
         self.list = v;
+        self.list_totals = None;
         let idx = &self.index;
         self.selected.retain(|id| idx.contains_key(id));
         self.anchor = self.anchor_id.and_then(|id| self.list.iter().position(|x| *x == id));
@@ -2801,7 +2848,7 @@ impl App {
         if !self.prefs.phrase_analysis {
             return;
         }
-        let Some(path) = self.track(id).map(|t| t.path.clone()) else { return };
+        let Some((path, phrase_key)) = self.track(id).map(|t| (t.path.clone(), crate::phrase::key_input(t))) else { return };
         let map: HashMap<String, String> = self.db.setting("rb_anlz").and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default();
         let base = map.get(&path).map(std::path::PathBuf::from);
         let grid = self.deck.grid.clone();
@@ -2820,7 +2867,7 @@ impl App {
                 crate::export::anlz::read_pssi(&b.with_extension("EXT")).and_then(|s| crate::phrase::parse(&s))
             });
             let stopped = || cancel.load(std::sync::atomic::Ordering::Relaxed);
-            let r = from_rb.or_else(|| crate::phrase::analyze_audio(&a, &beats, classic, &stopped));
+            let r = from_rb.or_else(|| crate::phrase::analyze_audio(&a, &beats, phrase_key, classic, &stopped));
             let _ = tx.send((id, if stopped() { None } else { r }));
             ctx.request_repaint();
         });
@@ -3729,6 +3776,14 @@ impl App {
         self.analyze_with(ids, force, s);
     }
 
+    /// Measure a freshly exported stem's waveform and level with its copied DJ metadata intact.
+    pub(crate) fn analyze_derived_audio(&mut self, id: i64) {
+        let settings = crate::analysis::AnalysisSettings {
+            do_grid: false, do_key: false, vocal: false, ..self.analysis_settings()
+        };
+        self.analyze_with(&[id], false, settings);
+    }
+
     /// Queue analysis jobs; returns the tracks actually submitted.
     fn analyze_with(&mut self, ids: &[i64], force: bool, s: crate::analysis::AnalysisSettings) -> Vec<i64> {
         let mut submitted = vec![];
@@ -3841,17 +3896,21 @@ impl App {
                         t.key_manual = false;
                     }
                 }
-                let mut save_grid = None;
-                if !keep_grid {
-                    if let Some(g) = res.grid {
-                        t.bpm = g.first_bpm();
-                        save_grid = Some(g);
+                let save_grid = if keep_grid {
+                    // Imported and manually edited tracks may have a collection BPM
+                    // distinct from the first beat. Preserve it on a waveform-only pass.
+                    if !(t.bpm.is_finite() && t.bpm > 0.0) {
+                        if let Some(bpm) = existing_grid.as_ref().map(BeatGrid::first_bpm).filter(|b| b.is_finite() && *b > 0.0) {
+                            t.bpm = bpm;
+                        }
                     }
-                } else if let Some(g) = &existing_grid {
-                    if g.first_bpm() > 0.0 {
-                        t.bpm = g.first_bpm();
+                    None
+                } else {
+                    if let Some(g) = &res.grid {
+                        t.bpm = if res.bpm.is_finite() && res.bpm > 0.0 { res.bpm } else { g.first_bpm() };
                     }
-                }
+                    res.grid
+                };
                 if let Ok(m) = std::fs::metadata(&t.path) {
                     let _ = self.db.set_media_stamp(id, media_stamp(&m));
                 }
@@ -5001,31 +5060,39 @@ impl App {
     // ------------------------------------------------------------------ devices / export
     pub fn scan_devices(&mut self) {
         let mut found: Vec<(String, String, String)> = vec![];
-        let mount = std::process::Command::new("/sbin/mount").output().map(|o| String::from_utf8_lossy(&o.stdout).to_string()).unwrap_or_default();
-        for line in mount.lines() {
-            // "/dev/disk4s1 on /Volumes/USB (msdos, local, nodev, nosuid, noowners)"
-            let Some((_, rest)) = line.split_once(" on ") else { continue };
-            let Some((mp, opts)) = rest.rsplit_once(" (") else { continue };
-            if !mp.starts_with("/Volumes/") {
-                continue;
+        if self.screenshot_devices.is_empty() {
+            let mount = std::process::Command::new("/sbin/mount").output().map(|o| String::from_utf8_lossy(&o.stdout).to_string()).unwrap_or_default();
+            for line in mount.lines() {
+                // "/dev/disk4s1 on /Volumes/USB (msdos, local, nodev, nosuid, noowners)"
+                let Some((_, rest)) = line.split_once(" on ") else { continue };
+                let Some((mp, opts)) = rest.rsplit_once(" (") else { continue };
+                if !mp.starts_with("/Volumes/") {
+                    continue;
+                }
+                let fs = opts.split(',').next().unwrap_or("").trim().to_string();
+                if !matches!(fs.as_str(), "msdos" | "exfat" | "hfs" | "apfs") || opts.contains("read-only") {
+                    continue;
+                }
+                let name = mp.trim_start_matches("/Volumes/").to_string();
+                let root = std::path::Path::new(mp);
+                // Skip app installer images unless they already hold a device library.
+                let installer = root.join("Applications").exists() || std::fs::read_dir(root).map(|d| d.flatten().any(|e| e.path().extension().map(|x| x == "app").unwrap_or(false))).unwrap_or(false);
+                if name == "Recovery" || (installer && !root.join("PIONEER").exists()) {
+                    continue;
+                }
+                found.push((mp.to_string(), name, fs));
             }
-            let fs = opts.split(',').next().unwrap_or("").trim().to_string();
-            if !matches!(fs.as_str(), "msdos" | "exfat" | "hfs" | "apfs") || opts.contains("read-only") {
-                continue;
+            for extra in &self.prefs.devices_extra {
+                if std::path::Path::new(extra).is_dir() {
+                    let name = std::path::Path::new(extra).file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+                    found.push((extra.clone(), name, "folder".into()));
+                }
             }
-            let name = mp.trim_start_matches("/Volumes/").to_string();
-            let root = std::path::Path::new(mp);
-            // Skip app installer images unless they already hold a device library.
-            let installer = root.join("Applications").exists() || std::fs::read_dir(root).map(|d| d.flatten().any(|e| e.path().extension().map(|x| x == "app").unwrap_or(false))).unwrap_or(false);
-            if name == "Recovery" || (installer && !root.join("PIONEER").exists()) {
-                continue;
-            }
-            found.push((mp.to_string(), name, fs));
-        }
-        for extra in &self.prefs.devices_extra {
-            if std::path::Path::new(extra).is_dir() {
-                let name = std::path::Path::new(extra).file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
-                found.push((extra.clone(), name, "folder".into()));
+        } else {
+            for device in &self.screenshot_devices {
+                let path = device.path();
+                let name = path.file_name().unwrap_or_default().to_string_lossy().into_owned();
+                found.push((path.to_string_lossy().into_owned(), name, "folder".into()));
             }
         }
         let mut devices = vec![];
@@ -5036,7 +5103,7 @@ impl App {
             // A different catalog may now occupy a previously connected mount point.
             // Resolve any unfinished write before displaying the catalog as usable.
             let mut recovery_error = None;
-            if self.export_job.is_none() && matches!(target, Ok((_, None))) {
+            if self.screenshot.is_none() && self.export_job.is_none() && matches!(target, Ok((_, None))) {
                 match usb::recover_checked(p) {
                     Ok(Some(msg)) => {
                         self.toast(format!("{name}: {msg}"));
@@ -5687,23 +5754,7 @@ pub fn grid_jump(beats: &[Beat], p: f64, n: f64) -> Option<f64> {
     Some(at(k) + frac * (at(k + 1) - at(k)))
 }
 
-/// A PVDI section: header 24 bytes (u16 discriminator at 12, hop at 14, sample rate at 16,
-/// stride at 18, count at 20), then count × stride bytes. Scrambled sections (negative
-/// discriminator) are not readable yet.
-pub fn parse_pvdi(s: &[u8]) -> Option<std::sync::Arc<(f64, Vec<u8>)>> {
-    let u16at = |o: usize| -> Option<u16> { Some(u16::from_be_bytes(s.get(o..o + 2)?.try_into().ok()?)) };
-    let hlen = u32::from_be_bytes(s.get(4..8)?.try_into().ok()?) as usize;
-    if (u16at(12)? as i16) < 0 {
-        return None;
-    }
-    let (hop, sr, stride) = (u16at(14)? as f64, u16at(16)? as f64, u16at(18)?.max(1) as usize);
-    let n = u32::from_be_bytes(s.get(20..24)?.try_into().ok()?) as usize;
-    if hop <= 0.0 || sr <= 0.0 {
-        return None;
-    }
-    let body = s.get(hlen..hlen + n.checked_mul(stride)?)?;
-    Some(std::sync::Arc::new((hop / sr, body.chunks_exact(stride).map(|c| c[0]).collect())))
-}
+pub(crate) use crate::export::anlz::parse_pvdi;
 
 pub fn fmt_time(secs: f64, tenths: bool) -> String {
     let s = secs.max(0.0);
