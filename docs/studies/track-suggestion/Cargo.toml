@@ -1,0 +1,6 @@
+[package]
+name="recordbox-matchbench"
+version="0.1.0"
+edition="2021"
+[dependencies]
+unicode-normalization="0.1"

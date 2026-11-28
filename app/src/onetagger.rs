@@ -10,6 +10,57 @@ use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 pub const PROVIDER: &str = "MusicBrainz";
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) enum Provider {
+    MusicBrainz,
+    Itunes,
+    Deezer,
+}
+
+impl Provider {
+    pub(crate) const ALL: [Self; 3] = [Self::MusicBrainz, Self::Itunes, Self::Deezer];
+
+    pub(crate) fn name(self) -> &'static str {
+        match self {
+            Self::MusicBrainz => PROVIDER,
+            Self::Itunes => "iTunes",
+            Self::Deezer => "Deezer",
+        }
+    }
+
+    pub(crate) fn cli_id(self) -> &'static str {
+        match self {
+            Self::MusicBrainz => "musicbrainz",
+            Self::Itunes => "itunes",
+            Self::Deezer => "deezer",
+        }
+    }
+
+    pub(crate) fn gap(self) -> Duration {
+        Duration::from_secs(match self {
+            Self::Itunes => 3,
+            Self::Deezer | Self::MusicBrainz => 1,
+        })
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ProviderError {
+    RateLimited,
+    Unsupported,
+}
+
+impl std::fmt::Display for ProviderError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::RateLimited => "Provider asked OneTagger to pause",
+            Self::Unsupported => "This executable does not support the requested lookup",
+        })
+    }
+}
+
+impl std::error::Error for ProviderError {}
+
 const MAX_TEXT_BYTES: usize = 512;
 const MAX_REPLY_BYTES: usize = 64 * 1024;
 const TIMEOUT: Duration = Duration::from_secs(75);
@@ -22,6 +73,30 @@ pub struct MatchTags {
     pub label: String,
     pub provider: String,
     pub recording_id: String,
+    pub track_id: String,
+    pub release_id: String,
+    pub genre_scope: String,
+}
+
+impl MatchTags {
+    pub(crate) fn source_url(&self) -> Option<String> {
+        match self.provider.as_str() {
+            PROVIDER if recording_id(&self.recording_id) => Some(format!(
+                "https://musicbrainz.org/recording/{}",
+                self.recording_id
+            )),
+            "iTunes" if catalog_id(&self.track_id) && catalog_id(&self.release_id) => {
+                Some(format!(
+                    "https://music.apple.com/us/album/{}?i={}",
+                    self.release_id, self.track_id
+                ))
+            }
+            "Deezer" if catalog_id(&self.track_id) => {
+                Some(format!("https://www.deezer.com/track/{}", self.track_id))
+            }
+            _ => None,
+        }
+    }
 }
 
 #[derive(Serialize)]
@@ -40,7 +115,14 @@ struct Reply {
 
 #[derive(Deserialize)]
 struct Candidate {
+    #[serde(default)]
     recording_id: String,
+    #[serde(default)]
+    track_id: String,
+    #[serde(default)]
+    release_id: String,
+    #[serde(default)]
+    genre_scope: String,
     artist: String,
     title: String,
     #[serde(default)]
@@ -55,8 +137,15 @@ fn valid_text(s: &str) -> bool {
     !s.trim().is_empty() && s.len() <= MAX_TEXT_BYTES && !s.chars().any(char::is_control)
 }
 
+pub(crate) fn valid_query(artist: &str, title: &str) -> bool {
+    valid_text(artist.trim()) && valid_text(title.trim())
+}
+
 fn identity(s: &str) -> String {
-    s.split_whitespace().collect::<Vec<_>>().join(" ").to_lowercase()
+    s.split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_lowercase()
 }
 
 fn recording_id(s: &str) -> bool {
@@ -71,13 +160,20 @@ fn recording_id(s: &str) -> bool {
         })
 }
 
+fn catalog_id(s: &str) -> bool {
+    !s.starts_with('0') && s.bytes().all(|b| b.is_ascii_digit()) && s.parse::<u64>().is_ok()
+}
+
 fn verified_tags(values: Vec<String>) -> Result<Vec<String>> {
     ensure!(values.len() <= 64, "OneTagger returned too many tag values");
     let mut result = Vec::new();
     let mut seen = std::collections::HashSet::new();
     for value in values {
+        ensure!(
+            valid_text(&value),
+            "OneTagger returned an invalid tag value"
+        );
         let value = value.trim();
-        ensure!(valid_text(value), "OneTagger returned an invalid tag value");
         if seen.insert(identity(value)) {
             result.push(value.to_owned());
         }
@@ -85,18 +181,29 @@ fn verified_tags(values: Vec<String>) -> Result<Vec<String>> {
     Ok(result)
 }
 
-fn decode(bytes: &[u8], request: &Request<'_>) -> Result<Option<MatchTags>> {
+fn decode(bytes: &[u8], request: &Request<'_>, provider: Provider) -> Result<Option<MatchTags>> {
     ensure!(
         bytes.len() <= MAX_REPLY_BYTES,
         "OneTagger lookup reply exceeds 64 KiB"
     );
     let reply: Reply = serde_json::from_slice(bytes).context("Invalid OneTagger lookup reply")?;
+    let schema = if provider == Provider::MusicBrainz {
+        1
+    } else {
+        2
+    };
     ensure!(
-        reply.schema == 1 && reply.provider == PROVIDER,
+        reply.schema == schema && reply.provider == provider.name(),
         "Unsupported OneTagger lookup reply"
     );
     match reply.status.as_str() {
-        "no_match" | "ambiguous" => return Ok(None),
+        "no_match" | "ambiguous" => {
+            ensure!(
+                schema == 1 || reply.candidates.is_empty(),
+                "Unconfirmed catalog result contained candidates"
+            );
+            return Ok(None);
+        }
         "matched" => {}
         _ => bail!("Unknown OneTagger lookup status"),
     }
@@ -106,18 +213,48 @@ fn decode(bytes: &[u8], request: &Request<'_>) -> Result<Option<MatchTags>> {
     );
     let hit = reply.candidates.into_iter().next().unwrap();
     ensure!(
-        recording_id(&hit.recording_id)
-            && valid_text(&hit.artist)
+        valid_text(&hit.artist)
             && valid_text(&hit.title)
             && identity(&hit.artist) == identity(request.artist)
             && identity(&hit.title) == identity(request.title),
         "OneTagger returned a different recording or edition"
     );
+    let scope = match provider {
+        Provider::MusicBrainz => {
+            ensure!(
+                recording_id(&hit.recording_id),
+                "Invalid MusicBrainz recording ID"
+            );
+            "recording"
+        }
+        Provider::Itunes | Provider::Deezer => {
+            let scope = if provider == Provider::Itunes {
+                "track"
+            } else {
+                "release"
+            };
+            ensure!(
+                catalog_id(&hit.track_id)
+                    && catalog_id(&hit.release_id)
+                    && hit.recording_id.is_empty(),
+                "Invalid track or release ID for {}",
+                provider.name()
+            );
+            ensure!(
+                hit.genre_scope == scope
+                    && hit.styles.is_empty()
+                    && (provider == Provider::Deezer || hit.label.is_empty()),
+                "Unexpected field or tag scope for {}",
+                provider.name()
+            );
+            scope
+        }
+    };
     let genres = verified_tags(hit.genres)?;
     let styles = verified_tags(hit.styles)?;
     let label = hit.label.trim();
     ensure!(
-        label.is_empty() || valid_text(label),
+        hit.label.is_empty() || valid_text(&hit.label),
         "OneTagger returned an invalid label"
     );
     Ok(
@@ -127,29 +264,39 @@ fn decode(bytes: &[u8], request: &Request<'_>) -> Result<Option<MatchTags>> {
             label: label.to_owned(),
             provider: reply.provider,
             recording_id: hit.recording_id,
+            track_id: hit.track_id,
+            release_id: hit.release_id,
+            genre_scope: scope.into(),
         }),
     )
 }
 
-fn check_exit(status: ExitStatus) -> Result<()> {
+fn check_exit(status: ExitStatus, provider: Provider) -> Result<()> {
     match status.code() {
         Some(0) => Ok(()),
-        Some(2) => bail!("This executable does not support the read-only OneTagger lookup. Select onetagger-cli with the lookup --json command (OneTagger 2.2.3 predates it)."),
-        Some(3) => bail!("MusicBrainz asked OneTagger to pause. Try this lookup again later."),
-        _ => bail!("OneTagger could not complete the MusicBrainz lookup ({status})."),
+        Some(2) => Err(anyhow::Error::new(ProviderError::Unsupported).context(format!("This executable does not support the requested {} lookup. Select a compatible OneTagger CLI.", provider.name()))),
+        Some(3) => Err(anyhow::Error::new(ProviderError::RateLimited).context(format!("{} asked OneTagger to pause. Try this provider again later.", provider.name()))),
+        _ => bail!("OneTagger could not complete the {} lookup ({status}).", provider.name()),
     }
 }
 
 /// The caller runs this on the enrichment worker. All send/receive waits are
 /// bounded independently of the deck, audio analysis and GUI threads.
-pub fn lookup(cli: &Path, artist: &str, title: &str, cancel: &AtomicBool) -> Result<Option<MatchTags>> {
-    lookup_with_timeout(cli, artist, title, cancel, TIMEOUT)
+pub(crate) fn lookup_provider(
+    cli: &Path,
+    artist: &str,
+    title: &str,
+    provider: Provider,
+    cancel: &AtomicBool,
+) -> Result<Option<MatchTags>> {
+    lookup_with_timeout(cli, artist, title, provider, cancel, TIMEOUT)
 }
 
 fn lookup_with_timeout(
     cli: &Path,
     artist: &str,
     title: &str,
+    provider: Provider,
     cancel: &AtomicBool,
     timeout: Duration,
 ) -> Result<Option<MatchTags>> {
@@ -168,7 +315,7 @@ fn lookup_with_timeout(
         title: title.trim(),
     };
     ensure!(
-        valid_text(request.artist) && valid_text(request.title),
+        valid_query(request.artist, request.title),
         "A lookup requires an artist and title of up to 512 UTF-8 bytes each"
     );
 
@@ -180,8 +327,12 @@ fn lookup_with_timeout(
     input.write_all(b"\n")?;
     input.rewind()?;
     let mut cmd = Command::new(cli);
-    cmd.args(["lookup", "--json"])
-        .current_dir(dir.path())
+    cmd.args(["lookup", "--json"]);
+    // Omitting the selector keeps the original MusicBrainz-only CLI compatible.
+    if provider != Provider::MusicBrainz {
+        cmd.args(["--provider", provider.cli_id()]);
+    }
+    cmd.current_dir(dir.path())
         .stdin(input)
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
@@ -201,7 +352,9 @@ fn lookup_with_timeout(
             .name("onetagger-reply".into())
             .spawn(move || {
                 let mut bytes = Vec::new();
-                let read = stdout.take(MAX_REPLY_BYTES as u64 + 1).read_to_end(&mut bytes);
+                let read = stdout
+                    .take(MAX_REPLY_BYTES as u64 + 1)
+                    .read_to_end(&mut bytes);
                 let _ = sender.send(read.map(|_| bytes));
             })?;
         let mut bytes = None;
@@ -219,13 +372,15 @@ fn lookup_with_timeout(
                         bytes = Some(result);
                     }
                     Err(mpsc::TryRecvError::Empty) => {}
-                    Err(mpsc::TryRecvError::Disconnected) => bail!("OneTagger lookup reader stopped"),
+                    Err(mpsc::TryRecvError::Disconnected) => {
+                        bail!("OneTagger lookup reader stopped")
+                    }
                 }
             }
             if let Some(status) = child.try_wait()? {
-                check_exit(status)?;
+                check_exit(status, provider)?;
                 if let Some(output) = &bytes {
-                    return decode(output, &request);
+                    return decode(output, &request, provider);
                 }
             }
             std::thread::sleep(Duration::from_millis(50));
@@ -235,7 +390,9 @@ fn lookup_with_timeout(
     // try_wait already reaped successfully exited children.
     if outcome.is_err() {
         let _ = child.kill();
-        child.wait().context("Could not reap the OneTagger process")?;
+        child
+            .wait()
+            .context("Could not reap the OneTagger process")?;
     }
     outcome
 }
@@ -263,7 +420,11 @@ mod tests {
     }
 
     fn parse(value: &Value) -> Result<Option<MatchTags>> {
-        decode(&serde_json::to_vec(value)?, &request())
+        decode(
+            &serde_json::to_vec(value)?,
+            &request(),
+            Provider::MusicBrainz,
+        )
     }
 
     #[test]
@@ -276,11 +437,11 @@ mod tests {
         empty["candidates"][0]["genres"] = json!([]);
         assert!(parse(&empty).unwrap().is_none());
         for status in ["no_match", "ambiguous"] {
-            assert!(
-                parse(&json!({"schema":1,"provider":PROVIDER,"status":status,"candidates":[]}))
-                    .unwrap()
-                    .is_none()
-            );
+            assert!(parse(
+                &json!({"schema":1,"provider":PROVIDER,"status":status,"candidates":[]})
+            )
+            .unwrap()
+            .is_none());
         }
     }
 
@@ -288,10 +449,14 @@ mod tests {
     fn rejects_other_editions_ambiguous_success_and_unverified_responses() {
         for (field, value) in [
             ("recording_id", json!("bad-id")),
-            ("recording_id", json!("00000000-0000-0000-0000-000000000000")),
+            (
+                "recording_id",
+                json!("00000000-0000-0000-0000-000000000000"),
+            ),
             ("artist", json!("Other Artist")),
             ("title", json!("Café \"Blue\" (Radio Mix)")),
             ("genres", json!(["bad\nvalue"])),
+            ("genres", json!(["house\n"])),
             ("genres", json!(vec!["house"; 65])),
         ] {
             let mut reply = matched();
@@ -313,7 +478,44 @@ mod tests {
             reply[field] = value;
             assert!(parse(&reply).is_err());
         }
-        assert!(decode(&vec![b' '; MAX_REPLY_BYTES + 1], &request()).is_err());
+        assert!(decode(
+            &vec![b' '; MAX_REPLY_BYTES + 1],
+            &request(),
+            Provider::MusicBrainz
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn store_evidence_keeps_the_id_and_scope_of_each_service() {
+        for (provider, scope) in [(Provider::Itunes, "track"), (Provider::Deezer, "release")] {
+            let bytes = |item: Value| {
+                serde_json::to_vec(&json!({"schema":2,"provider":provider.name(),"status":"matched","candidates":[item]})).unwrap()
+            };
+            let candidate = json!({"artist":ARTIST,"title":TITLE,"track_id":"154","release_id":"28","genre_scope":scope,"genres":["House"]});
+            let decode_item = |item| decode(&bytes(item), &request(), provider);
+            let found = decode_item(candidate.clone()).unwrap().unwrap();
+            assert_eq!(
+                (
+                    found.track_id.as_str(),
+                    found.release_id.as_str(),
+                    found.genre_scope.as_str()
+                ),
+                ("154", "28", scope)
+            );
+            assert!(found.recording_id.is_empty() && found.source_url().unwrap().contains("154"));
+            for (key, value) in [
+                ("release_id", "0"),
+                ("track_id", "1/2"),
+                ("genre_scope", "recording"),
+                ("recording_id", MBID),
+            ] {
+                let mut bad = candidate.clone();
+                bad[key] = json!(value);
+                assert!(decode_item(bad).is_err(), "{key}");
+            }
+            assert!(decode(&bytes(candidate), &request(), Provider::MusicBrainz).is_err());
+        }
     }
 
     #[cfg(unix)]
@@ -337,14 +539,52 @@ mod tests {
         reply["candidates"][0]["artist"] = json!(payload.artist);
         let cli = helper(temp.path(), &format!(
             "test \"$#\" = 2 && test \"$1\" = lookup && test \"$2\" = --json || exit 9\ncat > \"$0.input\"\ncat <<'END_JSON'\n{}\nEND_JSON", reply));
-        let tags = lookup(&cli, payload.artist, payload.title, &AtomicBool::new(false))
-            .unwrap()
-            .unwrap();
+        let tags = lookup_provider(
+            &cli,
+            payload.artist,
+            payload.title,
+            Provider::MusicBrainz,
+            &AtomicBool::new(false),
+        )
+        .unwrap()
+        .unwrap();
         assert_eq!(tags.genres.len(), 2);
-        let input: Value =
-            serde_json::from_slice(&std::fs::read(temp.path().join("cli with spaces.input")).unwrap())
-                .unwrap();
+        let input: Value = serde_json::from_slice(
+            &std::fs::read(temp.path().join("cli with spaces.input")).unwrap(),
+        )
+        .unwrap();
         assert_eq!(input, serde_json::to_value(payload).unwrap());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn catalog_provider_is_explicit_and_query_contains_only_artist_and_title() {
+        let dir = tempfile::tempdir().unwrap();
+        for provider in [Provider::Itunes, Provider::Deezer] {
+            let reply =
+                json!({"schema":2,"provider":provider.name(),"status":"no_match","candidates":[]});
+            let script = format!(
+                r#"test "$#" = 4 && test "$1" = lookup && test "$2" = --json && test "$3" = --provider && test "$4" = {} || exit 9
+cat > "$0.input"
+echo '{}'"#,
+                provider.cli_id(),
+                reply
+            );
+            let result = lookup_provider(
+                &helper(dir.path(), &script),
+                ARTIST,
+                TITLE,
+                provider,
+                &AtomicBool::new(false),
+            )
+            .unwrap();
+            assert!(result.is_none());
+            let input: Value = serde_json::from_slice(
+                &std::fs::read(dir.path().join("cli with spaces.input")).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(input, serde_json::to_value(request()).unwrap());
+        }
     }
 
     #[cfg(unix)]
@@ -358,25 +598,39 @@ mod tests {
             ("yes x | head -c 70000", "exceeds 64 KiB"),
             ("exit 1", "could not complete"),
         ] {
-            let err = lookup(&helper(temp.path(), body), ARTIST, TITLE, &cancel).unwrap_err();
+            let err = lookup_provider(
+                &helper(temp.path(), body),
+                ARTIST,
+                TITLE,
+                Provider::MusicBrainz,
+                &cancel,
+            )
+            .unwrap_err();
             assert!(err.to_string().contains(reason), "{err}");
         }
         let cli = helper(temp.path(), "exec sleep 30");
-        assert!(
-            lookup_with_timeout(&cli, ARTIST, TITLE, &cancel, Duration::from_millis(100))
-                .unwrap_err()
-                .to_string()
-                .contains("timed out")
-        );
+        assert!(lookup_with_timeout(
+            &cli,
+            ARTIST,
+            TITLE,
+            Provider::MusicBrainz,
+            &cancel,
+            Duration::from_millis(100)
+        )
+        .unwrap_err()
+        .to_string()
+        .contains("timed out"));
         std::thread::scope(|scope| {
             scope.spawn(|| {
                 std::thread::sleep(Duration::from_millis(100));
                 cancel.store(true, Ordering::Relaxed);
             });
-            assert!(lookup(&cli, ARTIST, TITLE, &cancel)
-                .unwrap_err()
-                .to_string()
-                .contains("cancelled"));
+            assert!(
+                lookup_provider(&cli, ARTIST, TITLE, Provider::MusicBrainz, &cancel)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("cancelled")
+            );
         });
     }
 }

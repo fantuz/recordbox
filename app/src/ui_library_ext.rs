@@ -551,6 +551,17 @@ fn match_lookup_item(app: &mut App, ui: &mut Ui, sel: &[i64]) {
         crate::ui_dialogs::open_match_lookup(app, sel);
         ui.close_menu();
     }
+    let [id] = sel else { return };
+    let sources: Vec<_> = app.match_tags(*id).iter().filter_map(|tags| tags.source_url().map(|url| (tags, url))).collect();
+    if !sources.is_empty() {
+        ui.menu_button("Related track metadata sources", |ui| {
+            for (tags, url) in sources {
+                if ui.hyperlink_to(tags.provider.as_str(), url).clicked() {
+                    ui.close_menu();
+                }
+            }
+        });
+    }
 }
 
 /// The track context menu, in the order rekordbox 7.2.19 builds it for collection and
@@ -1376,9 +1387,11 @@ pub fn related_criteria(app: &mut App, ui: &mut Ui) {
         ui.add(egui::DragValue::new(&mut r.bpm_pct).range(1.0..=50.0).speed(0.5).suffix("%"));
     });
     ui.label(RichText::new("Including double/half").size(10.5).color(DIM));
-    ui.checkbox(&mut r.genre, RichText::new("Genre").size(12.0));
+    ui.checkbox(&mut r.genre, RichText::new("Genre").size(12.0))
+        .on_hover_text("Filter by the genre saved on both library tracks. Looked-up genres can influence the suggestion score.");
     ui.checkbox(&mut r.artist, RichText::new("Same artist").size(12.0));
-    ui.checkbox(&mut r.label, RichText::new("Label").size(12.0));
+    ui.checkbox(&mut r.label, RichText::new("Label").size(12.0))
+        .on_hover_text("Filter by the record label saved on both library tracks. A looked-up release label can contribute to the suggestion score.");
     ui.checkbox(&mut r.color, RichText::new("Color").size(12.0));
     ui.checkbox(&mut r.rating, RichText::new("Rating at least as high").size(12.0));
     ui.checkbox(&mut r.matching, RichText::new("Matching").size(12.0)).on_hover_text("Set a combination of tracks that match well.\nMatching tracks can be shown in \"RELATED TRACKS\".\nNote: Select [Matching] as a filter in the [Criteria].");
@@ -1387,8 +1400,11 @@ pub fn related_criteria(app: &mut App, ui: &mut Ui) {
         app.list_dirty = true;
         app.save_prefs();
     }
-    if app.match_enrichment_running() && ui.button("View lookup progress…").clicked() {
-        crate::ui_dialogs::open_match_lookup(app, &[]);
+    if !app.match_enrichment_status().is_empty() {
+        let button = if app.match_enrichment_running() { "View lookup progress…" } else { "View last lookup…" };
+        if ui.button(button).clicked() {
+            crate::ui_dialogs::open_match_lookup(app, &[]);
+        }
     }
 }
 

@@ -4,6 +4,7 @@
 use eframe::egui;
 use crate::app::*;
 use crate::model::*;
+use crate::onetagger::Provider;
 use crate::smart::*;
 use crate::theme::*;
 use crate::ui_kit::{self as kit, btn};
@@ -19,8 +20,8 @@ pub fn library_dialogs(app: &mut App, ctx: &Context) {
     confirm_windows(app, ctx);
 }
 
-pub enum MatchLookupDialog {
-    Selection { ids: Vec<i64>, analyze_audio: bool },
+pub(crate) enum MatchLookupDialog {
+    Selection { ids: Vec<i64>, analyze_audio: bool, providers: Vec<Provider> },
     TooMany(usize),
     Progress,
 }
@@ -30,13 +31,21 @@ impl MatchLookupDialog {
         match ids.len() {
             0 => Self::Progress,
             n if n > MATCH_LOOKUP_LIMIT => Self::TooMany(n),
-            _ => Self::Selection { ids: ids.to_vec(), analyze_audio: false },
+            _ => Self::Selection { ids: ids.to_vec(), analyze_audio: false, providers: vec![Provider::MusicBrainz] },
         }
+    }
+
+    fn can_start(&self, cli_selected: bool, running: bool) -> bool {
+        cli_selected && !running && matches!(self, Self::Selection { providers, .. } if !providers.is_empty())
     }
 }
 
 pub fn open_match_lookup(app: &mut App, ids: &[i64]) {
-    app.dialogs.match_lookup = Some(MatchLookupDialog::for_selection(ids));
+    if app.match_enrichment_running() {
+        app.dialogs.match_lookup = Some(MatchLookupDialog::Progress);
+    } else if !matches!(&app.dialogs.match_lookup, Some(MatchLookupDialog::Selection { ids: current, .. }) if current == ids) {
+        app.dialogs.match_lookup = Some(MatchLookupDialog::for_selection(ids));
+    }
 }
 
 fn match_lookup_window(app: &mut App, ctx: &Context) {
@@ -48,12 +57,32 @@ fn match_lookup_window(app: &mut App, ctx: &Context) {
     kit::dialog(ctx, "Related track metadata").open(&mut open).default_width(440.0).show(ctx, |ui| {
         kit::apply_style(ui);
         match &mut dialog {
-            MatchLookupDialog::Selection { ids, analyze_audio } => {
-                let provider = crate::onetagger::PROVIDER;
+            MatchLookupDialog::Selection { ids, analyze_audio, providers } => {
                 let count = ids.len();
                 let noun = if count == 1 { "track" } else { "tracks" };
                 ui.label(format!("{count} selected {noun}"));
-                ui.label(format!("OneTagger sends the catalog artist and title, including the mix name, to {provider}. recordbox saves the recording’s available genres for matching."));
+                ui.label("OneTagger sends only the catalog artist and title, including any mix name, to each service you select. Matching evidence is saved in this library. Audio file tags stay unchanged.");
+                for provider in Provider::ALL {
+                    let mut selected = providers.contains(&provider);
+                    let label = match provider {
+                        Provider::MusicBrainz => "MusicBrainz · recording genres",
+                        Provider::Itunes => "Apple iTunes (US) · song genre",
+                        Provider::Deezer => "Deezer · release genres and label",
+                    };
+                    if ui.checkbox(&mut selected, label).changed() {
+                        if selected {
+                            providers.push(provider);
+                        } else {
+                            providers.retain(|p| *p != provider);
+                        }
+                    }
+                }
+                if providers.is_empty() {
+                    ui.label("Choose at least one service to look up tags.");
+                } else {
+                    ui.label("Each selected service can add evidence. Saved results are reused. An unavailable service pauses while the others continue.")
+                        .on_hover_text("Each service has its own request interval. A later lookup can retry an unavailable service or a track that had no match.");
+                }
                 ui.separator();
                 ui.horizontal_wrapped(|ui| {
                     if ui.button("Choose OneTagger CLI…").clicked() {
@@ -72,8 +101,8 @@ fn match_lookup_window(app: &mut App, ctx: &Context) {
                         ui.label(path.file_name().unwrap_or_default().to_string_lossy().as_ref()).on_hover_text(path.display().to_string());
                     }
                 });
-                ui.label("Requires a OneTagger CLI build with the lookup --json command.");
-                ui.hyperlink_to("OneTagger CLI downloads", "https://github.com/fantuz/onetagger/releases");
+                ui.label("Apple iTunes and Deezer require OneTagger CLI 2.4.0 or later.");
+                ui.hyperlink_to("Get OneTagger CLI", "https://github.com/fantuz/onetagger/releases");
                 ui.checkbox(analyze_audio, "Also run local track analysis")
                     .on_hover_text("Queues Analyze Track using your current analysis settings. The lookup runs separately.");
             }
@@ -85,12 +114,16 @@ fn match_lookup_window(app: &mut App, ctx: &Context) {
         let status = app.match_enrichment_status();
         if !status.is_empty() {
             ui.separator();
-            ui.label(status);
+            if matches!(dialog, MatchLookupDialog::Progress) {
+                ui.label(status);
+            } else {
+                ui.collapsing("Last lookup in this library", |ui| { ui.label(status); });
+            }
         }
         ui.horizontal(|ui| {
             if let MatchLookupDialog::Selection { analyze_audio, .. } = &dialog {
                 let label = if *analyze_audio { "Look up and analyze" } else { "Look up tags" };
-                start = ui.add_enabled(!running && app.dialogs.onetagger_cli.is_some(), btn(label)).clicked();
+                start = ui.add_enabled(dialog.can_start(app.dialogs.onetagger_cli.is_some(), running), btn(label)).clicked();
             }
             if running && ui.add(btn("Cancel lookup")).clicked() {
                 app.cancel_match_enrichment();
@@ -99,8 +132,8 @@ fn match_lookup_window(app: &mut App, ctx: &Context) {
         });
     });
     if start {
-        if let (MatchLookupDialog::Selection { ids, analyze_audio }, Some(cli)) = (&dialog, app.dialogs.onetagger_cli.clone()) {
-            app.queue_match_enrichment(ids, &cli);
+        if let (MatchLookupDialog::Selection { ids, analyze_audio, providers }, Some(cli)) = (&dialog, app.dialogs.onetagger_cli.clone()) {
+            app.queue_match_enrichment(ids, &cli, providers);
             if *analyze_audio {
                 app.reanalyze(ids);
             }
@@ -120,9 +153,30 @@ mod match_lookup_dialog_tests {
     fn every_selection_starts_metadata_only_and_large_requests_are_never_truncated() {
         assert!(matches!(MatchLookupDialog::for_selection(&[]), MatchLookupDialog::Progress));
         let ids: Vec<_> = (1..=MATCH_LOOKUP_LIMIT as i64).collect();
-        assert!(matches!(MatchLookupDialog::for_selection(&ids), MatchLookupDialog::Selection {ids: saved, analyze_audio: false} if saved == ids));
+        let selection = MatchLookupDialog::for_selection(&ids);
+        assert!(selection.can_start(true, false));
+        assert!(!selection.can_start(false, false));
+        assert!(!selection.can_start(true, true));
+        assert!(matches!(selection, MatchLookupDialog::Selection { ids: saved, analyze_audio: false, providers }
+            if saved == ids && providers == [Provider::MusicBrainz]));
         let too_many = vec![0; MATCH_LOOKUP_LIMIT + 1];
         assert!(matches!(MatchLookupDialog::for_selection(&too_many), MatchLookupDialog::TooMany(n) if n == too_many.len()));
+    }
+
+    #[test]
+    fn empty_services_never_start_and_each_new_request_has_its_own_opt_in() {
+        let mut first = MatchLookupDialog::for_selection(&[1]);
+        if let MatchLookupDialog::Selection { providers, .. } = &mut first {
+            providers.clear();
+        }
+        assert!(!first.can_start(true, false));
+        if let MatchLookupDialog::Selection { providers, .. } = &mut first {
+            providers.extend([Provider::Deezer, Provider::Itunes]);
+        }
+        assert!(first.can_start(true, false));
+        assert!(matches!(MatchLookupDialog::for_selection(&[2]), MatchLookupDialog::Selection { providers, .. }
+            if providers == [Provider::MusicBrainz]));
+        assert!(!MatchLookupDialog::Progress.can_start(true, false));
     }
 }
 

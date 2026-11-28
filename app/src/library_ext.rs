@@ -298,13 +298,13 @@ pub enum MatchPanelQuery {
 
 pub struct MatchPanelRows {
     pub query: MatchPanelQuery,
-    pub revision: (u64, u64),
+    pub revision: (u64, u64, u64),
     pub built_at: f64,
     pub rows: Arc<Vec<(i64, f64)>>,
 }
 
 impl MatchPanelRows {
-    pub fn reusable(&self, query: &MatchPanelQuery, revision: (u64, u64), now: f64) -> bool {
+    pub fn reusable(&self, query: &MatchPanelQuery, revision: (u64, u64, u64), now: f64) -> bool {
         self.query == *query && (self.revision == revision || now - self.built_at < 1.0)
     }
 }
@@ -357,6 +357,7 @@ pub struct LibExt {
     pub right_prev: [bool; 5],
     /// Cached rankings for the right-hand library panels.
     pub panel_cache: [Option<MatchPanelRows>; 2],
+    pub match_evidence_revision: u64,
     pub panel_sel: [Option<i64>; 2],
     /// New My Tag being typed in the My Tag window: (category, text).
     pub cv_scroll_end: bool,
@@ -406,6 +407,7 @@ impl Default for LibExt {
             sub: None,
             right_prev: [false; 5],
             panel_cache: [None, None],
+            match_evidence_revision: 0,
             panel_sel: [None, None],
             cv_scroll_end: false,
             in_sub: false,
@@ -502,6 +504,17 @@ impl Db {
 
 // ------------------------------------------------------------------------------------ app logic
 impl App {
+    /// The advisory evidence can change with no write on this connection when a
+    /// second instance already saved the hit. Let open panels coalesce these changes.
+    pub(crate) fn match_evidence_updated(&mut self) {
+        self.ext.match_evidence_revision = self.ext.match_evidence_revision.wrapping_add(1);
+        let uses_evidence = |view: &View| matches!(view, View::Related | View::Suggest(0 | 3));
+        self.list_dirty |= uses_evidence(&self.view);
+        if let Some(sub) = &mut self.ext.sub {
+            sub.list_dirty |= uses_evidence(&sub.view);
+        }
+    }
+
     /// Load the tables this module keeps in memory.
     pub fn reload_library_ext(&mut self) {
         self.ext.panel_cache = [None, None];
@@ -1948,12 +1961,16 @@ mod tests {
     #[test]
     fn unchanged_match_panels_reuse_rows_and_active_edits_refresh_within_one_second() {
         let q = MatchPanelQuery::Related(Some(3), 0, RelatedRules::default());
-        let rows = MatchPanelRows { query: q.clone(), revision: (2, 7), built_at: 8.0, rows: Arc::default() };
-        assert!(rows.reusable(&q, (2, 7), 20_000.0));
-        assert!(rows.reusable(&q, (2, 8), 8.9));
-        assert!(!rows.reusable(&q, (2, 8), 9.0));
-        assert!(!rows.reusable(&q, (3, 7), 9.0));
-        assert!(!rows.reusable(&MatchPanelQuery::Suggest(Some(3), 0, 0), (2, 7), 8.1));
+        let rows = MatchPanelRows { query: q.clone(), revision: (2, 7, 0), built_at: 8.0, rows: Arc::default() };
+        assert!(rows.reusable(&q, (2, 7, 0), 20_000.0));
+        assert!(rows.reusable(&q, (2, 8, 0), 8.9));
+        // A burst of previously saved results from another instance can leave SQLite's
+        // local change count untouched. Reuse the rows until the same one-second deadline.
+        assert!(rows.reusable(&q, (2, 7, 50), 8.9));
+        assert!(!rows.reusable(&q, (2, 7, 51), 9.0));
+        assert!(!rows.reusable(&q, (2, 8, 0), 9.0));
+        assert!(!rows.reusable(&q, (3, 7, 0), 9.0));
+        assert!(!rows.reusable(&MatchPanelQuery::Suggest(Some(3), 0, 0), (2, 7, 0), 8.1));
     }
 
     #[test]

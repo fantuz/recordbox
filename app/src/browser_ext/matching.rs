@@ -28,6 +28,14 @@ fn add_people(people: &mut Vec<String>, mut value: String) {
     if value.is_empty() || matches!(value.as_str(), "various artists" | "various" | "unknown artist" | "n/a") {
         return;
     }
+    // Most credits name one artist. Move the normalized name into the result
+    // directly, without scanning it separately for every collaboration marker.
+    if !value.contains([',', ';']) && !value.split(' ').any(|word| {
+        matches!(word, "feat." | "feat" | "ft." | "ft" | "featuring" | "vs." | "vs" | "x" | "&" | "and" | "/")
+    }) {
+        people.push(value);
+        return;
+    }
     for sep in [" feat. ", " feat ", " ft. ", " ft ", " featuring ", " vs. ", " vs ", " x ", " & ", " and ", " / "] {
         if value.contains(sep) {
             value = value.replace(sep, ",");
@@ -43,16 +51,21 @@ fn credits(t: &Track) -> Vec<String> {
     }
     // Credits in a title must follow an explicit featured-artist marker. Names in lyrics,
     // ordinary title words, and substrings such as "Air" in "Airport" are not credits.
-    let title = normalized(&t.title);
-    if title.contains("feat") || title.contains("ft") {
-        let title = format!(" {}", title.replace(['(', '['], " "));
-        if let Some((start, len)) = [" feat. ", " feat ", " ft. ", " ft ", " featuring "]
-            .iter()
-            .filter_map(|marker| title.find(marker).map(|i| (i, marker.len())))
-            .min()
-        {
-            let credit = title[start + len..].split([')', ']', '(']).next().unwrap_or("");
-            add_people(&mut people, credit.split(" - ").next().unwrap_or("").trim().to_owned());
+    // Unicode folding can reveal a featured-artist marker. Plain ASCII titles
+    // without an F cannot contain any marker, so avoid allocating a folded copy.
+    let bytes = t.title.as_bytes();
+    if !bytes.is_ascii() || bytes.contains(&b'f') || bytes.contains(&b'F') {
+        let title = normalized(&t.title);
+        if title.contains("feat") || title.contains("ft") {
+            let title = format!(" {}", title.replace(['(', '['], " "));
+            if let Some((start, len)) = [" feat. ", " feat ", " ft. ", " ft ", " featuring "]
+                .iter()
+                .filter_map(|marker| title.find(marker).map(|i| (i, marker.len())))
+                .min()
+            {
+                let credit = title[start + len..].split([')', ']', '(']).next().unwrap_or("");
+                add_people(&mut people, credit.split(" - ").next().unwrap_or("").trim().to_owned());
+            }
         }
     }
     people.sort_unstable();
@@ -79,20 +92,38 @@ struct Metadata {
     genres: Vec<String>,
     provider_genres: Vec<String>,
     styles: Vec<String>,
-    provider_label: String,
+    provider_labels: Vec<String>,
 }
 
 impl Metadata {
-    fn new(t: &Track, tags: Option<&MatchTags>) -> Self {
+    fn new(t: &Track, tags: &[MatchTags]) -> Self {
+        let mut provider_labels: Vec<_> = tags.iter().map(|r| normalized(&r.label)).filter(|s| !s.is_empty()).collect();
+        provider_labels.sort_unstable();
+        provider_labels.dedup();
         Self {
             people: credits(t),
             label: normalized(&t.label),
             album: normalized(&t.album),
             genres: genres([t.genre.as_str()]),
-            provider_genres: genres(tags.into_iter().flat_map(|r| r.genres.iter().map(String::as_str))),
-            styles: genres(tags.into_iter().flat_map(|r| r.styles.iter().map(String::as_str))),
-            provider_label: tags.map_or_else(String::new, |r| normalized(&r.label)),
+            provider_genres: genres(tags.iter().flat_map(|r| r.genres.iter().map(String::as_str))),
+            styles: genres(tags.iter().flat_map(|r| r.styles.iter().map(String::as_str))),
+            provider_labels,
         }
+    }
+
+    // Local labels take precedence, even when a service suggests a different label.
+    fn labels(&self) -> &[String] {
+        if self.label.is_empty() { &self.provider_labels } else { std::slice::from_ref(&self.label) }
+    }
+
+    fn has_genre(&self, genre: &String) -> bool {
+        self.genres.binary_search(genre).is_ok() || self.provider_genres.binary_search(genre).is_ok()
+    }
+
+    fn style_matches(&self, style: &String, peer: &Metadata) -> bool {
+        let peer_genre = peer.has_genre(style);
+        // A style repeated as a genre on both tracks already counts as a genre.
+        !(peer_genre && self.has_genre(style)) && (peer_genre || peer.styles.binary_search(style).is_ok())
     }
 }
 
@@ -113,33 +144,18 @@ impl Association {
         let same = |a: &str, b: &str| !a.is_empty() && a == b;
         let label = same(&a.label, &b.label);
         let provider_label = (a.label.is_empty() || b.label.is_empty())
-            && same(
-                if a.label.is_empty() { &a.provider_label } else { &a.label },
-                if b.label.is_empty() { &b.provider_label } else { &b.label },
-            );
+            && overlap(a.labels(), b.labels());
         let genre = overlap(&a.genres, &b.genres);
         // A provider genre and a local genre may describe the same evidence; count it once.
         let provider_genre = !genre
             && (overlap(&a.provider_genres, &b.genres)
                 || overlap(&a.genres, &b.provider_genres)
                 || overlap(&a.provider_genres, &b.provider_genres));
-        let has_genre = |m: &Metadata, style: &String| {
-            m.genres.binary_search(style).is_ok() || m.provider_genres.binary_search(style).is_ok()
-        };
-        let distinct_style = |owner: &Metadata, peer: &Metadata| {
-            owner.styles.iter().any(|style| {
-                // A repeated genre must not earn an independent style bonus, including
-                // when one copy is a local tag and the other came from the provider.
-                let peer_genre = has_genre(peer, style);
-                !(peer_genre && has_genre(owner, style)) && (peer_genre || peer.styles.binary_search(style).is_ok())
-            })
-        };
-        let provider_style = distinct_style(a, b) || distinct_style(b, a);
+        let provider_style = a.styles.iter().any(|s| a.style_matches(s, b)) || b.styles.iter().any(|s| b.style_matches(s, a));
         Self {
             comparable: (!a.people.is_empty() && !b.people.is_empty())
                 || (!a.album.is_empty() && !b.album.is_empty())
-                || ((!a.label.is_empty() || !a.provider_label.is_empty())
-                    && (!b.label.is_empty() || !b.provider_label.is_empty()))
+                || (!a.labels().is_empty() && !b.labels().is_empty())
                 || ((!a.genres.is_empty() || !a.provider_genres.is_empty() || !a.styles.is_empty())
                     && (!b.genres.is_empty() || !b.provider_genres.is_empty() || !b.styles.is_empty())),
             credits: a.people.iter().filter(|p| b.people.binary_search(p).is_ok()).count(),
@@ -150,6 +166,56 @@ impl Association {
             provider_genre,
             provider_style,
         }
+    }
+
+    // Build provenance only for a hovered candidate. Ranking the collection needs
+    // the same votes, but does not need to allocate provider names for every row.
+    fn provider_reasons(&self, a: &Metadata, b: &Metadata, left: &[MatchTags], right: &[MatchTags]) -> Vec<String> {
+        let mut origins: [Vec<String>; 3] = Default::default();
+        for (owner, peer, tags) in [(a, b, left), (b, a, right)] {
+            for row in tags {
+                let provider = if row.provider.is_empty() { "OneTagger" } else { &row.provider };
+                let label = normalized(&row.label);
+                if self.provider_label && owner.label.is_empty() && peer.labels().binary_search(&label).is_ok() {
+                    let field = if row.release_id.is_empty() { "label" } else { "release label" };
+                    origins[0].push(format!("{provider} {field}"));
+                }
+                let fields = genres(row.genres.iter().map(String::as_str));
+                // An existing local field on this track already explains its side of the match.
+                let mut additional = fields.iter().filter(|g| owner.genres.binary_search(g).is_err());
+                let genre_source = || {
+                    let field = match row.genre_scope.as_str() {
+                        "release" => "release genre",
+                        "track" => "song genre",
+                        "recording" => "recording genre",
+                        _ if row.provider == "MusicBrainz" => "recording genre", // earlier cached MusicBrainz rows
+                        _ => "genre",
+                    };
+                    format!("{provider} {field}")
+                };
+                if self.provider_genre && additional.clone().any(|g| peer.has_genre(g)) {
+                    origins[1].push(genre_source());
+                }
+                if self.provider_style {
+                    let styles = genres(row.styles.iter().map(String::as_str));
+                    if styles.iter().any(|s| owner.style_matches(s, peer)) {
+                        origins[2].push(format!("{provider} style"));
+                    }
+                    if additional.any(|g| peer.styles.binary_search(g).is_ok() && peer.style_matches(g, owner)) {
+                        origins[2].push(genre_source());
+                    }
+                }
+            }
+        }
+        let mut reasons = Vec::new();
+        for (field, mut sources) in ["label", "genre", "style"].into_iter().zip(origins) {
+            if !sources.is_empty() {
+                sources.sort_unstable();
+                sources.dedup();
+                reasons.push(format!("Shared {field} ({})", sources.join(", ")));
+            }
+        }
+        reasons
     }
 
     fn score(&self) -> Option<f64> {
@@ -355,7 +421,8 @@ impl App {
                 1 => era_score(a, b).unwrap_or(0.0),
                 3 => assoc().score().unwrap_or(0.0),
                 _ => {
-                    let signals = Signals::new(a, b, sound, self.match_sound(b.id), tags, self.track_tags.get(&b.id));
+                    let candidate_sound = sound.and_then(|_| self.match_sound(b.id));
+                    let signals = Signals::new(a, b, sound, candidate_sound, tags, self.track_tags.get(&b.id));
                     if kind == 2 {
                         signals.mood().unwrap_or(0.0)
                     } else {
@@ -397,16 +464,18 @@ impl App {
     pub fn match_explanation(&self, src: i64, candidate: i64, kind: Option<u8>) -> String {
         let (Some(a), Some(b)) = (self.track(src), self.track(candidate)) else { return String::new() };
         let (left, right) = (self.match_tags(src), self.match_tags(candidate));
-        let assoc = Association::compare(&Metadata::new(a, left), &Metadata::new(b, right));
+        let (a_meta, b_meta) = (Metadata::new(a, left), Metadata::new(b, right));
+        let assoc = Association::compare(&a_meta, &b_meta);
+        let k = kind.unwrap_or(0);
+        let sound = if matches!(k, 0 | 2) { self.match_sound(src) } else { None };
         let signals = Signals::new(
             a,
             b,
-            self.match_sound(src),
-            self.match_sound(candidate),
+            sound,
+            sound.and_then(|_| self.match_sound(candidate)),
             self.track_tags.get(&src),
             self.track_tags.get(&candidate),
         );
-        let k = kind.unwrap_or(0);
         let mut reasons = Vec::new();
         if k == 0 && self.is_match(src, candidate) {
             reasons.push("Registered matching pair".to_owned());
@@ -456,18 +525,7 @@ impl App {
                 reasons.push("Shared library genre".into());
             }
             if assoc.provider_label || assoc.provider_genre || assoc.provider_style {
-                let mut providers: Vec<_> =
-                    [left, right].into_iter().flatten().map(|r| r.provider.as_str()).filter(|s| !s.is_empty()).collect();
-                providers.sort_unstable();
-                providers.dedup();
-                let fields: Vec<_> =
-                    [(assoc.provider_label, "label"), (assoc.provider_genre, "genre"), (assoc.provider_style, "style")]
-                        .into_iter()
-                        .filter_map(|(yes, name)| yes.then_some(name))
-                        .collect();
-                let origin =
-                    if providers.is_empty() { "OneTagger".into() } else { format!("OneTagger / {}", providers.join(", ")) };
-                reasons.push(format!("Shared {} ({origin})", fields.join(", ")));
+                reasons.extend(assoc.provider_reasons(&a_meta, &b_meta, left, right));
             }
         }
         if reasons.is_empty() && kind.is_none() {
@@ -502,7 +560,7 @@ mod tests {
         let mut feat = tr(9, 100.0, 5, 0, "Someone", "", "");
         feat.title = "Night (feat. Max Styler)".into();
         let association_score =
-            |a, b| Association::compare(&Metadata::new(a, None), &Metadata::new(b, None)).score().unwrap_or(0.0);
+            |a, b| Association::compare(&Metadata::new(a, &[]), &Metadata::new(b, &[])).score().unwrap_or(0.0);
         assert!(association_score(&a, &art) > association_score(&a, &lab));
         assert!(association_score(&a, &lab) > 0.0);
         assert_eq!(association_score(&a, &none), 0.0);
@@ -542,7 +600,7 @@ mod tests {
             let mut rows = vec![];
             for t in [&poor, &ok, &good] {
                 let sig = Signals::new(&src, t, None, None, None, None);
-                let assoc = Association::compare(&Metadata::new(&src, None), &Metadata::new(t, None));
+                let assoc = Association::compare(&Metadata::new(&src, &[]), &Metadata::new(t, &[]));
                 let score = match kind {
                     1 => sig.era.unwrap_or(0.0),
                     3 => assoc.score().unwrap_or(0.0),
@@ -570,7 +628,7 @@ mod tests {
         let sparse = tr(2, 126.0, -1, 0, "", "", "");
         let confirmed = tr(3, 124.0, 6, 2021, "Basement", "Sands", "House");
         let score = |other| {
-            let meta = Association::compare(&Metadata::new(&song, None), &Metadata::new(other, None));
+            let meta = Association::compare(&Metadata::new(&song, &[]), &Metadata::new(other, &[]));
             Signals::new(&song, other, None, None, None, None).rank(&meta)
         };
         assert!(score(&sparse) > 0.0 && score(&sparse) < 0.5);
@@ -586,7 +644,7 @@ mod tests {
         let artist = tr(1, 0.0, -1, 0, "Air", "", "");
         let mut other = tr(2, 0.0, -1, 0, "Different Artist", "", "");
         fn shared(left: &Track, right: &Track) -> usize {
-            Association::compare(&Metadata::new(left, None), &Metadata::new(right, None)).credits
+            Association::compare(&Metadata::new(left, &[]), &Metadata::new(right, &[])).credits
         }
         for title in ["Airport Nights", "Love Is In The Air", "Metro (feat. Airwaves)"] {
             other.title = title.into();
@@ -602,6 +660,76 @@ mod tests {
     }
 
     #[test]
+    fn credits_keep_multiword_names_and_fold_featured_artist_markers() {
+        let mut track = Track { artist: "  The Blue Note  ".into(), ..Default::default() };
+        assert_eq!(credits(&track), ["the blue note"]);
+        track.artist = "Air feat. One; Two / Three vs. Four".into();
+        track.title = "Étude [ＦＥＡＴ. Mañana]".into();
+        assert_eq!(credits(&track), ["air", "four", "manana", "one", "three", "two"]);
+        track.artist = "Daft Punk".into();
+        track.title = "Mixtape after midnight".into();
+        assert_eq!(credits(&track), ["daft punk"]);
+    }
+
+    #[test]
+    fn provider_votes_keep_local_precedence_and_identify_only_contributing_evidence() {
+        let left = tr(1, 120.0, -1, 0, "", "Pampa", "House");
+        let mut right = tr(2, 120.0, -1, 0, "", "", "");
+        let apple = MatchTags { provider: "iTunes".into(), genre_scope: "track".into(), genres: vec!["Techno".into()], ..Default::default() };
+        let recording = MatchTags { provider: "MusicBrainz".into(), genres: vec!["House".into()], ..Default::default() };
+        let release = MatchTags {
+            provider: "Deezer".into(), genre_scope: "release".into(), release_id: "123".into(),
+            genres: vec!["House".into()], label: "Pampa".into(), ..Default::default()
+        };
+        let first = [apple.clone()];
+        let second = [release.clone(), recording.clone(), apple.clone()];
+        // Apple contributes a different, corroborated genre; all corroborated genres still earn one overall vote.
+        let a = Metadata::new(&left, &first);
+        let b = Metadata::new(&right, &second);
+        let assoc = Association::compare(&a, &b);
+        assert_eq!(assoc.score(), Association::compare(&Metadata::new(&left, &[]), &Metadata::new(&right, std::slice::from_ref(&release))).score());
+        assert_eq!(assoc.provider_reasons(&a, &b, &first, &second), [
+            "Shared label (Deezer release label)",
+            "Shared genre (Deezer release genre, MusicBrainz recording genre, iTunes song genre)",
+        ]);
+
+        // Right-side label conflict is authoritative, the unrelated Apple genre on just one side no longer contributes.
+        right.label = "Another label".into();
+        let a = Metadata::new(&left, &[]);
+        let b = Metadata::new(&right, &second);
+        let assoc = Association::compare(&a, &b);
+        assert!(!assoc.provider_label);
+        assert_eq!(assoc.provider_reasons(&a, &b, &[], &second), [
+            "Shared genre (Deezer release genre, MusicBrainz recording genre)",
+        ]);
+        // A local genre present on both sides needs no provider attribution, even when several services agree.
+        right.genre = "House".into();
+        let b = Metadata::new(&right, &second);
+        let assoc = Association::compare(&a, &b);
+        assert!(assoc.genre && !assoc.provider_genre);
+        assert!(assoc.provider_reasons(&a, &b, &[], &second).is_empty());
+    }
+
+    #[test]
+    fn a_style_match_credits_the_genre_source_on_the_other_track() {
+        let empty = Track::default();
+        let left = [MatchTags {
+            provider: "Style fixture".into(), styles: vec!["Garage".into()], ..Default::default()
+        }];
+        let right = [MatchTags {
+            provider: "Deezer".into(), genres: vec!["Garage".into()], genre_scope: "release".into(),
+            release_id: "321".into(), ..Default::default()
+        }];
+        let a = Metadata::new(&empty, &left);
+        let b = Metadata::new(&empty, &right);
+        let assoc = Association::compare(&a, &b);
+        assert!(assoc.provider_style && !assoc.provider_genre);
+        assert_eq!(assoc.provider_reasons(&a, &b, &left, &right), [
+            "Shared style (Deezer release genre, Style fixture style)",
+        ]);
+    }
+
+    #[test]
     fn enrichment_adds_corroborated_evidence_and_keeps_strict_filters_local() {
         let a = tr(1, 128.0, 0, 0, "A", "", "House");
         let b = tr(2, 64.0, 0, 0, "B", "Pampa", "Deep House; Dyñamic");
@@ -611,8 +739,8 @@ mod tests {
             label: "Pampa".into(),
             ..Default::default()
         };
-        let local = Association::compare(&Metadata::new(&a, None), &Metadata::new(&b, None));
-        let enriched = Association::compare(&Metadata::new(&a, Some(&tags)), &Metadata::new(&b, None));
+        let local = Association::compare(&Metadata::new(&a, &[]), &Metadata::new(&b, &[]));
+        let enriched = Association::compare(&Metadata::new(&a, std::slice::from_ref(&tags)), &Metadata::new(&b, &[]));
         assert!(enriched.provider_genre && enriched.provider_style && enriched.provider_label);
         assert!(enriched.score().unwrap() > local.score().unwrap_or(0.0));
         assert!(eligible(&RelatedRules::default(), &a, &b, false));
@@ -630,16 +758,16 @@ mod tests {
         }
         let same_genre = Metadata::new(
             &a,
-            Some(&MatchTags { genres: vec!["House".into()], styles: vec!["House".into()], ..Default::default() }),
+            &[MatchTags { genres: vec!["House".into()], styles: vec!["House".into()], ..Default::default() }],
         );
         let assoc = Association::compare(&same_genre, &same_genre);
         assert!(assoc.genre);
         assert!(!assoc.provider_genre && !assoc.provider_style);
         let provider_only = Metadata::new(
             &Track::default(),
-            Some(&MatchTags { genres: vec!["house".into()], styles: vec!["House".into()], ..Default::default() }),
+            &[MatchTags { genres: vec!["house".into()], styles: vec!["House".into()], ..Default::default() }],
         );
-        let mixed = Association::compare(&provider_only, &Metadata::new(&a, None));
+        let mixed = Association::compare(&provider_only, &Metadata::new(&a, &[]));
         assert!(mixed.provider_genre && !mixed.provider_style);
     }
 }

@@ -471,7 +471,8 @@ pub fn related_window(app: &mut App, ui: &mut Ui, r: Rect, which: usize) {
     } else {
         MatchPanelQuery::Suggest(src, target, kind)
     };
-    let revision = (app.track_metadata_revision, app.db.conn.total_changes());
+    let evidence = if which == 0 || matches!(kind, 0 | 3) { app.ext.match_evidence_revision } else { 0 };
+    let revision = (app.track_metadata_revision, app.db.conn.total_changes(), evidence);
     let rows = match &app.ext.panel_cache[which] {
         Some(cached) if cached.reusable(&query, revision, now) => {
             if cached.revision != revision {
