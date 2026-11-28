@@ -177,6 +177,7 @@ impl Col {
 
 /// The experimental hybrid backend is exercised by an explicit separation request.
 pub(crate) const MANUAL_STEMS_PREVIEW: bool = cfg!(all(target_os = "linux", feature = "vulkan"));
+pub(crate) const DEFAULT_STEM_CACHE_GB: u32 = 50;
 
 impl Prefs {
     pub(crate) fn auto_stems_on_load(&self, gpu: bool) -> bool {
@@ -275,9 +276,9 @@ pub struct Prefs {
     pub stems_auto_cpu: bool,
     /// Preview finalized sections during eligible GPU jobs started after this preference is set.
     pub stems_progressive_preview: bool,
-    /// Storage budget in decimal GB. At zero, each new save keeps only its own result.
+    /// Storage budget in decimal GB. At zero, each successful new save keeps only its own result.
     pub stem_cache_gb: u32,
-    /// Skip automatic eviction and retain the budget in case the user switches back.
+    /// Skip automatic eviction; writes in both modes must leave 10% of the volume free.
     pub keep_all_stems: bool,
     /// Import play histories from connected devices automatically.
     pub import_device_history: bool,
@@ -591,8 +592,9 @@ mod prefs_tests {
     #[test]
     fn stem_storage_preferences_preserve_legacy_budgets_and_opt_in() {
         let default: super::Prefs = serde_json::from_str("{}").unwrap();
-        assert_eq!(default.stem_cache_limit(), Some(20_000_000_000));
-        for gb in [0, 7, u32::MAX] {
+        assert_eq!(default.stem_cache_limit(), Some(50_000_000_000));
+        assert_eq!(super::Prefs::default().stem_cache_limit(), default.stem_cache_limit());
+        for gb in [0, 7, 20, u32::MAX] {
             let mut prefs: super::Prefs = serde_json::from_value(serde_json::json!({"stem_cache_gb": gb})).unwrap();
             assert_eq!(prefs.stem_cache_limit(), Some(u64::from(gb) * 1_000_000_000));
             prefs.keep_all_stems = true;
@@ -607,13 +609,13 @@ mod prefs_tests {
         let dir = tempfile::tempdir().unwrap();
         let old = dir.path().join("000000000000000000000001-htdemucs.stems");
         let new = dir.path().join("000000000000000000000001-htdemucs_ft.stems");
-        std::fs::write(&old, b"old").unwrap();
-        std::fs::write(&new, b"new").unwrap();
+        let parts = crate::stems::Stems { len: 1, data: vec![0.25; 8] };
+        crate::stems::save_with_policy(&old, &parts, || None).unwrap();
         let mut prefs = super::Prefs { stem_cache_gb: 0, ..Default::default() };
         let state = super::StemState::new();
         state.update_cache_limit(&prefs);
         let worker_limit = state.cache_limit.clone();
-        let finish_save = || crate::stems::trim_cache(&new, || *worker_limit.lock());
+        let finish_save = || crate::stems::save_with_policy(&new, &parts, || *worker_limit.lock()).unwrap();
 
         prefs.keep_all_stems = true;
         state.update_cache_limit(&prefs);
@@ -1050,7 +1052,7 @@ impl Default for Prefs {
             stems_auto_separate: true,
             stems_auto_cpu: false,
             stems_progressive_preview: false,
-            stem_cache_gb: 20,
+            stem_cache_gb: DEFAULT_STEM_CACHE_GB,
             keep_all_stems: false,
             import_device_history: true,
             keymap: Default::default(),
@@ -1185,6 +1187,20 @@ pub struct StemCacheKey {
     track: i64,
     pub(crate) model: &'static str,
     pub(crate) path: std::path::PathBuf,
+}
+
+impl StemCacheKey {
+    fn save_completed(
+        &self, parts: &crate::stems::Stems, track: &Track, limit: impl Fn() -> Option<u64>,
+    ) -> Result<(), String> {
+        crate::stems::save_with_policy(&self.path, parts, limit).map_err(|error| {
+            let model = crate::stems::spec(self.model).map_or(self.model, |m| m.name);
+            format!(
+                "Could not save {model} parts for “{}”. The deck can play them from memory while this track and model stay loaded. {} ({error:#})",
+                track.display_title(), self.path.display(),
+            )
+        })
+    }
 }
 
 /// Stem separation status: hardware, model, download and the current separation.
@@ -2259,7 +2275,8 @@ impl App {
                                 Ok(st) => {
                                     eprintln!("separated {} ({:.0} s of audio) in {:.1} s", tr.display_title(), st.len as f64 / 44100.0, t0.elapsed().as_secs_f64());
                                     let key = app.stem_cache_key(t, m.id).unwrap();
-                                    let _ = crate::stems::save(&key.path, &st);
+                                    let saved = key.save_completed(&st, &tr, || app.prefs.stem_cache_limit());
+                                    let _ = app.stem.tx.send(StemMsg::CacheWrite(key.clone(), saved));
                                     app.deck.stem_cache_key = Some(key);
                                     let mut ps = app.player.state.lock();
                                     ps.stems = Some(std::sync::Arc::new(st));
@@ -3385,16 +3402,7 @@ impl App {
                     true
                 }, execution, preview.as_deref())?;
                 if cancelled() { anyhow::bail!("stopped"); }
-                let saved = match crate::stems::save(&key.path, &st) {
-                    Ok(()) => {
-                        crate::stems::trim_cache(&key.path, || *cache_limit.lock());
-                        Ok(())
-                    }
-                    Err(error) => Err(format!(
-                        "Could not cache {} parts for “{}”. The deck can play them until the track is unloaded. Check free space and write access to {} ({error:#}).",
-                        m.name, t.display_title(), key.path.display()
-                    )),
-                };
+                let saved = key.save_completed(&st, &t, || *cache_limit.lock());
                 let _ = tx.send(StemMsg::CacheWrite(key, saved));
                 Ok(std::sync::Arc::new(st))
             };

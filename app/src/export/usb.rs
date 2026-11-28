@@ -2263,19 +2263,11 @@ fn write_artwork(root: &Path, rel: &str, src: &str, created: &mut Created) -> Re
 }
 
 pub fn free_space(root: &Path) -> Option<u64> {
-    let out = std::process::Command::new("/bin/df").arg("-k").arg(root).output().ok()?;
-    let s = String::from_utf8_lossy(&out.stdout);
-    let line = s.lines().nth(1)?;
-    let cols: Vec<&str> = line.split_whitespace().collect();
-    cols.get(3)?.parse::<u64>().ok().map(|k| k * 1024)
+    crate::disk_space::on(root).ok().map(|s| s.available)
 }
 
 pub fn total_space(root: &Path) -> Option<u64> {
-    let out = std::process::Command::new("/bin/df").arg("-k").arg(root).output().ok()?;
-    let s = String::from_utf8_lossy(&out.stdout);
-    let line = s.lines().nth(1)?;
-    let cols: Vec<&str> = line.split_whitespace().collect();
-    cols.get(1)?.parse::<u64>().ok().map(|k| k * 1024)
+    crate::disk_space::on(root).ok().map(|s| s.capacity)
 }
 
 // ------------------------------------------------------------------------------------------

@@ -14,6 +14,7 @@ mod browser_ext;
 mod collection_cleanup;
 mod contrast;
 mod db;
+mod disk_space;
 mod cue_tools;
 mod deck;
 mod demo;

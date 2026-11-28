@@ -93,7 +93,9 @@ Each file stores drums, bass, instruments and vocals as 16-bit PCM at 44,100 ste
 
 Export and Performance decks use the same cache. The 3-part layout groups bass with instruments under **INST**. Both layouts save all four parts. Completed files survive track changes, switching models, and closing Recordbox. Unloading a track from its last deck before separation finishes cancels the job. On a later load, Recordbox needs the same model, source path, size and modification time to reuse the stored audio.
 
-The default **20 GB** budget is shared across tracks and models. It fits about 118 four-minute tracks with one model or 59 with both. Adjust the budget or select **Keep all saved stems** in **Preferences → Extensions → STEMS**. With a budget, a successful save can remove older results to make room and always retains the file just saved. Keep all lets the folder grow until you clear saved stems or the drive runs out of space. Changing the preference alone does not remove files.
+The default **50 GB** budget is shared across tracks and models. It fits about 295 four-minute tracks prepared with one model, or 147 with both. In **Preferences → Extensions → STEMS**, enter a custom budget or choose **Keep all saved stems** to remove the fixed cache-size limit. Existing saved budgets, including 20 GB and zero, carry forward. Choose **Use 50 GB default** to adopt the new value.
+
+Every save also reserves **10% of the cache volume’s total capacity**. On a 200 GB drive with 42 GB available, at most 22 GB can be added while maintaining that reserve. Other applications and files on that drive count toward occupancy. recordbox checks for enough room to write the complete new file before replacing an existing result. If space is insufficient, the finished separation remains playable on the loaded deck, and the cache panel explains why saving failed. Changing the budget alone leaves existing files in place.
 
 For a backup, copy the `stems` folder separately from the Recordbox library backup. When restoring to another installation, preserve the source audio paths, file sizes and modification times so Recordbox can recognize the saved work.
 

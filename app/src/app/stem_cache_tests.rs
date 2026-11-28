@@ -100,6 +100,39 @@ fn assert_parts(app: &App, sample: f32) {
 }
 
 #[test]
+fn cache_write_failure_reports_the_reason_and_keeps_completed_stems_on_the_deck() -> Result<()> {
+    isolated("cache_write_failure_reports_the_reason_and_keeps_completed_stems_on_the_deck", |dir| {
+        let mut app = open_app();
+        let (id, cache) = track(&app, dir, "memory-only.wav")?;
+        app.reload_tracks();
+        app.load_track(id);
+        finish_loading(&mut app);
+        let key = app.deck.stem_cache_key.clone().unwrap();
+        // Occupy the destination so the real cache writer cannot publish, on any filesystem.
+        std::fs::create_dir(&cache)?;
+        let sentinel = cache.join("keep");
+        std::fs::write(&sentinel, b"original")?;
+        let parts = std::sync::Arc::new(Stems { len: FRAMES, data: vec![0.25; 8 * FRAMES] });
+        let saved = key.save_completed(&parts, app.track(id).unwrap(), || app.prefs.stem_cache_limit());
+        assert!(saved.is_err());
+        app.stem.active_key = Some(key.clone());
+        app.stem.separating = Some((id, 1.0));
+        app.stem.tx.send(StemMsg::CacheWrite(key, saved)).unwrap();
+        app.stem.tx.send(StemMsg::Done(id, Ok(parts))).unwrap();
+        app.poll_stems();
+
+        assert_parts(&app, 0.25);
+        assert!(app.stem.error_for(Some(id)).is_none());
+        let warning = app.stem.cache_warning().unwrap();
+        assert!(warning.contains("memory-only") && warning.contains("from memory"));
+        assert!(warning.contains(cache.to_str().unwrap()));
+        assert!(app.toasts.iter().any(|t| t.error && t.text == warning));
+        assert_eq!(std::fs::read(sentinel)?, b"original");
+        Ok(())
+    })
+}
+
+#[test]
 fn deck_reuses_parts_after_switching_tracks_and_reopening_the_library() -> Result<()> {
     isolated(
         "deck_reuses_parts_after_switching_tracks_and_reopening_the_library",

@@ -1554,16 +1554,21 @@ pub(crate) fn stem_model_card(app: &mut App, ui: &mut Ui) {
                 ui.horizontal(|ui| {
                     ui.label("STEMS storage budget");
                     ui.add(egui::DragValue::new(&mut app.prefs.stem_cache_gb).update_while_editing(false).suffix(" GB"));
+                    let default_gb = crate::app::DEFAULT_STEM_CACHE_GB;
+                    if app.prefs.stem_cache_gb != default_gb && ui.small_button(format!("Use {default_gb} GB default")).clicked() {
+                        app.prefs.stem_cache_gb = default_gb;
+                    }
                 });
             });
         });
         if app.prefs.keep_all_stems {
-            note(ui, "New saves can use all available disk space. Saved parts stay on disk until you clear them.");
+            note(ui, "Saved parts stay on disk until you clear them.");
         } else if app.prefs.stem_cache_gb == 0 {
-            note(ui, "With a zero budget, each new save removes all other saved parts.");
+            note(ui, "With a zero budget, each successful save keeps only the latest result.");
         } else {
-            note(ui, "After a new result is saved, the least recently used parts are removed until storage fits the budget. The new result is always kept.");
+            note(ui, "After a successful save, the least recently used parts are removed first. The newest result can exceed this budget.");
         }
+        note(ui, "Each save must leave at least 10% of the cache drive free, including while writing the temporary file. If space is low, the deck can still play the new parts until you unload the track.");
         match app.stem.cache_usage(ui.ctx()) {
             Some(Ok(bytes)) => kit::line(ui, &format!("{:.2} GB in use", *bytes as f64 / 1e9)),
             Some(Err(error)) => kit::line(ui, &format!("Could not measure the saved stems. {error}")),

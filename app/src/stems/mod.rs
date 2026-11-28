@@ -10,6 +10,8 @@ mod live;
 pub use live::Live;
 #[cfg(test)]
 mod bench;
+#[cfg(test)]
+mod cache_tests;
 mod backend;
 #[cfg(feature = "directml")]
 mod directml;
@@ -783,26 +785,83 @@ fn mp3_timeline_only_changes_opt_in_mp3_cache_names() {
 
 const MAGIC: &[u8; 8] = b"PDSTEMS1";
 
-/// Stored as 16-bit PCM (planar) to keep the cache small.
-pub fn save(path: &Path, s: &Stems) -> Result<()> {
+/// Writers in the same cache directory (including other recordbox instances) hold this
+/// advisory lock until publication and retention are complete. Never unlink the lock file:
+/// processes waiting on it must all agree on the same underlying file.
+fn cache_lock(dir: &Path) -> Result<std::fs::File> {
+    use std::fs::OpenOptions;
+    let mut options = OpenOptions::new();
+    options.read(true).write(true).create(true).truncate(false);
+    #[cfg(unix)] {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW);
+    }
+    #[cfg(windows)] {
+        use std::os::windows::fs::OpenOptionsExt;
+        options.custom_flags(windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT);
+    }
+    let file = options.open(dir.join(".recordbox-stems.lock")).context("Opening the STEMS cache lock")?;
+    anyhow::ensure!(file.metadata()?.is_file(), "the STEMS cache lock is not a regular file");
+    Ok(file)
+}
+
+fn ensure_space(dir: &Path, remaining: u64, space: &impl Fn(&Path) -> std::io::Result<crate::disk_space::Space>) -> Result<()> {
+    let disk = space(dir).with_context(|| format!("Checking available space on the STEMS cache volume at {}", dir.display()))?;
+    let reserve = disk.capacity.div_ceil(10);
+    anyhow::ensure!(disk.available >= reserve && remaining <= disk.available - reserve,
+        "Insufficient disk space to save stems at {}. The cache volume has {} MiB available, needs {} MiB for the remaining data and must keep {} MiB (10%) free.",
+        dir.display(), disk.available / (1 << 20), remaining.div_ceil(1 << 20), reserve.div_ceil(1 << 20));
+    Ok(())
+}
+
+/// Store complete 16-bit planar PCM. The live policy determines retention *after* a
+/// successful publish. The actual destination volume always keeps a 10% reserve.
+pub fn save_with_policy(path: &Path, s: &Stems, limit: impl Fn() -> Option<u64>) -> Result<()> {
+    save_checked(path, s, limit, crate::disk_space::on)
+}
+
+#[cfg(test)]
+pub(crate) fn save(path: &Path, s: &Stems) -> Result<()> {
+    save_with_policy(path, s, || None)
+}
+
+fn save_checked(path: &Path, s: &Stems, limit: impl Fn() -> Option<u64>,
+    space: impl Fn(&Path) -> std::io::Result<crate::disk_space::Space>) -> Result<()> {
     anyhow::ensure!(s.len.checked_mul(8) == Some(s.data.len()), "incomplete separated stems");
-    let mut tmp = tempfile::NamedTempFile::new_in(path.parent().context("missing STEMS cache directory")?)?;
+    let bytes = u64::try_from(s.len)?.checked_mul(16).and_then(|n| n.checked_add(16)).context("STEMS cache file is too large")?;
+    let dir = path.parent().context("missing STEMS cache directory")?;
+    let lock = cache_lock(dir)?;
+    lock.lock().context("Waiting for another STEMS cache writer")?;
+    // A replacement and its old version coexist until atomic publication. Never count
+    // the old version's size or evict other completed results to pass this test.
+    ensure_space(dir, bytes, &space)?;
+    let mut tmp = tempfile::Builder::new().prefix(".recordbox-stems-").suffix(".partial").tempfile_in(dir)?;
     tmp.write_all(MAGIC)?;
     tmp.write_all(&(s.len as u64).to_le_bytes())?;
-    // Converted a block at a time: one write per sample made this the slowest step after the
-    // model itself.
     let mut block = Vec::with_capacity(2 << 16);
+    let mut written = 16u64;
+    let mut next_check = 8 << 20;
     for chunk in s.data.chunks(1 << 16) {
         block.clear();
         for v in chunk {
             block.extend_from_slice(&((v.clamp(-1.0, 1.0) * 32767.0).round() as i16).to_le_bytes());
         }
         tmp.write_all(&block)?;
+        written += block.len() as u64;
+        if written >= next_check {
+            ensure_space(dir, bytes - written, &space)?;
+            next_check = written.saturating_add(8 << 20);
+        }
     }
-    // On disk before it gets its final name, so a crash can't leave a short cache file that
-    // looks complete.
     tmp.as_file().sync_all()?;
-    tmp.persist(path)?;
+    ensure_space(dir, 0, &space)?;
+    tmp.persist(path).map_err(|error| error.error).context("Publishing the completed STEMS cache")?;
+    // After publication a power loss must not persist the removal of an older cache
+    // without the new directory entry. Filesystems that cannot sync directories
+    // keep both complete results until a later save.
+    #[cfg(unix)]
+    if std::fs::File::open(dir).and_then(|directory| directory.sync_all()).is_err() { return Ok(()); }
+    trim_cache(path, limit);
     Ok(())
 }
 
@@ -877,7 +936,7 @@ pub fn cache_size() -> std::io::Result<u64> {
 
 /// Apply the current retention policy after a successful save. Always keep that result,
 /// including when a single track exceeds the whole budget.
-pub fn trim_cache(keep: &Path, limit: impl Fn() -> Option<u64>) {
+fn trim_cache(keep: &Path, limit: impl Fn() -> Option<u64>) {
     if limit().is_none() { return; }
     let Some(dir) = keep.parent() else { return };
     let Ok(entries) = saved_entries(dir) else { return };
@@ -901,7 +960,14 @@ pub fn trim_cache(keep: &Path, limit: impl Fn() -> Option<u64>) {
 }
 
 pub fn clear_cache() -> Result<()> {
-    clear_saved_entries(&stems_dir())
+    clear_unless_busy(&stems_dir())
+}
+
+fn clear_unless_busy(dir: &Path) -> Result<()> {
+    let lock = cache_lock(dir)?;
+    // Preferences may call this from the UI thread. Do not block it on a long save.
+    lock.try_lock().context("The STEMS cache is busy. Try clearing it after the current save finishes")?;
+    clear_saved_entries(dir)
 }
 
 fn clear_saved_entries(dir: &Path) -> Result<()> {
@@ -1064,7 +1130,8 @@ mod tests {
     #[test]
     fn cache_file_round_trip() {
         let s = Stems { len: 70_000, data: (0..8 * 70_000).map(|i| ((i % 2001) as f32 / 1000.0 - 1.0) * 1.2).collect() };
-        let path = std::env::temp_dir().join(format!("recordbox-stems-test-{}.stems", std::process::id()));
+        let folder = tempfile::tempdir().unwrap();
+        let path = folder.path().join("track.stems");
         save(&path, &s).unwrap();
         let back = load(&path).unwrap();
         let _ = std::fs::remove_file(&path);
