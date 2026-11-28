@@ -101,8 +101,8 @@ fn match_lookup_window(app: &mut App, ctx: &Context) {
                         ui.label(path.file_name().unwrap_or_default().to_string_lossy().as_ref()).on_hover_text(path.display().to_string());
                     }
                 });
-                ui.label("Choose a OneTagger CLI that supports lookup --json for your selected services.");
-                ui.hyperlink_to("OneTagger lookup builds and supported services", "https://github.com/fantuz/onetagger/pull/93");
+                ui.label("Apple iTunes and Deezer require OneTagger CLI 2.4.0 or later.");
+                ui.hyperlink_to("Get OneTagger CLI", "https://github.com/fantuz/onetagger/releases");
                 ui.checkbox(analyze_audio, "Also run local track analysis")
                     .on_hover_text("Queues Analyze Track using your current analysis settings. The lookup runs separately.");
             }

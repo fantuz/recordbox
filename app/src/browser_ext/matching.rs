@@ -28,6 +28,14 @@ fn add_people(people: &mut Vec<String>, mut value: String) {
     if value.is_empty() || matches!(value.as_str(), "various artists" | "various" | "unknown artist" | "n/a") {
         return;
     }
+    // Most credits name one artist. Move the normalized name into the result
+    // directly, without scanning it separately for every collaboration marker.
+    if !value.contains([',', ';']) && !value.split(' ').any(|word| {
+        matches!(word, "feat." | "feat" | "ft." | "ft" | "featuring" | "vs." | "vs" | "x" | "&" | "and" | "/")
+    }) {
+        people.push(value);
+        return;
+    }
     for sep in [" feat. ", " feat ", " ft. ", " ft ", " featuring ", " vs. ", " vs ", " x ", " & ", " and ", " / "] {
         if value.contains(sep) {
             value = value.replace(sep, ",");
@@ -43,16 +51,21 @@ fn credits(t: &Track) -> Vec<String> {
     }
     // Credits in a title must follow an explicit featured-artist marker. Names in lyrics,
     // ordinary title words, and substrings such as "Air" in "Airport" are not credits.
-    let title = normalized(&t.title);
-    if title.contains("feat") || title.contains("ft") {
-        let title = format!(" {}", title.replace(['(', '['], " "));
-        if let Some((start, len)) = [" feat. ", " feat ", " ft. ", " ft ", " featuring "]
-            .iter()
-            .filter_map(|marker| title.find(marker).map(|i| (i, marker.len())))
-            .min()
-        {
-            let credit = title[start + len..].split([')', ']', '(']).next().unwrap_or("");
-            add_people(&mut people, credit.split(" - ").next().unwrap_or("").trim().to_owned());
+    // Unicode folding can reveal a featured-artist marker. Plain ASCII titles
+    // without an F cannot contain any marker, so avoid allocating a folded copy.
+    let bytes = t.title.as_bytes();
+    if !bytes.is_ascii() || bytes.contains(&b'f') || bytes.contains(&b'F') {
+        let title = normalized(&t.title);
+        if title.contains("feat") || title.contains("ft") {
+            let title = format!(" {}", title.replace(['(', '['], " "));
+            if let Some((start, len)) = [" feat. ", " feat ", " ft. ", " ft ", " featuring "]
+                .iter()
+                .filter_map(|marker| title.find(marker).map(|i| (i, marker.len())))
+                .min()
+            {
+                let credit = title[start + len..].split([')', ']', '(']).next().unwrap_or("");
+                add_people(&mut people, credit.split(" - ").next().unwrap_or("").trim().to_owned());
+            }
         }
     }
     people.sort_unstable();
@@ -408,7 +421,8 @@ impl App {
                 1 => era_score(a, b).unwrap_or(0.0),
                 3 => assoc().score().unwrap_or(0.0),
                 _ => {
-                    let signals = Signals::new(a, b, sound, self.match_sound(b.id), tags, self.track_tags.get(&b.id));
+                    let candidate_sound = sound.and_then(|_| self.match_sound(b.id));
+                    let signals = Signals::new(a, b, sound, candidate_sound, tags, self.track_tags.get(&b.id));
                     if kind == 2 {
                         signals.mood().unwrap_or(0.0)
                     } else {
@@ -452,15 +466,16 @@ impl App {
         let (left, right) = (self.match_tags(src), self.match_tags(candidate));
         let (a_meta, b_meta) = (Metadata::new(a, left), Metadata::new(b, right));
         let assoc = Association::compare(&a_meta, &b_meta);
+        let k = kind.unwrap_or(0);
+        let sound = if matches!(k, 0 | 2) { self.match_sound(src) } else { None };
         let signals = Signals::new(
             a,
             b,
-            self.match_sound(src),
-            self.match_sound(candidate),
+            sound,
+            sound.and_then(|_| self.match_sound(candidate)),
             self.track_tags.get(&src),
             self.track_tags.get(&candidate),
         );
-        let k = kind.unwrap_or(0);
         let mut reasons = Vec::new();
         if k == 0 && self.is_match(src, candidate) {
             reasons.push("Registered matching pair".to_owned());
@@ -642,6 +657,18 @@ mod tests {
         other.title.clear();
         other.artist = "Various Artists".into();
         assert_eq!(shared(&a, &other), 0);
+    }
+
+    #[test]
+    fn credits_keep_multiword_names_and_fold_featured_artist_markers() {
+        let mut track = Track { artist: "  The Blue Note  ".into(), ..Default::default() };
+        assert_eq!(credits(&track), ["the blue note"]);
+        track.artist = "Air feat. One; Two / Three vs. Four".into();
+        track.title = "Étude [ＦＥＡＴ. Mañana]".into();
+        assert_eq!(credits(&track), ["air", "four", "manana", "one", "three", "two"]);
+        track.artist = "Daft Punk".into();
+        track.title = "Mixtape after midnight".into();
+        assert_eq!(credits(&track), ["daft punk"]);
     }
 
     #[test]

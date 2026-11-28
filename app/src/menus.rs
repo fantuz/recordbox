@@ -410,11 +410,14 @@ fn fill_devices(h: &Handles, app: &App) {
     }
 }
 
-fn sig<T: std::hash::Hash>(v: &T) -> u64 {
-    use std::hash::Hasher;
-    let mut s = std::collections::hash_map::DefaultHasher::new();
-    v.hash(&mut s);
-    s.finish() | 1
+fn menu_signature<T: std::hash::Hash>(items: impl ExactSizeIterator<Item = T>) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut state = std::collections::hash_map::DefaultHasher::new();
+    items.len().hash(&mut state);
+    for item in items {
+        item.hash(&mut state);
+    }
+    state.finish() | 1
 }
 
 pub fn poll(app: &mut App) {
@@ -433,6 +436,9 @@ pub fn apply_edit_commands(app: &mut App, ctx: &egui::Context) {
 }
 
 fn selected(app: &App) -> Vec<i64> {
+    if app.selected.is_empty() {
+        return Vec::new();
+    }
     app.list.iter().copied().filter(|t| app.selected.contains(t)).collect()
 }
 
@@ -552,7 +558,7 @@ pub fn state(app: &App) -> HashMap<&'static str, (bool, bool)> {
 
 /// Whether a submenu can be opened in the app's present state.
 fn sub_state(app: &App) -> [(&'static str, bool); 4] {
-    let has_sel = app.list.iter().any(|t| app.selected.contains(t));
+    let has_sel = !app.selected.is_empty() && app.list.iter().any(|t| app.selected.contains(t));
     let node = current_node(app).map(|n| n.kind != NodeKind::Folder).unwrap_or(false);
     let playlists = app.nodes.iter().any(|n| n.kind == NodeKind::Playlist);
     [("analysis_lock", has_sel), ("add_to_playlist", has_sel && playlists), ("export_track", has_sel && !app.devices.is_empty()), ("export_playlist", node && !app.devices.is_empty())]
@@ -578,12 +584,12 @@ pub fn sync(app: &App) {
             crate::ui_edit::refill_menu(app, mode == 2);
             h.mode = mode;
         }
-        let ps = sig(&app.nodes.iter().map(|n| (n.id, n.parent, n.name.clone(), n.kind == NodeKind::Folder, n.kind == NodeKind::Smart)).collect::<Vec<_>>());
+        let ps = menu_signature(app.nodes.iter().map(|n| (n.id, n.parent, &n.name, n.kind == NodeKind::Folder, n.kind == NodeKind::Smart)));
         if h.playlists_sig != ps {
             fill_playlists(h, app);
             h.playlists_sig = ps;
         }
-        let ds = sig(&app.devices.iter().map(|d| (d.root.clone(), d.name.clone())).collect::<Vec<_>>());
+        let ds = menu_signature(app.devices.iter().map(|d| (&d.root, &d.name)));
         if h.devices_sig != ds {
             fill_devices(h, app);
             h.devices_sig = ds;
@@ -1205,6 +1211,19 @@ mod tests {
         let ctx = egui::Context::default();
         let _ = ctx.run(raw, |ctx| assert_eq!(fullscreen_viewport(ctx), Some((library, true))));
         let _ = ctx.run(egui::RawInput { focused: false, ..Default::default() }, |ctx| assert_eq!(fullscreen_viewport(ctx), None));
+    }
+
+    #[test]
+    fn menu_signature_tracks_renames_and_reordering() {
+        let mut rows = [(1, String::from("Opening")), (2, String::from("Main set"))];
+        let initial = menu_signature(rows.iter());
+        assert_ne!(initial, 0); // zero marks a submenu that has not been populated yet
+        assert_eq!(initial, menu_signature(rows.iter()));
+        rows[1].1.push_str(" B2B");
+        let renamed = menu_signature(rows.iter());
+        assert_ne!(initial, renamed);
+        rows.swap(0, 1);
+        assert_ne!(renamed, menu_signature(rows.iter()));
     }
 
     #[test]

@@ -13,6 +13,7 @@ use std::time::{Duration, Instant};
 pub(crate) const MATCH_LOOKUP_LIMIT: usize = 100;
 const SAVE_RETRY: Duration = Duration::from_millis(150);
 const SAVE_DEADLINE: Duration = Duration::from_secs(5);
+const CANCEL_DRAIN_PER_FRAME: usize = 128;
 
 #[derive(Clone)]
 struct Identity {
@@ -86,10 +87,10 @@ impl Identity {
     /// A second recordbox process can hold the WAL writer lock. Never run the
     /// connection's usual busy wait on the deck UI, or change it for other work.
     fn save_without_wait(&self, db: &mut Db, provider: Provider, tags: &MatchTags) -> Result<Option<(Vec<MatchTags>, bool)>> {
-        let timeout_ms: u64 = db.conn.query_row("PRAGMA busy_timeout", [], |row| row.get(0))?;
+        let timeout_ms: u32 = db.conn.query_row("PRAGMA busy_timeout", [], |row| row.get(0))?;
         db.conn.busy_timeout(Duration::ZERO)?;
         let result = self.save(db, provider, tags);
-        db.conn.busy_timeout(Duration::from_millis(timeout_ms))?;
+        db.conn.busy_timeout(Duration::from_millis(u64::from(timeout_ms)))?;
         result
     }
 }
@@ -157,6 +158,19 @@ impl Worker {
     fn stop(&self) {
         self.cancel.store(true, Ordering::Release);
         self.thread.thread().unpark();
+    }
+
+    fn next_event(&self, cancelled: bool) -> Result<Event, mpsc::TryRecvError> {
+        let mut event = self.rx.try_recv();
+        if cancelled {
+            // Duplicate rows can have a whole batch of pending hits. These can
+            // be discarded immediately. Preserve the report and yield on empty.
+            for _ in 1..CANCEL_DRAIN_PER_FRAME {
+                if !matches!(&event, Ok(e) if !matches!(e, Event::End(_))) { break; }
+                event = self.rx.try_recv();
+            }
+        }
+        event
     }
 }
 
@@ -483,8 +497,8 @@ impl App {
             }
             return;
         }
-        let received = worker.rx.try_recv();
         let cancelled = worker.cancel.load(Ordering::Acquire);
+        let received = worker.next_event(cancelled);
         match received {
             Err(mpsc::TryRecvError::Empty) => return,
             Ok(Event::Started(provider, title)) if !cancelled => {
@@ -502,12 +516,13 @@ impl App {
             Ok(Event::End(_)) | Err(mpsc::TryRecvError::Disconnected) => {
                 let e = &mut self.match_enrichment;
                 let report = received.ok().and_then(|ev| if let Event::End(r) = ev { Some(r) } else { None });
-                let reason = e.error.take().unwrap_or_else(|| {
-                    if cancelled { "Cancelled".into() }
-                    else if report.is_none() { "Worker stopped unexpectedly".into() }
-                    else if report.as_ref().is_some_and(|r| r.stats.iter().any(|s| s.paused.is_some())) { "Finished with provider pauses".into() }
-                    else { "Complete".into() }
-                });
+                let outcome = if e.error.is_some() { "Stopped" }
+                    else if cancelled { "Cancelled" }
+                    else if report.is_none() { "Worker stopped unexpectedly" }
+                    else if report.as_ref().is_some_and(|r| r.stats.iter().any(|s| s.paused.is_some())) { "Finished with provider pauses" }
+                    else { "Complete" };
+                let toast = format!("OneTagger · {outcome} · {} saved", e.saved);
+                let reason = e.error.take().unwrap_or_else(|| outcome.to_owned());
                 e.worker.take();
                 e.status = format!("OneTagger · {reason}. Saved {} source records. Skipped {} ineligible or fully cached tracks.", e.saved, e.eligible_skips);
                 if let Some(report) = report {
@@ -524,7 +539,7 @@ impl App {
                         e.status.push('.');
                     }
                 }
-                self.toast(self.match_enrichment.status.clone());
+                self.toast(toast);
                 return;
             }
             _ => {}
@@ -584,10 +599,14 @@ mod tests {
         app.reload_tracks();
         let key = Identity::new(&t);
         let other = rusqlite::Connection::open(app.db.active_library_path())?;
-        let (tx, rx) = mpsc::channel();
-        app.match_enrichment.worker = Some(Worker {
-            rx, cancel: Arc::new(AtomicBool::new(false)), thread: thread::spawn(|| ()), discarded: false,
-        });
+        let test_worker = || {
+            let (tx, rx) = mpsc::channel();
+            let worker = Worker { rx, cancel: Arc::new(AtomicBool::new(false)), thread: thread::spawn(|| ()), discarded: false };
+            (tx, worker)
+        };
+        let (tx, worker) = test_worker();
+        app.match_enrichment.worker = Some(worker);
+        app.match_enrichment.sources = Provider::ALL.to_vec();
         app.db.conn.busy_timeout(Duration::from_millis(4321))?;
         let send_hit = |p| tx.send(Event::Hit(key.clone(), p, provider_tags(p))).unwrap();
         other.execute_batch("BEGIN IMMEDIATE")?;
@@ -596,7 +615,7 @@ mod tests {
         app.poll_match_enrichment();
         assert!(start.elapsed() < Duration::from_secs(1), "the frame waited on the writer lock");
         assert!(app.match_tags(t.id).is_empty());
-        assert_eq!(app.db.conn.query_row("PRAGMA busy_timeout", [], |r| r.get::<_, u64>(0))?, 4321);
+        assert_eq!(app.db.conn.query_row("PRAGMA busy_timeout", [], |r| r.get::<_, u32>(0))?, 4321);
         other.execute_batch("ROLLBACK")?;
         app.match_enrichment.pending_save.as_mut().unwrap().retry_at = Instant::now();
         app.poll_match_enrichment();
@@ -615,7 +634,17 @@ mod tests {
         assert!(app.match_enrichment.pending_save.is_none());
         assert!(app.match_enrichment.worker.as_ref().unwrap().cancel.load(Ordering::Acquire));
         other.execute_batch("ROLLBACK")?;
-        send_hit(Provider::Deezer);
+        for _ in 0..MATCH_LOOKUP_LIMIT { send_hit(Provider::Deezer); }
+        tx.send(Event::End(Report { stats: Provider::ALL.iter().map(|_| ProviderStats::default()).collect(), attempted_tracks: 1, blocked_tracks: 0 })).unwrap();
+        app.poll_match_enrichment();
+        assert!(!app.match_enrichment_running(), "canceled replies held the report behind one UI frame per hit");
+        assert!(app.match_enrichment_status().contains("library stayed busy"));
+        assert!(app.match_enrichment_status().contains("Deezer · 0 hits"));
+        assert_eq!(app.toasts.last().unwrap().text, "OneTagger · Stopped · 1 saved");
+
+        let (old_catalog, worker) = test_worker();
+        app.match_enrichment.worker = Some(worker);
+        old_catalog.send(Event::Hit(key, Provider::Deezer, provider_tags(Provider::Deezer))).unwrap();
         app.reset_match_enrichment();
         app.poll_match_enrichment();
         assert!(app.match_enrichment_status().is_empty());
