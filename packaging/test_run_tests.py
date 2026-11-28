@@ -42,6 +42,15 @@ class ApplicationSuiteTests(unittest.TestCase):
         self.assertTrue(accepts_suite(NATIVE_LOG.replace("... 2026-11-19", "... \n2026-11-19"), 0))
         self.assertTrue(accepts_suite(NATIVE_LOG.replace("lock=0\nok", "lock=0\nerror: expected wrong key\nok"), 0))
 
+    def test_a_nested_filtered_child_summary_must_stay_out_of_the_full_suite_log(self):
+        name = "stem_export::tests::offdeck_export_reads_the_model_cache_and_rejects_incomplete_parts"
+        outer = LOG.replace("backup::tests::backup_restore_round_trip", name)
+        child = (f"\nrunning 1 test\ntest {name} ... ok\n\n"
+                 "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; "
+                 "972 filtered out; finished in 0.01s\n\n")
+        self.assertFalse(accepts_suite(outer.replace(f"test {name} ... ok", f"test {name} ... {child}ok"), 0))
+        self.assertTrue(accepts_suite(outer, 0))
+
     def test_native_test_still_requires_its_own_completion_before_next_test_or_summary(self):
         missing_completion = NATIVE_LOG.replace("lock=0\nok", "lock=0")
         self.assertFalse(accepts_suite(missing_completion, 0))

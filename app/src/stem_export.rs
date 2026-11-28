@@ -1204,18 +1204,21 @@ mod tests {
 
     #[test]
     fn offdeck_export_reads_the_model_cache_and_rejects_incomplete_parts() {
+        const TEST: &str = "stem_export::tests::offdeck_export_reads_the_model_cache_and_rejects_incomplete_parts";
         if std::env::var_os("RECORDBOX_TEST_STEM_EXPORT_CACHE").is_none() {
             let d = tempfile::tempdir().unwrap();
-            let status = std::process::Command::new(std::env::current_exe().unwrap())
-                .args([
-                    "--exact",
-                    "stem_export::tests::offdeck_export_reads_the_model_cache_and_rejects_incomplete_parts",
-                ])
+            let child = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", TEST])
                 .env("PREPDECK_DATA", d.path())
                 .env("RECORDBOX_TEST_STEM_EXPORT_CACHE", "1")
-                .status()
+                .output()
                 .unwrap();
-            assert!(status.success());
+            let stdout = String::from_utf8_lossy(&child.stdout);
+            assert!(
+                child.status.success() && stdout.lines().any(|line| line.starts_with("test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; ")),
+                "Isolated STEMS cache test failed\n{stdout}\n{}",
+                String::from_utf8_lossy(&child.stderr)
+            );
             return;
         }
         let d = tempfile::tempdir().unwrap();
@@ -1271,6 +1274,8 @@ mod tests {
 
     #[test]
     fn offdeck_queue_keeps_cues_key_and_grid_through_waveform_analysis() -> anyhow::Result<()> {
+        use anyhow::Context;
+
         const TEST: &str = "stem_export::tests::offdeck_queue_keeps_cues_key_and_grid_through_waveform_analysis";
         if std::env::var_os("RECORDBOX_TEST_STEM_EXPORT_QUEUE").is_none() {
             let profile = tempfile::tempdir()?;
@@ -1288,6 +1293,14 @@ mod tests {
             return Ok(());
         }
         let d = tempfile::tempdir()?;
+        let export_dir = d.path().join("exports");
+        #[cfg(unix)]
+        {
+            // Exercise the same path aliasing as macOS's /var and /private/var on Linux CI.
+            let physical_dir = d.path().join("exported files");
+            std::fs::create_dir(&physical_dir)?;
+            std::os::unix::fs::symlink(physical_dir, &export_dir)?;
+        }
         let (path, parts) = source(d.path(), 44100 * 3, 2, 16);
         let mut app = App::open_library(
             &Default::default(),
@@ -1299,7 +1312,7 @@ mod tests {
         );
         app.prefs.stemx = StemExportPrefs {
             format: 1,
-            dir: d.path().to_string_lossy().into_owned(),
+            dir: export_dir.to_string_lossy().into_owned(),
             explain: false,
             ..Default::default()
         };
@@ -1343,11 +1356,14 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
         assert!(app.deck.track.is_none() && app.stem.separating.is_none());
-        let added = app
+        anyhow::ensure!(app.stemx.failed == 0, "Stem export queue failed: {}", app.stemx.last_error);
+        let expected = export_dir.join("Source (Vocals).wav");
+        let published = expected.canonicalize().with_context(|| format!("No published file at {}", expected.display()))?;
+        let track = app
             .db
-            .track_by_path(&d.path().join("Source (Vocals).wav").to_string_lossy())
-            .expect("exported track");
-        let track = app.db.track(added).unwrap();
+            .track_at_path(&published.to_string_lossy())?
+            .with_context(|| format!("Published file missing from collection: {}", published.display()))?;
+        let added = track.id;
         assert_eq!((track.key, track.rating, track.bpm, track.analyzed), (11, 4, 137.5, 1));
         assert!(app.db.has_wave(added)?);
         assert_eq!(app.db.grid(added).unwrap(), grid);
