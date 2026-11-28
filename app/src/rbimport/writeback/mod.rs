@@ -95,6 +95,7 @@ impl Edit {
             Self::Key(n) if *n < 0 => "Unset".into(),
             Self::Key(n) => key_name(*n, false),
             Self::Cues(c) => c.summary(),
+            Self::Grid(g) if g.has_listed_beats() => format!("{} individually timed beats", g.anchors.len()),
             Self::Grid(g) => match g.anchors.first() {
                 Some(a) => format!(
                     "{:.3} s, beat {}, {:.2} BPM ({} anchors)",

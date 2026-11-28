@@ -252,7 +252,13 @@ fn conflict_range(env: &Uba, list: &[BeatInfo], offset: i32, bpm: f32, st10: &[i
     (v2737 as i64, v2738 as i64, v2739 as i64, v2741, v2742)
 }
 
+#[cfg(test)]
 pub fn analyze_focus(env: &Uba, inp: &FocusInput) -> Result<FocusOutput, &'static str> {
+    analyze_focus_cancellable(env, inp, &|| false)
+}
+
+pub(super) fn analyze_focus_cancellable(env: &Uba, inp: &FocusInput, cancelled: &dyn Fn() -> bool) -> Result<FocusOutput, &'static str> {
+    if cancelled() { return Err(NO_INPUT); }
     let a3 = inp.legacy_count;
     let a4 = inp.legacy_bpm100;
     let a6 = inp.madmom.len() as i32;
@@ -293,7 +299,7 @@ pub fn analyze_focus(env: &Uba, inp: &FocusInput) -> Result<FocusOutput, &'stati
         list.push(BeatInfo { pos, zero: 0, interval: v87 as f32, num, minus1: -1, flag: false });
     }
     if inp.hendou || v81 != 4 {
-        let out = super::focus2::analyze(list, inp.sr, a7, bpm72, inp.total)?;
+        let out = super::focus2::analyze_cancellable(list, inp.sr, a7, bpm72, inp.total, cancelled)?;
         let bpm100 = (out.bpm72 * 100.0 + 0.5) as i32;
         let beats = out.list.iter().map(|b| (b.pos, b.num, (6_000_000.0f32 / b.interval + 0.5) as i32)).collect();
         return Ok(FocusOutput { beats, bpm100, adaptive: true, flag, #[cfg(test)] csv });

@@ -584,7 +584,7 @@ mod tests {
 
     #[test]
     fn cue_tendency() {
-        let grid = |first: f64, bpm: f64| BeatGrid { anchors: vec![GridAnchor { time: first, bpm, beat: 1 }] };
+        let grid = |first: f64, bpm: f64| BeatGrid::from_anchors(vec![GridAnchor { time: first, bpm, beat: 1 }]);
         let cue = |kind: CueKind, slot: i32, start: f64| Cue { id: 0, track_id: 0, kind, slot, start, end: None, color: 0, comment: String::new(), active_loop: false };
         // 120 BPM: a bar is 2 s. Hot A on the first downbeat, B at bar 16; memory cue at bar 32.
         let t1 = (grid(0.5, 120.0), 300.0, vec![cue(CueKind::Hot, 0, 0.5), cue(CueKind::Hot, 1, 32.5), cue(CueKind::Memory, -1, 64.5)]);

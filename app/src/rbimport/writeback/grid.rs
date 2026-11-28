@@ -630,6 +630,10 @@ pub fn plan(
     owner_id: &str,
     registered_embedding: Option<[u8; 32]>,
 ) -> Result<Vec<FileChange>> {
+    ensure!(
+        !desired.has_listed_beats(),
+        "A locally analyzed per-beat grid requires native reanalysis in AlphaTheta Rekordbox. Desktop write-back supports reviewed edits to existing native tempo segments."
+    );
     let owner = (&baseline.grid != desired).then_some((owner_id, registered_embedding));
     let mut native = native_grid(share, analysis_path, owner)?;
     ensure!(
@@ -777,6 +781,19 @@ mod tests {
         fs::write(dat.with_extension("EXT"), files.ext).unwrap();
         fs::write(dat.with_extension("2EX"), files.ex2).unwrap();
         (root, share, dat)
+    }
+
+    #[test]
+    fn per_beat_grid_cannot_be_mistaken_for_a_native_segment_edit() -> Result<()> {
+        let (_root, share, dat) = fixture();
+        let baseline = inspect(&share, LOCATION)?;
+        // Even an identical first beat and tempo do not prove identical native beat rows.
+        let per_beat = BeatGrid::from_listed(baseline.grid.anchors.clone());
+        let bytes = fs::read(&dat)?;
+        let err = plan(&share, LOCATION, &baseline, &per_beat).err().expect("expected a blocked plan");
+        assert!(err.to_string().contains("per-beat grid"), "{err}");
+        assert_eq!(fs::read(&dat)?, bytes);
+        Ok(())
     }
 
     #[test]

@@ -955,11 +955,8 @@ fn add_track(
     track.color = src.color;
     track.artwork = src.artwork.clone();
     let id = db.insert_track(&track)?;
-    if let Some(mut grid) = db.grid_checked(src.id)? {
-        for anchor in &mut grid.anchors {
-            anchor.time += shift;
-        }
-        db.save_grid(id, &grid)?;
+    if let Some(grid) = db.grid_checked(src.id)? {
+        db.save_grid(id, &grid.shifted(shift))?;
     }
     for c in db.cues(src.id)? {
         db.save_cue(&Cue {
@@ -1383,7 +1380,11 @@ mod tests {
         let db = crate::db::Db::open(&d.path().join("library.db"))?;
         let mut src = crate::importer::read_track(Path::new(&original));
         src.id = db.insert_track(&src)?;
-        db.save_grid(src.id, &BeatGrid::constant(0.2, 128.0, 1))?;
+        let source_grid = BeatGrid::from_listed(vec![
+            crate::model::GridAnchor { time: 0.2, bpm: 128.0, beat: 1 },
+            crate::model::GridAnchor { time: 0.83, bpm: 128.0, beat: 2 },
+        ]);
+        db.save_grid(src.id, &source_grid)?;
         db.save_cue(&Cue {
             id: 0,
             track_id: src.id,
@@ -1410,7 +1411,11 @@ mod tests {
         db.conn.execute_batch("DROP TRIGGER reject_link")?;
         let id = add_track(&db, &src, &exported, Part::Vocals, 0.05, None, None, Some(pl))?;
         assert_eq!(db.cues(id)?[0].start, 0.4 + 0.05);
-        assert_eq!(db.grid(id).unwrap().anchors[0].time, 0.2 + 0.05);
+        let derived_grid = db.grid_checked(id)?.unwrap();
+        assert!(derived_grid.has_listed_beats());
+        assert_eq!(derived_grid.beats(4.0).iter().map(|b| (b.time, b.beat)).collect::<Vec<_>>(),
+            vec![(0.2 + 0.05, 1), (0.83 + 0.05, 2)]);
+        assert_eq!(db.grid_checked(src.id)?.unwrap(), source_grid);
         assert_eq!(db.setting(&link_key(id)), Some(format!("{}:vocals", src.id)));
         assert_eq!(db.playlist_tracks(pl)?, vec![src.id, id]);
         Ok(())

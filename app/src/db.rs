@@ -689,6 +689,8 @@ impl Db {
     pub(crate) fn missing_grids(&self, ids: &[i64]) -> Result<Vec<i64>> {
         #[derive(serde::Deserialize)]
         struct GridPresence {
+            #[serde(default, rename = "beat_list_signature")]
+            _beat_list_signature: u64,
             #[serde(deserialize_with = "read_anchors")]
             anchors: bool,
         }

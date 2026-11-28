@@ -344,7 +344,7 @@ fn grid_from(st: &Stages, sr: u32, dynamic: bool, duration: f64, bpm_min: f64, b
             }
             prev_t = t;
         }
-        BeatGrid { anchors }
+        BeatGrid::from_anchors(anchors)
     };
     let (lo, hi) = ((bpm_min * 100.0).round() as i32, (bpm_max * 100.0).round() as i32);
     if v19 < lo || v19 > hi {

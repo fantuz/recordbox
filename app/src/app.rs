@@ -986,7 +986,7 @@ mod related_tests {
 /// match the import. Allow floating-point round trips through the library.
 /// Sub-millisecond timing and fractional BPM edits belong to the saved grid.
 pub fn grids_match(a: &BeatGrid, b: &BeatGrid) -> bool {
-    a.anchors.len() == b.anchors.len() && a.anchors.iter().zip(&b.anchors).all(|(x, y)| {
+    a.has_listed_beats() == b.has_listed_beats() && a.anchors.len() == b.anchors.len() && a.anchors.iter().zip(&b.anchors).all(|(x, y)| {
         x.beat == y.beat && (x.time - y.time).abs() <= 1e-9 && (x.bpm - y.bpm).abs() <= 1e-9
     })
 }
@@ -4711,12 +4711,16 @@ impl App {
         if !self.grid_editable() {
             return;
         }
-        let mut g = self.deck.grid.clone();
         let from = if self.prefs.grid_from_current { self.anchor_at(self.pos()) } else { 0 };
-        for a in g.anchors.iter_mut().skip(from) {
-            a.time += secs;
+        if from == 0 {
+            self.push_grid(self.deck.grid.shifted(secs));
+        } else {
+            let mut g = self.deck.grid.clone();
+            for a in g.anchors.iter_mut().skip(from) {
+                a.time += secs;
+            }
+            self.push_grid(g);
         }
-        self.push_grid(g);
     }
     pub fn grid_scale_bpm(&mut self, f: impl Fn(f64) -> f64) {
         if !self.grid_editable() {
@@ -4738,7 +4742,7 @@ impl App {
         } else {
             // Whole track: one tempo, keeping the beat nearest the playhead in place.
             let bpm = f(g.anchors[self.anchor_at(b.time)].bpm).clamp(40.0, 499.0);
-            g = BeatGrid { anchors: vec![GridAnchor { time: b.time, bpm, beat: b.beat }] };
+            g = BeatGrid::from_anchors(vec![GridAnchor { time: b.time, bpm, beat: b.beat }]);
         }
         self.push_grid(g);
     }

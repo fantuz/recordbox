@@ -492,7 +492,7 @@ fn oracle_a6_real_pqt2_sections_are_regenerated_from_their_pqtz() {
 
 #[test]
 fn a6_tracks_recordbox_analysed_always_get_pqt2() {
-    let grid = BeatGrid { anchors: vec![GridAnchor { time: 0.025_850, bpm: 127.999_25, beat: 1 }] };
+    let grid = BeatGrid::from_anchors(vec![GridAnchor { time: 0.025_850, bpm: 127.999_25, beat: 1 }]);
     let beats = grid.beats(60.0);
     let files = anlz::build("/Contents/a/b/c.mp3", &beats, &Waveform::default(), &[], 44100 * 60, 44100);
     let tags: Vec<String> = anlz::section_list(&files.ext).into_iter().map(|s| s.0).collect();
@@ -583,7 +583,7 @@ fn a7_pcp2_carries_loop_sizes_and_sub_millisecond_fractions() {
 #[test]
 fn a8_track_row_values() {
     // Average tempo of a grid with several anchors: beats ÷ time.
-    let g = BeatGrid { anchors: vec![GridAnchor { time: 0.0, bpm: 120.0, beat: 1 }, GridAnchor { time: 60.0, bpm: 140.0, beat: 1 }] };
+    let g = BeatGrid::from_anchors(vec![GridAnchor { time: 0.0, bpm: 120.0, beat: 1 }, GridAnchor { time: 60.0, bpm: 140.0, beat: 1 }]);
     let t = row_tempo(Some(&g), 120.0, 0.0);
     assert!((12_950..=13_050).contains(&t), "average of one minute at 120 and one at 140 is 130, got {t}");
     assert_eq!(row_tempo(Some(&BeatGrid::constant(0.0, 128.0, 1)), 200.0, 0.0), 12_800);

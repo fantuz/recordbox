@@ -66,7 +66,7 @@ fn network_beats(net: &Net, dbn: &Dbn, samples: &[f32], sr: u32, len: usize, can
             let mono: Vec<_> = samples[2 * start..2 * (start + count)].chunks_exact(2)
                 .map(|lr| (lr[1] + lr[0]) * 0.5).collect();
             if cancelled() { return None; }
-            net.run(&mono)
+            net.run_cancellable(&mono, cancelled)?
         };
         if cancelled() { return None; }
         let offset = if nearest {

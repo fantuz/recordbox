@@ -481,7 +481,7 @@ fn finish_grid(t: &mut XmlTrack, tempos: &[(f64, f64, u8)]) {
         }
         anchors.push(GridAnchor { time: *time, bpm: *bpm, beat: (*beat).clamp(1, 4) });
     }
-    t.grid = Some(BeatGrid { anchors });
+    t.grid = Some(BeatGrid::from_anchors(anchors));
 }
 
 #[cfg(test)]

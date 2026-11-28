@@ -151,11 +151,12 @@ PREPDECK_PATHS="$PWD/tracks.txt" PREPDECK_N=3 cargo test --manifest-path app/Car
 
 ## High-precision beat grids
 
-Turn on **Preferences → Analysis → Track Analysis → Use high precision BeatGrid
-analysis** to refine beat times and fractional BPM using repeated attacks in the
-audio. **Normal** fits a steady tempo. **Dynamic** refines each detected tempo
+Turn on **Preferences → Analysis → Track Analysis → High precision: refine beat timing**
+to refine beat times and fractional BPM using repeated attacks in the audio. **Normal** fits a steady tempo. **Dynamic** refines each detected tempo
 segment and preserves the beat numbering across changes. The option starts off,
 including when upgrading from a version that showed an inactive switch.
+
+**Use installed beat grid model** is a separate option in the same panel. It uses compatible local beat-model files and the CPU. On eligible tracks up to 15 minutes, Normal can recognize changes in tempo and Dynamic follows changing tempo throughout. If the model files or a usable result are unavailable, recordbox uses the selected ordinary estimator. To use an existing model installation outside the default macOS path, set `PREPDECK_RB_MODELS` to its `detect_beat` directory before starting recordbox. The application does not download these files. This option works independently of the GPU backend selected for STEMS.
 
 New analyses use the setting immediately. For an already analyzed track, select
 **BPM / Grid** and choose **Track → Analyze Track**. Automatic analysis preserves
