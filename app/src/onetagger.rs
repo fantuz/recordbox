@@ -137,6 +137,10 @@ fn valid_text(s: &str) -> bool {
     !s.trim().is_empty() && s.len() <= MAX_TEXT_BYTES && !s.chars().any(char::is_control)
 }
 
+pub(crate) fn valid_query(artist: &str, title: &str) -> bool {
+    valid_text(artist.trim()) && valid_text(title.trim())
+}
+
 fn identity(s: &str) -> String {
     s.split_whitespace()
         .collect::<Vec<_>>()
@@ -311,7 +315,7 @@ fn lookup_with_timeout(
         title: title.trim(),
     };
     ensure!(
-        valid_text(request.artist) && valid_text(request.title),
+        valid_query(request.artist, request.title),
         "A lookup requires an artist and title of up to 512 UTF-8 bytes each"
     );
 

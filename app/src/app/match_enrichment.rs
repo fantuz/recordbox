@@ -1,7 +1,7 @@
 //! Optional provider evidence belongs to the private catalog. The worker only sees
 //! the chosen artist/title; the UI applies replies to their original catalog rows.
 use super::App;
-use crate::{db::Db, model::Track, onetagger::{MatchTags, Provider, ProviderError}};
+use crate::{db::Db, model::Track, onetagger::{valid_query, MatchTags, Provider, ProviderError}};
 use anyhow::Result;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -11,6 +11,8 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 pub(crate) const MATCH_LOOKUP_LIMIT: usize = 100;
+const SAVE_RETRY: Duration = Duration::from_millis(150);
+const SAVE_DEADLINE: Duration = Duration::from_secs(5);
 
 #[derive(Clone)]
 struct Identity {
@@ -80,6 +82,16 @@ impl Identity {
         existing.push(tags.clone());
         Ok(Some((existing, true)))
     }
+
+    /// A second recordbox process can hold the WAL writer lock. Never run the
+    /// connection's usual busy wait on the deck UI, or change it for other work.
+    fn save_without_wait(&self, db: &mut Db, provider: Provider, tags: &MatchTags) -> Result<Option<(Vec<MatchTags>, bool)>> {
+        let timeout_ms: u64 = db.conn.query_row("PRAGMA busy_timeout", [], |row| row.get(0))?;
+        db.conn.busy_timeout(Duration::ZERO)?;
+        let result = self.save(db, provider, tags);
+        db.conn.busy_timeout(Duration::from_millis(timeout_ms))?;
+        result
+    }
 }
 
 type Evidence = HashMap<i64, (Identity, Vec<MatchTags>)>;
@@ -94,10 +106,12 @@ struct Request {
 }
 
 fn selected_query(t: &Track, sources: &[Provider], cached: Option<&(Identity, Vec<MatchTags>)>) -> Option<Request> {
-    if t.artist.trim().is_empty() || t.title.trim().is_empty() { return None; }
+    if t.title.trim().is_empty() { return None; }
     let saved = cached.filter(|(key, _)| key.matches(t)).map_or(&[][..], |(_, tags)| tags.as_slice());
     let missing: Vec<_> = sources.iter().copied().filter(|p| !has_provider(saved, *p)).collect();
-    (!missing.is_empty()).then(|| Request { key: Identity::new(t), missing })
+    if missing.is_empty() { return None; }
+    let key = Identity::new(t);
+    valid_query(&key.artist, &key.lookup_title()).then_some(Request { key, missing })
 }
 
 fn load_evidence(conn: &rusqlite::Connection, id: Option<i64>) -> Result<Evidence> {
@@ -136,6 +150,7 @@ struct Worker {
     rx: mpsc::Receiver<Event>,
     cancel: Arc<AtomicBool>,
     thread: JoinHandle<()>,
+    discarded: bool,
 }
 
 impl Worker {
@@ -149,6 +164,7 @@ impl Worker {
 pub(super) struct Enrichment {
     evidence: Evidence,
     worker: Option<Worker>,
+    pending_save: Option<PendingSave>,
     status: String,
     total: usize,
     checked: usize,
@@ -180,6 +196,21 @@ struct ProviderStats {
     misses: usize,
     skipped: usize,
     paused: Option<String>,
+}
+
+struct PendingSave {
+    key: Identity,
+    provider: Provider,
+    tags: MatchTags,
+    retry_at: Instant,
+    expires: Instant,
+}
+
+impl PendingSave {
+    fn new(key: Identity, provider: Provider, tags: MatchTags) -> Self {
+        let now = Instant::now();
+        Self { key, provider, tags, retry_at: now, expires: now + SAVE_DEADLINE }
+    }
 }
 fn provider_index(provider: Provider) -> usize {
     Provider::ALL.iter().position(|p| *p == provider).expect("registered provider")
@@ -302,19 +333,32 @@ impl App {
         self.ext.panel_cache = [None, None];
     }
 
-    pub(crate) fn match_enrichment_running(&self) -> bool { self.match_enrichment.worker.is_some() }
-    pub(crate) fn match_enrichment_status(&self) -> String { self.match_enrichment.status.clone() }
+    pub(crate) fn match_enrichment_running(&self) -> bool { self.match_enrichment.worker.as_ref().is_some_and(|w| !w.discarded) }
+    pub(crate) fn match_enrichment_status(&self) -> &str { &self.match_enrichment.status }
+
+    /// Called on the UI thread before replacing the catalog. All writes run on
+    /// this thread, so abandoning old replies here also fences out later writes.
+    pub(crate) fn reset_match_enrichment(&mut self) {
+        if let Some(worker) = &mut self.match_enrichment.worker {
+            worker.stop();
+            worker.discarded = true;
+        }
+        self.match_enrichment.pending_save = None;
+        self.match_enrichment.status.clear();
+    }
 
     pub(crate) fn cancel_match_enrichment(&mut self) {
-        if let Some(worker) = &self.match_enrichment.worker {
+        if let Some(worker) = self.match_enrichment.worker.as_ref().filter(|w| !w.discarded) {
             worker.stop();
+            self.match_enrichment.pending_save = None;
             self.match_enrichment.status = "Stopping OneTagger lookup…".into();
         }
     }
 
     pub(crate) fn queue_match_enrichment(&mut self, ids: &[i64], cli: &Path, providers: &[Provider]) {
-        if self.match_enrichment_running() {
-            self.toast("A OneTagger lookup is already running.");
+        if let Some(worker) = &self.match_enrichment.worker {
+            self.toast(if worker.discarded { "The previous lookup is stopping. Try again in a moment." }
+                else { "A OneTagger lookup is already running." });
             return;
         }
         if ids.len() > MATCH_LOOKUP_LIMIT {
@@ -345,7 +389,7 @@ impl App {
             if let Some(query) = query { requests.push(query); } else { skipped += 1; }
         }
         if requests.is_empty() {
-            let msg = "No tracks to look up. Results are already saved, or the selected tracks lack an artist or title.";
+            let msg = "No tracks to look up. Results are already saved, or the artist and title (including mix name) are empty, contain control characters, or exceed 512 UTF-8 bytes each.";
             self.match_enrichment.status = msg.into();
             self.toast(msg);
             return;
@@ -368,7 +412,7 @@ impl App {
         }) {
             Ok(thread) => {
                 let e = &mut self.match_enrichment;
-                e.worker = Some(Worker { rx, cancel, thread });
+                e.worker = Some(Worker { rx, cancel, thread, discarded: false });
                 e.status = format!("OneTagger lookup queued for {total} track(s).");
                 e.total = total;
                 e.saved = 0;
@@ -387,8 +431,58 @@ impl App {
         }
     }
 
+    fn save_match_hit(&mut self, mut hit: PendingSave) {
+        if !self.track(hit.key.id).is_some_and(|t| hit.key.matches(t)) {
+            self.match_enrichment.stale += 1;
+            return;
+        }
+        match hit.key.save_without_wait(&mut self.db, hit.provider, &hit.tags) {
+            Ok(Some((saved, fresh))) => {
+                self.match_enrichment.evidence.insert(hit.key.id, (hit.key, saved));
+                self.match_enrichment.saved += usize::from(fresh);
+                self.match_evidence_updated();
+            }
+            Ok(None) => self.match_enrichment.stale += 1,
+            Err(error) => {
+                let busy = error.downcast_ref::<rusqlite::Error>().and_then(|e| e.sqlite_error_code())
+                    .is_some_and(|e| matches!(e, rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked));
+                let now = Instant::now();
+                if busy && now < hit.expires {
+                    hit.retry_at = (now + SAVE_RETRY).min(hit.expires);
+                    self.ctx.request_repaint_after(hit.retry_at - now);
+                    self.match_enrichment.status = "Waiting to save OneTagger results. Another library write is active.".into();
+                    self.match_enrichment.pending_save = Some(hit);
+                } else {
+                    self.match_enrichment.error = Some(if busy {
+                        "The library stayed busy for 5 seconds. Retry the lookup after the other write finishes".into()
+                    } else { error.to_string() });
+                    self.cancel_match_enrichment();
+                }
+            }
+        }
+    }
+
     pub(crate) fn poll_match_enrichment(&mut self) {
         let Some(worker) = &self.match_enrichment.worker else { return };
+        if worker.discarded {
+            if worker.thread.is_finished() {
+                self.match_enrichment.worker.take();
+            } else {
+                self.ctx.request_repaint_after(SAVE_RETRY);
+            }
+            return;
+        }
+        if let Some(hit) = self.match_enrichment.pending_save.take() {
+            let remaining = hit.retry_at.saturating_duration_since(Instant::now());
+            if !remaining.is_zero() {
+                self.match_enrichment.pending_save = Some(hit);
+                self.ctx.request_repaint_after(remaining);
+            } else {
+                self.save_match_hit(hit);
+                if self.match_enrichment.pending_save.is_none() { self.ctx.request_repaint(); }
+            }
+            return;
+        }
         let received = worker.rx.try_recv();
         let cancelled = worker.cancel.load(Ordering::Acquire);
         match received {
@@ -398,23 +492,8 @@ impl App {
                 e.status = format!("OneTagger · {} · track {} of {} · {title}", provider.name(), e.checked + 1, e.total);
             }
             Ok(Event::Hit(key, provider, tags)) if !cancelled => {
-                if self.track(key.id).is_some_and(|t| key.matches(t)) {
-                    match key.save(&mut self.db, provider, &tags) {
-                        Ok(Some((saved, fresh))) => {
-                            self.match_enrichment.evidence.insert(key.id, (key, saved));
-                            self.match_enrichment.saved += usize::from(fresh);
-                            self.ext.panel_cache = [None, None];
-                            self.list_dirty = true;
-                        }
-                        Ok(None) => self.match_enrichment.stale += 1,
-                        Err(e) => {
-                            self.match_enrichment.error = Some(e.to_string());
-                            self.cancel_match_enrichment();
-                        }
-                    }
-                } else {
-                    self.match_enrichment.stale += 1;
-                }
+                self.save_match_hit(PendingSave::new(key, provider, tags));
+                if self.match_enrichment.pending_save.is_some() { return; }
             }
             Ok(Event::Checked(n)) if !cancelled => self.match_enrichment.checked += n,
             Ok(Event::Paused(provider, why)) if !cancelled => {
@@ -470,6 +549,78 @@ mod tests {
 
     fn provider_tags(provider: Provider) -> MatchTags {
         MatchTags { provider: provider.name().into(), genres: vec!["House".into()], ..MatchTags::default() }
+    }
+
+    #[test]
+    fn invalid_catalog_text_skips_only_its_own_track_including_a_long_mix_name() {
+        let mut long_mix = song("/long", "Track");
+        long_mix.mix_name = "東".repeat(170);
+        let rows = [song("/control", "bad\ntrack"), long_mix, song("/valid", "Good mix")];
+        let sources = [Provider::Itunes];
+        let requests = rows.iter().filter_map(|t| selected_query(t, &sources, None)).collect();
+        let mut looked_up = Vec::new();
+        run_batch(requests, &sources, &AtomicBool::new(false), |_| true, |_| Turn::Ready(()),
+            |_, _, title| { looked_up.push(title.to_owned()); Ok(None) });
+        assert_eq!(looked_up, ["Good mix"]);
+    }
+
+    #[test]
+    fn a_contended_save_yields_to_the_ui_and_rechecks_cancellation_and_catalog_reset() -> Result<()> {
+        // App::open_library uses PREPDECK_DATA. Isolate it from parallel tests
+        // and from the developer's real catalog without modifying process globals.
+        const CHILD: &str = "RECORDBOX_LOOKUP_CONTENTION_FIXTURE";
+        if std::env::var_os(CHILD).is_none() {
+            let profile = tempfile::tempdir()?;
+            let output = std::process::Command::new(std::env::current_exe()?)
+                .args(["a_contended_save_yields_to_the_ui_and_rechecks_cancellation_and_catalog_reset", "--nocapture"])
+                .env(CHILD, "1").env("PREPDECK_DATA", profile.path()).output()?;
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            anyhow::ensure!(output.status.success() && stdout.contains("1 passed"), "{stdout}\n{}", String::from_utf8_lossy(&output.stderr));
+            return Ok(());
+        }
+        let mut app = App::open_library(&Default::default(), None, crate::DeckOptions { disable_play: true, disable_load: true });
+        let mut t = song("/offline/contended", "Track");
+        t.id = app.db.insert_track(&t)?;
+        app.reload_tracks();
+        let key = Identity::new(&t);
+        let other = rusqlite::Connection::open(app.db.active_library_path())?;
+        let (tx, rx) = mpsc::channel();
+        app.match_enrichment.worker = Some(Worker {
+            rx, cancel: Arc::new(AtomicBool::new(false)), thread: thread::spawn(|| ()), discarded: false,
+        });
+        app.db.conn.busy_timeout(Duration::from_millis(4321))?;
+        let send_hit = |p| tx.send(Event::Hit(key.clone(), p, provider_tags(p))).unwrap();
+        other.execute_batch("BEGIN IMMEDIATE")?;
+        send_hit(Provider::MusicBrainz);
+        let start = Instant::now();
+        app.poll_match_enrichment();
+        assert!(start.elapsed() < Duration::from_secs(1), "the frame waited on the writer lock");
+        assert!(app.match_tags(t.id).is_empty());
+        assert_eq!(app.db.conn.query_row("PRAGMA busy_timeout", [], |r| r.get::<_, u64>(0))?, 4321);
+        other.execute_batch("ROLLBACK")?;
+        app.match_enrichment.pending_save.as_mut().unwrap().retry_at = Instant::now();
+        app.poll_match_enrichment();
+        assert!(has_provider(app.match_tags(t.id), Provider::MusicBrainz));
+
+        other.execute_batch("BEGIN IMMEDIATE")?;
+        send_hit(Provider::Itunes);
+        app.poll_match_enrichment();
+        assert!(app.match_enrichment.pending_save.is_some());
+        // Simulate reaching the deadline without sleeping on the test runner.
+        let pending = app.match_enrichment.pending_save.as_mut().unwrap();
+        pending.retry_at = Instant::now();
+        pending.expires = pending.retry_at;
+        app.poll_match_enrichment();
+        assert!(app.match_enrichment.error.as_deref().unwrap().contains("library stayed busy"));
+        assert!(app.match_enrichment.pending_save.is_none());
+        assert!(app.match_enrichment.worker.as_ref().unwrap().cancel.load(Ordering::Acquire));
+        other.execute_batch("ROLLBACK")?;
+        send_hit(Provider::Deezer);
+        app.reset_match_enrichment();
+        app.poll_match_enrichment();
+        assert!(app.match_enrichment_status().is_empty());
+        assert_eq!(load_evidence(&app.db.conn, Some(t.id))?[&t.id].1.len(), 1);
+        Ok(())
     }
 
     #[test]

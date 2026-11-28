@@ -102,7 +102,7 @@ fn match_lookup_window(app: &mut App, ctx: &Context) {
                     }
                 });
                 ui.label("Choose a OneTagger CLI that supports lookup --json for your selected services.");
-                ui.hyperlink_to("OneTagger CLI downloads", "https://github.com/fantuz/onetagger/releases");
+                ui.hyperlink_to("OneTagger lookup builds and supported services", "https://github.com/fantuz/onetagger/pull/93");
                 ui.checkbox(analyze_audio, "Also run local track analysis")
                     .on_hover_text("Queues Analyze Track using your current analysis settings. The lookup runs separately.");
             }
@@ -112,9 +112,13 @@ fn match_lookup_window(app: &mut App, ctx: &Context) {
             MatchLookupDialog::Progress => {}
         }
         let status = app.match_enrichment_status();
-        if matches!(dialog, MatchLookupDialog::Progress) && !status.is_empty() {
+        if !status.is_empty() {
             ui.separator();
-            ui.label(status);
+            if matches!(dialog, MatchLookupDialog::Progress) {
+                ui.label(status);
+            } else {
+                ui.collapsing("Last lookup in this library", |ui| { ui.label(status); });
+            }
         }
         ui.horizontal(|ui| {
             if let MatchLookupDialog::Selection { analyze_audio, .. } = &dialog {

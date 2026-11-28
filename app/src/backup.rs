@@ -424,6 +424,8 @@ pub fn poll(app: &mut crate::app::App) {
         Outcome::Restore(Err(e)) => ("Library Restoration".into(), format!("Failed to restore the collection.\n{e:#}\nThe present library was not changed.")),
         Outcome::Restore(Ok(staged)) => {
             let safety_dir = crate::db::data_dir().join("backups");
+            app.reset_match_enrichment();
+            app.dialogs.match_lookup = None;
             match apply_restore(&mut app.db.conn, &staged, &safety_dir) {
                 Ok(safety) => {
                     reload_after_restore(app);
@@ -447,8 +449,6 @@ pub fn poll(app: &mut crate::app::App) {
 
 /// Everything the app holds in memory is read again from the restored database.
 fn reload_after_restore(app: &mut crate::app::App) {
-    app.cancel_match_enrichment();
-    app.dialogs.match_lookup = None;
     // Both decks are emptied: their tracks may not exist in the restored library.
     for d in 0..2u8 {
         app.with_deck(d, |a| a.unload_track());

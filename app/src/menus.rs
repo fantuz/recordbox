@@ -529,7 +529,7 @@ pub fn state(app: &App) -> HashMap<&'static str, (bool, bool)> {
             "wave_3band" => (true, app.prefs.wave_color == 2),
             "import_to_collection" => (device_sel, false),
             "analyze" | "analyze_missing" | "analyze_key" | "export_tracks" | "reload_tags" | "remove_collection" => (has_sel, false),
-            "look_up_match_tags" => (has_sel || app.match_enrichment_running(), false),
+            "look_up_match_tags" => (has_sel || !app.match_enrichment_status().is_empty(), false),
             "analysis_lock" => (has_sel, locked),
             "lock_on" => (has_sel && !locked, false),
             "lock_off" => (has_sel && !unlocked, false),
