@@ -49,7 +49,7 @@ thread_local! {
 
 /// Every menu command: (id, label, ticked item). The order here is not the menu order. Some
 /// commands are in no menu (they are reached from Preferences > Keyboard or a context menu).
-pub const COMMANDS: [(&str, &str, bool); 95] = [
+pub const COMMANDS: &[(&str, &str, bool)] = &[
     ("edit_cut", "Cut", false),
     ("edit_copy", "Copy", false),
     ("edit_paste", "Paste", false),
@@ -108,6 +108,7 @@ pub const COMMANDS: [(&str, &str, bool); 95] = [
     ("t_import_track", "Import Track", false),
     ("import_to_collection", "Import To Collection", false),
     ("analyze", "Analyze Track", false),
+    ("look_up_match_tags", "Look up related track tags…", false),
     ("analyze_missing", "Analyze Missing Data", false),
     ("analyze_key", "Analyze Key", false),
     ("analysis_lock", "Analysis Lock", true),
@@ -221,6 +222,7 @@ fn layout(mode: u8) -> Vec<(&'static str, Vec<It>)> {
     let track = vec![
         C("import_to_collection"),
         C("analyze"),
+        C("look_up_match_tags"),
         Sub("analysis_lock"),
         Sep,
         Sub("add_to_playlist"),
@@ -351,7 +353,7 @@ fn fill(menu: &Menu, h: &Handles, mode: u8) {
 
 pub fn build() -> Option<Menu> {
     let mut h = Handles { mode: MODE_NONE, remove_label: "Remove from Collection", ..Handles::default() };
-    for (id, label, check) in COMMANDS {
+    for &(id, label, check) in COMMANDS {
         let e = if check { Entry::Check(CheckMenuItem::with_id(id, label, true, false, fixed_accelerator(id))) } else { Entry::Plain(MenuItem::with_id(id, label, true, fixed_accelerator(id))) };
         h.items.insert(id, e);
     }
@@ -482,7 +484,7 @@ pub fn state(app: &App) -> HashMap<&'static str, (bool, bool)> {
     let perf = app.performance();
     let device_sel = matches!(app.view, View::Device { .. }) && !app.device_ui.sel.is_empty();
     let mut m = HashMap::new();
-    for (id, _, _) in COMMANDS {
+    for &(id, _, _) in COMMANDS {
         let v = match id {
             "backup" => (!busy, false),
             "restore" => (!busy && app.dialogs.library_sync_review.is_none() && app.rb_job.is_none(), false),
@@ -527,6 +529,7 @@ pub fn state(app: &App) -> HashMap<&'static str, (bool, bool)> {
             "wave_3band" => (true, app.prefs.wave_color == 2),
             "import_to_collection" => (device_sel, false),
             "analyze" | "analyze_missing" | "analyze_key" | "export_tracks" | "reload_tags" | "remove_collection" => (has_sel, false),
+            "look_up_match_tags" => (has_sel || app.match_enrichment_running(), false),
             "analysis_lock" => (has_sel, locked),
             "lock_on" => (has_sel && !locked, false),
             "lock_off" => (has_sel && !unlocked, false),
@@ -909,6 +912,7 @@ pub fn handle(app: &mut App, id: &str) {
             }
         }
         "analyze" => app.reanalyze(&sel),
+        "look_up_match_tags" => crate::ui_dialogs::open_match_lookup(app, &sel),
         "analyze_missing" => {
             app.analyze_missing(&sel);
         }
@@ -1246,7 +1250,7 @@ mod tests {
     #[test]
     fn commands_are_unique_and_keyboard_actions_reach_them() {
         let mut ids = std::collections::HashSet::new();
-        for (id, label, _) in COMMANDS {
+        for &(id, label, _) in COMMANDS {
             assert!(ids.insert(id), "duplicate menu command {id}");
             assert!(!label.is_empty());
         }

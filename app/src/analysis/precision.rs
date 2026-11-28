@@ -108,10 +108,10 @@ mod tests {
     fn quiet_or_isolated_attacks_do_not_move_an_established_grid() {
         let sr = 8000.0;
         let mut audio = vec![0.0; (sr * 20.0) as usize];
-        let original = BeatGrid { anchors: vec![
+        let original = BeatGrid::from_anchors(vec![
             GridAnchor { time: 0.031, bpm: 120.0, beat: 3 },
             GridAnchor { time: 10.031, bpm: 128.0, beat: 3 }
-        ] };
+        ]);
         for moment in [2.04, 5.04, 12.39] {
             let i = (moment * sr) as usize;
             audio[i..i + 12].fill(0.5);

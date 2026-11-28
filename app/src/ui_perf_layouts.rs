@@ -845,10 +845,11 @@ pub(crate) fn overview(app: &mut App, ui: &mut Ui, o: Pos2, w: f32, g: &DeckGeo,
     if !crate::ui_player::paint_deck_overview(app, &p, area, dur, pos) && app.deck.track.is_some() {
         p.text(pos2((x0 + x1) / 2.0, base - full_h / 2.0), Align2::CENTER_CENTER, "Analyzing…", FontId::proportional(11.0), DIM.c());
     }
-    // Separation progress: rekordbox's thin blue line under the waveform.
-    if let (Some((sid, pr)), Some(tid)) = (app.stem.separating, app.deck.track) {
-        if sid == tid && pr > 0.0 {
-            p.rect_filled(Rect::from_min_max(pos2(x0, base + 3.0), pos2(x0 + width * pr, base + 5.0)), 0.0, hex(0x077DE1));
+    // The same track can be on two decks using different models (e.g. Retry CPU).
+    // Show measured segment progress only for the requested track and model.
+    if app.separating_stems() {
+        if let Some((_, progress)) = app.stem.separating.filter(|(_, progress)| *progress > 0.0) {
+            p.rect_filled(Rect::from_min_max(pos2(x0, base + 3.0), pos2(x0 + width * progress.clamp(0.0, 1.0), base + 5.0)), 0.0, hex(0x077DE1));
         }
     }
     // Vocal row: where the vocal is, brighter where it is stronger.
@@ -925,6 +926,13 @@ pub(crate) fn overview(app: &mut App, ui: &mut Ui, o: Pos2, w: f32, g: &DeckGeo,
     }
     let hit = Rect::from_min_max(pos2(x0, base - full_h - 3.0), pos2(x1, base + 6.0));
     let resp = ui.interact(hit, ui.id().with("overview"), Sense::click_and_drag());
+    if app.prefs.tooltips && resp.hovered() {
+        if app.separating_stems() {
+            if let Some(status) = app.stem.separation_status() { resp.clone().on_hover_text(status); }
+        } else if app.queued_stems() {
+            resp.clone().on_hover_text("Stem separation queued for this deck");
+        }
+    }
     if (resp.clicked() || resp.dragged()) && app.deck.audio.is_some() {
         if let Some(pp) = resp.interact_pointer_pos() {
             // Needle search, in rekordbox's 400 steps across the waveform.

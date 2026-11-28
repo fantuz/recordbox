@@ -88,7 +88,8 @@ impl PitchShifter {
     }
 
     pub fn reset(&mut self) {
-        self.buf.iter_mut().for_each(|v| *v = 0.0);
+        // Every reset starts at frame zero. Before the first wrap only this prefix was written.
+        self.buf[..self.filled * 2].fill(0.0);
         self.w = 0;
         self.filled = 0;
         self.cur = self.target;
@@ -348,7 +349,7 @@ impl EnigmaJet {
     }
 
     pub fn reset(&mut self) {
-        self.lines.iter_mut().for_each(|v| *v = 0.0);
+        // The warm-up writes every tap up to len before enabling feedback reads.
         self.w = 0;
         self.filled = false;
         self.phase = 0.0;
@@ -539,8 +540,7 @@ impl Mobius {
     }
 
     pub fn reset(&mut self, down: bool) {
-        self.l1.iter_mut().for_each(|v| *v = 0.0);
-        self.l2.iter_mut().for_each(|v| *v = 0.0);
+        // While filling n1, process overwrites both active lines (n2 <= n1).
         self.i1 = 0;
         self.i2 = 0;
         self.filled = false;
@@ -1248,6 +1248,46 @@ mod tests {
             }
         }
         y
+    }
+
+    #[test]
+    fn resetting_jet_and_mobius_never_replays_samples_from_old_delay_lines() {
+        let mut jet = EnigmaJet::new();
+        let mut mob = Mobius::new();
+        let mut eager_jet = EnigmaJet::new();
+        let mut eager_mob = Mobius::new();
+        for rate in [44_100., 96_000., 8_000., 192_000.] {
+            jet.lines.fill(f32::NAN);
+            mob.l1.fill(f32::NAN);
+            mob.l2.fill(f32::NAN);
+            eager_jet.lines.fill(0.0);
+            eager_mob.l1.fill(0.0);
+            eager_mob.l2.fill(0.0);
+            jet.prepare(rate);
+            eager_jet.prepare(rate);
+            mob.prepare(rate);
+            eager_mob.prepare(rate);
+            for i in 0..3 * mob.n1 {
+                let x = (i % 83) as f32 * 0.01;
+                let jet_out = |core: &mut EnigmaJet| core.process(x, -x * 0.5, 0.85, 0.5, 0.65, 500., false, true, rate);
+                let mob_out = |core: &mut Mobius| core.process(true, 0.8, 0.65, 0.5, 500., false, true, rate);
+                for (result, expected) in [(jet_out(&mut jet), jet_out(&mut eager_jet)), (mob_out(&mut mob), mob_out(&mut eager_mob))] {
+                    assert!(result.0.is_finite() && result.1.is_finite());
+                    assert_eq!((result.0.to_bits(), result.1.to_bits()), (expected.0.to_bits(), expected.1.to_bits()));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn pitch_reset_clears_all_previously_written_frames_before_a_restart() {
+        let mut shifter = PitchShifter::new(48_000.);
+        for frames in [0, 17, PS_CAP + 7, 3, 0] {
+            for _ in 0..frames { shifter.process(0.5, -0.25); }
+            shifter.reset();
+            assert_eq!((shifter.w, shifter.filled), (0, 0));
+            assert!(shifter.buf.iter().all(|x| x.to_bits() == 0));
+        }
     }
 
     #[test]

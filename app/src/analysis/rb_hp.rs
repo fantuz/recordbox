@@ -28,6 +28,8 @@ mod legacy;
 mod src;
 #[path = "rb_hp_tempo.rs"]
 mod tempo;
+#[path = "rb_hp_class.rs"]
+mod class;
 #[path = "rb_hp_focus2.rs"]
 mod focus2;
 
@@ -252,7 +254,7 @@ fn model(dynamic: bool) -> Option<&'static net::Net> {
 
 /// A cheap, process-local file check during admission. Reading weights happens
 /// later on the worker, only for an enabled model inside its working-set limit.
-pub(super) fn models_present(mode: u8) -> bool {
+pub(crate) fn models_present(mode: u8) -> bool {
     fn present(dynamic: bool) -> bool {
         static NORMAL: OnceLock<bool> = OnceLock::new();
         static DYNAMIC: OnceLock<bool> = OnceLock::new();
@@ -276,12 +278,20 @@ fn dbn() -> &'static dbn::Dbn {
 }
 
 /// The network + DBN + beat list stage for one window of the decode.
+#[cfg(test)]
 pub fn madmom_stage(samples: &[f32], sr: u32, start: usize, len: usize, hendou: bool) -> Option<(Vec<dbn::ListBeat>, f64, Vec<(f32, i32)>)> {
+    madmom_stage_cancellable(samples, sr, start, len, hendou, &|| false)
+}
+
+fn madmom_stage_cancellable(samples: &[f32], sr: u32, start: usize, len: usize, hendou: bool, cancelled: &dyn Fn() -> bool) -> Option<(Vec<dbn::ListBeat>, f64, Vec<(f32, i32)>)> {
+    if cancelled() { return None; }
     let pcm = samples.get(start.checked_mul(2)?..start.checked_add(len)?.checked_mul(2)?)?;
     let net = model(hendou)?;
     let mono: Vec<f32> = pcm.chunks_exact(2).map(|lr| (lr[0] + lr[1]) * 0.5).collect();
-    let act = net.run(&mono);
+    let act = net.run_cancellable(&mono, cancelled)?;
+    if cancelled() { return None; }
     let mut beats = dbn().track(&act);
+    if cancelled() { return None; }
     scale_times(&mut beats, sr as i32);
     let list = dbn::get_beat_list(&beats, len as i64, sr as i32, 4);
     let bpm = dbn::get_bpm(&list);
@@ -341,7 +351,7 @@ fn analyze_model(dec: &crate::audio::Decoded, mode: u8, shared: Option<super::rb
         let net = model(true).ok_or(DYNAMIC_FALLBACK)?;
         tempo::madmom_tempo(net, dbn(), samples, sr, total, cancelled).ok_or(DYNAMIC_FALLBACK)?
     } else {
-        let (list, bpm, _) = madmom_stage(samples, sr, start as usize, len as usize, false).ok_or(NO_GRID)?;
+        let (list, bpm, _) = madmom_stage_cancellable(samples, sr, start as usize, len as usize, false, cancelled).ok_or(NO_GRID)?;
         (list, bpm as i32)
     };
     if cancelled() { return Err(NO_GRID); }
@@ -349,18 +359,19 @@ fn analyze_model(dec: &crate::audio::Decoded, mode: u8, shared: Option<super::rb
     let input = focus::FocusInput { sr: sr as i32, total: analysed as i32, offset, hendou: varying,
         legacy_bpm100: bpm100, legacy_count: legacy.beats.len() as i32, madmom: &ml, madmom_bpm: mbpm };
     let failed = if varying { DYNAMIC_FALLBACK } else { NO_GRID };
-    let out = focus::analyze_focus(&env, &input).map_err(|_| failed)?;
+    let out = focus::analyze_focus_cancellable(&env, &input, cancelled).map_err(|_| failed)?;
     let beats = out.beats;
     if !valid_model_beats(&beats, out.bpm100, analysed) { return Err(failed); }
     let bpm = f64::from(out.bpm100) / 100.0;
-    let grid = grid_from_list(&beats, sr);
+    let grid = grid_from_list(&beats, sr, total);
     if out.adaptive && !grid_replays(&grid, &beats, sr, total) { return Err(failed); }
     Ok(HpOutcome { bpm, grid, beats, adaptive: out.adaptive, offset, window: (start as usize, len as usize) })
 }
 
 /// Bound both the tempo and the number of beats before replaying the grid.
 fn valid_model_beats(beats: &[(i32, i32, i32)], bpm100: i32, frames: usize) -> bool {
-    const TEMPO: std::ops::RangeInclusive<i32> = 100..=100_000;
+    // PQTZ stores each beat's centi-BPM in an unsigned 16-bit field.
+    const TEMPO: std::ops::RangeInclusive<i32> = 100..=u16::MAX as i32;
     // 15 minutes at the maximum supported 1,000 BPM, plus boundary beats.
     (1..=focus2::MAX_BEATS).contains(&beats.len()) && TEMPO.contains(&bpm100) &&
         beats.iter().all(|&(pos, bar, tempo)| pos >= 0 && pos as usize <= frames && (1..=4).contains(&bar) && TEMPO.contains(&tempo)) &&
@@ -376,7 +387,8 @@ pub fn beat_us(pos: i32, sr: u32) -> i64 {
 /// The grid for rekordbox's beat list (position, beat number, tempo x 100 per beat): rekordbox
 /// stores each beat, while recordbox extrapolates between grid anchors. Preserve
 /// each listed beat's microseconds, bar number and tempo for PQTZ and PQT2 exports.
-pub fn grid_from_list(beats: &[(i32, i32, i32)], sr: u32) -> BeatGrid {
+fn grid_from_list(beats: &[(i32, i32, i32)], sr: u32, total: usize) -> BeatGrid {
+    if beats.is_empty() || sr == 0 { return BeatGrid::default(); }
     let mut anchors: Vec<crate::model::GridAnchor> = vec![];
     // `pt`: where `BeatGrid::beats` puts this beat (it adds the period beat by beat)
     let (mut pt, mut a_bpm100, mut pn) = (0f64, 0i32, 0i32);
@@ -395,20 +407,23 @@ pub fn grid_from_list(beats: &[(i32, i32, i32)], sr: u32) -> BeatGrid {
             (pt, a_bpm100, pn) = (t, if bpm100 > 0 { bpm100 } else { (bpm * 100.0).round() as i32 }, num);
         }
     }
-    BeatGrid { anchors }
+    let compact = BeatGrid::from_anchors(anchors);
+    if grid_replays(&compact, beats, sr, total) {
+        return compact;
+    }
+    // A tempo segment can invent beats in a gap or during silence before/after
+    // the measured list. Keep the actual list once, with each original tempo.
+    BeatGrid::from_listed(beats.iter().map(|&(pos, num, bpm100)| crate::model::GridAnchor {
+        time: beat_us(pos, sr) as f64 / 1e6,
+        bpm: bpm100 as f64 / 100.0,
+        beat: num as u8,
+    }).collect())
 }
 
-/// Some irregular interval/tempo combinations would cause the live grid to
-/// insert or drop a beat. Keep the ordinary result if positions, bar numbers
-/// and tempi cannot all be represented faithfully.
+/// Validate the entire playable timeline, including silence at both boundaries.
 fn grid_replays(grid: &BeatGrid, expected: &[(i32, i32, i32)], sr: u32, total: usize) -> bool {
     let actual = grid.beats(total as f64 / f64::from(sr));
     let us = |time: f64| (time * 1e6).round() as i64;
-    let first = beat_us(expected[0].0, sr);
-    let last = beat_us(expected[expected.len()-1].0, sr);
-    let start = actual.partition_point(|b| us(b.time) < first);
-    let end = actual.partition_point(|b| us(b.time) <= last);
-    let actual = &actual[start..end];
     actual.len() == expected.len() && actual.iter().zip(expected).all(|(b, &(pos, bar, bpm))|
         us(b.time) == beat_us(pos, sr) && i32::from(b.beat) == bar && (b.bpm * 100.0).round() as i32 == bpm)
 }
@@ -473,6 +488,8 @@ mod model_grid_tests {
         assert!(valid_model_beats(&[(4_800, 1, 12_000), (28_800, 2, 12_000)], 12_000, 48_000));
         assert!(!valid_model_beats(&[(4_800, 1, 12_000), (4_801, 2, i32::MAX)], 12_000, 48_000));
         assert!(!valid_model_beats(&[(4_800, 1, 12_000)], i32::MAX, 48_000));
+        assert!(valid_model_beats(&[(0, 1, 65_535)], 12_000, 48_000));
+        assert!(!valid_model_beats(&[(0, 1, 65_536)], 12_000, 48_000));
     }
 
     #[test]
@@ -481,11 +498,74 @@ mod model_grid_tests {
         // constant anchor (and checking integer milliseconds only) loses them.
         let input = [(4_800, 3, 12_000), (28_801, 4, 12_000),
             (52_840, 1, 12_000), (76_820, 2, 12_000)];
-        let grid = grid_from_list(&input, 48_000);
+        let grid = grid_from_list(&input, 48_000, 81_600);
         let result: Vec<_> = grid.beats(1.7).iter().map(|b|
             ((b.time * 1e6).round() as i64, b.beat, (b.bpm * 100.0).round() as i32)).collect();
         assert_eq!(result, [(100_000, 3, 12_000), (600_020, 4, 12_000),
             (1_100_833, 1, 12_000), (1_600_416, 2, 12_000)]);
+    }
+
+    #[test]
+    fn finite_model_lists_do_not_interpolate_gaps_or_generate_unmeasured_tails() {
+        let sr = 48_000;
+        let regular = [(4_800, 1, 12_000), (28_800, 2, 12_000), (52_800, 3, 12_000)];
+        let compact = grid_from_list(&regular, sr, 60_000);
+        assert!(!compact.has_listed_beats());
+        assert_eq!(compact.anchors.len(), 1);
+        assert_eq!(serde_json::to_value(&compact).unwrap(), serde_json::json!({
+            "anchors": [{"time":0.1, "bpm":120.0, "beat":1}]
+        }));
+
+        let tail = grid_from_list(&regular, sr, 156_000);
+        assert!(tail.has_listed_beats());
+        assert!(grid_replays(&tail, &regular, sr, 156_000));
+        // Long unlisted intro, 1.6-beat gap, short interval and changing labelled BPM.
+        let irregular = [(62_405, 3, 12_000), (86_407, 4, 12_000), (124_808, 1, 12_001), (132_250, 2, 12_223)];
+        let grid = grid_from_list(&irregular, sr, 240_000);
+        assert!(grid.has_listed_beats());
+        assert!(grid_replays(&grid, &irregular, sr, 240_000));
+        assert!(grid.beats(1.0).is_empty());
+        assert_eq!(grid.beats(100.0).len(), irregular.len());
+        assert_eq!(grid.beats(grid.anchors[1].time).len(), 2);
+    }
+
+    #[test]
+    fn listed_grid_survives_catalogue_reload_and_invalidates_on_tempo_edit() -> anyhow::Result<()> {
+        let db = crate::db::Db::open(std::path::Path::new(":memory:"))?;
+        let id = db.insert_track(&crate::model::Track { path: "model-list.wav".into(), ..Default::default() })?;
+        let beats = [(62_405, 3, 12_000), (86_407, 4, 12_000), (124_808, 1, 12_001), (132_250, 2, 12_223)];
+        let exact = grid_from_list(&beats, 48_000, 240_000);
+        db.save_grid(id, &exact)?;
+        assert!(db.missing_grids(&[id])?.is_empty());
+        let mut saved = db.grid_checked(id)?.unwrap();
+        assert!(saved.has_listed_beats());
+        assert!(grid_replays(&saved, &beats, 48_000, 240_000));
+        let ordinary = BeatGrid::from_anchors(saved.anchors.clone());
+        assert!(!crate::app::grids_match(&ordinary, &saved));
+        let shifted = saved.shifted(-1.5);
+        let remaining = shifted.beats(5.0);
+        assert_eq!(remaining.len(), 3);
+        assert_eq!(remaining[0].index, 0);
+        assert_eq!((remaining[0].time * 1e6).round() as i64, beat_us(beats[1].0, 48_000) - 1_500_000);
+        assert_eq!(remaining[0].beat, 4);
+        let doubled = saved.doubled(5.0);
+        assert!(doubled.has_listed_beats());
+        assert_eq!(doubled.beats(5.0).len(), 2 * beats.len() - 1);
+        let restored: Vec<_> = doubled.halved(5.0).beats(5.0).iter().map(|b| (b.time, b.bpm)).collect();
+        assert_eq!(restored, saved.beats(5.0).iter().map(|b| (b.time, b.bpm)).collect::<Vec<_>>());
+
+        saved.anchors[2].bpm = 90.0;
+        assert!(!saved.has_listed_beats());
+        assert!(crate::app::grids_match(&saved, &BeatGrid::from_anchors(saved.anchors.clone())));
+        db.save_grid(id, &saved)?;
+        let edited = db.grid_checked(id)?.unwrap();
+        assert!(!edited.has_listed_beats());
+        assert!(edited.beats(5.0).len() > beats.len());
+        // The streaming bulk-presence check follows the same format as the full decoder.
+        db.conn.execute("UPDATE grids SET json=json_set(json,'$.beat_list_signature','broken') WHERE track_id=?1", [id])?;
+        assert!(db.grid_checked(id).is_err());
+        assert_eq!(db.missing_grids(&[id])?, [id]);
+        Ok(())
     }
 
     #[test]

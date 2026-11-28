@@ -209,12 +209,12 @@ impl RevLine {
             if gate_state(&self.gate) == Gs::Closing {
                 c = c.min(self.gate.left.max(1));
             }
-            for i in 0..c as usize {
-                let k = (self.rd - i as i64).rem_euclid(self.size) as usize;
+            for out in &mut out[o..o + c as usize] {
+                let k = self.rd as usize;
                 let sample = if k < self.valid { self.buf[k] } else { 0.0 };
-                out[o + i] = sample * self.gate.take();
+                *out = sample * self.gate.take();
+                self.rd = if self.rd == 0 { self.size - 1 } else { self.rd - 1 };
             }
-            self.rd = (self.rd - c as i64).rem_euclid(self.size);
             self.count += c;
             if !self.full {
                 self.written += c;
@@ -251,7 +251,8 @@ impl RevLine {
     fn write(&mut self, x: f32) {
         self.buf[self.w as usize] = x;
         self.valid = (self.valid + 1).min(self.size as usize);
-        self.w = (self.w + 1) % self.size;
+        self.w += 1;
+        if self.w == self.size { self.w = 0; }
     }
 }
 
@@ -360,12 +361,13 @@ impl DLine {
                 lim = self.gate.left;
             }
             let c = lim.min(left).max(1);
-            for i in 0..c as usize {
-                let k = (self.rd + i as i64).rem_euclid(self.size) as usize;
+            for out in &mut out[o..o + c as usize] {
+                let k = self.rd as usize;
                 let sample = if k < self.valid { self.buf[k] } else { 0.0 };
-                out[o + i] = sample * self.gate.take();
+                *out = sample * self.gate.take();
+                self.rd += 1;
+                if self.rd == self.size { self.rd = 0; }
             }
-            self.rd = (self.rd + c as i64).rem_euclid(self.size);
             if !self.full {
                 // (rekordbox counts the whole call's length here, once a piece.)
                 self.written += a3;
@@ -392,11 +394,15 @@ impl DLine {
         }
     }
 
-    pub(crate) fn write(&mut self, xs: &[f32]) {
+    pub(crate) fn write(&mut self, mut xs: &[f32]) {
         self.valid = (self.valid + xs.len()).min(self.size as usize);
-        for &x in xs {
-            self.buf[self.w as usize] = x;
-            self.w = (self.w + 1) % self.size;
+        while !xs.is_empty() {
+            let end = (self.size as usize - self.w as usize).min(xs.len());
+            let (part, rest) = xs.split_at(end);
+            self.buf[self.w as usize..self.w as usize + end].copy_from_slice(part);
+            self.w += end as i64;
+            if self.w == self.size { self.w = 0; }
+            xs = rest;
         }
     }
 }
@@ -792,6 +798,53 @@ mod tests {
             t += n;
         }
         out
+    }
+
+    #[test]
+    fn forward_and_reverse_line_cursors_wrap_across_short_and_oversized_blocks() {
+        let mut forward = DLine::new();
+        let mut reverse = RevLine::new();
+        let capacity = 13;
+        forward.size = capacity;
+        reverse.size = capacity;
+        let mut written = vec![0.0f32; capacity as usize];
+        let mut w = 0;
+        for n in [0, 1, 11, 1, 4, 157, 7] {
+            let input: Vec<_> = (0..n).map(|i| (i + 1000 * n) as f32).collect();
+            for &value in &input {
+                written[w] = value;
+                w = (w + 1) % written.len();
+                reverse.write(value);
+            }
+            forward.write(&input);
+            assert_eq!(forward.w, w as i64);
+            assert_eq!(reverse.w, w as i64);
+            assert_eq!(&forward.buf[..written.len()], &written);
+            assert_eq!(&reverse.buf[..written.len()], &written);
+            for backwards in [false, true] {
+                let start = w as i64;
+                let mut audio = vec![0.0; n];
+                let end = if backwards {
+                    reverse.rd = start;
+                    reverse.count = 0;
+                    reverse.pend = false;
+                    reverse.jump = false;
+                    reverse.full = true;
+                    reverse.gate.reset(1.0);
+                    reverse.read(&mut audio, n as i32);
+                    reverse.rd
+                } else {
+                    forward.rd = start;
+                    forward.full = true;
+                    forward.gate.reset(1.0);
+                    forward.read(&mut audio);
+                    forward.rd
+                };
+                let index = |i| (if backwards { start - i as i64 } else { start + i as i64 }).rem_euclid(capacity);
+                assert_eq!(end, index(n));
+                for (i, &sample) in audio.iter().enumerate() { assert_eq!(sample, written[index(i) as usize]); }
+            }
+        }
     }
 
     #[test]

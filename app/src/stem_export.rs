@@ -2,6 +2,7 @@
 use crate::app::*;
 use crate::edit_render::{self as render, Encode, Mp3Rate};
 use crate::model::*;
+use eframe::egui;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashSet, VecDeque};
 use std::path::{Path, PathBuf};
@@ -610,17 +611,33 @@ impl Drop for Active {
     }
 }
 
-pub fn stop(app: &mut App) {
-    app.stemx.queue.clear();
-    if let Some(a) = &app.stemx.active {
-        a.cancel.store(true, Ordering::Relaxed);
-        // The token is unique to the worker. A pre-existing deck job or a subsequent
-        // job for another track is never stopped by this queue.
-        if let Some(token) = &a.owned_separation {
+impl Active {
+    fn stop(&self) {
+        self.cancel.store(true, Ordering::Relaxed);
+        // Only a separation started by this export belongs to the queue.
+        if let Some(token) = &self.owned_separation {
             token.store(true, Ordering::Relaxed);
         }
-        app.ctx.request_repaint();
     }
+}
+
+pub fn stop(app: &mut App) {
+    app.stemx.total -= app.stemx.queue.len();
+    app.stemx.queue.clear();
+    if let Some(a) = &app.stemx.active {
+        a.stop();
+    }
+    app.ctx.request_repaint_of(egui::ViewportId::ROOT);
+}
+
+pub fn stop_for(app: &mut App, track: i64) {
+    let queued = app.stemx.queue.len();
+    app.stemx.queue.retain(|r| r.track != track);
+    app.stemx.total -= queued - app.stemx.queue.len();
+    if let Some(a) = app.stemx.active.as_ref().filter(|a| a.req.track == track) {
+        a.stop();
+    }
+    app.ctx.request_repaint_of(egui::ViewportId::ROOT);
 }
 
 pub fn busy(app: &App) -> bool {
@@ -631,14 +648,21 @@ pub fn busy_for(app: &App, track: Option<i64>) -> bool {
         app.stemx.active.as_ref().is_some_and(|a| a.req.track == id) || app.stemx.queue.iter().any(|r| r.track == id)
     })
 }
+pub fn status_for(app: &App, track: i64) -> Option<String> {
+    if app.stemx.active.as_ref().is_some_and(|a| a.req.track == track) {
+        return status(app);
+    }
+    app.stemx.queue.iter().find(|r| r.track == track)
+        .map(|r| format!("Queued for export · {}", r.part.suffix()))
+}
 pub fn status(app: &App) -> Option<String> {
     let a = app.stemx.active.as_ref()?;
     let stage = if a.cancel.load(Ordering::Relaxed) {
         "Stopping export".into()
     } else if a.rx.is_some() {
         "Encoding and checking audio".into()
-    } else if let Some((_, p)) = app.stem.separating.filter(|s| s.0 == a.req.track) {
-        format!("Separating {:.0}%", p * 100.0)
+    } else if app.stem.separating.is_some_and(|s| s.0 == a.req.track) {
+        app.stem.separation_status().unwrap_or_else(|| "Preparing stems".into())
     } else {
         "Waiting for completed stems".into()
     };
@@ -713,7 +737,7 @@ pub fn poll(app: &mut App) {
         return;
     }
     app.stemx.active = Some(a);
-    app.ctx.request_repaint_after(std::time::Duration::from_millis(250));
+    app.ctx.request_repaint_after_for(std::time::Duration::from_millis(250), egui::ViewportId::ROOT);
 }
 
 fn complete_result(app: &mut App, a: &Active, result: Result<audio_export::Staged, String>) {
@@ -740,7 +764,7 @@ fn complete(app: &mut App, result: Result<String, String>) {
             app.stemx.failed, app.stemx.finished, app.stemx.last_error
         ));
     }
-    app.ctx.request_repaint();
+    app.ctx.request_repaint_of(egui::ViewportId::ROOT);
 }
 
 fn start_or_wait(app: &mut App, a: &mut Active) -> Result<(), String> {
@@ -750,15 +774,20 @@ fn start_or_wait(app: &mut App, a: &mut Active) -> Result<(), String> {
         .ok_or("The source track changed during export.")?;
     let kbps = t.bitrate;
     let cache = crate::stems::cache_path(&a.path, a.model.id);
-    let deck = (0..4).find(|&n| app.deck_of(n).track == Some(a.req.track) && app.deck_of(n).audio.is_some());
-    let parts = deck.and_then(|n| {
+    let mut loaded = (0..4).filter(|&n| app.deck_of(n).track == Some(a.req.track) && app.deck_of(n).audio.is_some());
+    let first = loaded.clone().next();
+    let completed = loaded.find_map(|n| {
         let key = app.deck_of(n).stem_cache_key.as_ref()?;
         if key.model != a.model.id || key.path != cache {
             return None;
         }
         // Live windows are kept separately in stem_preview. Only immutable, completed stems qualify.
-        app.player.decks[usize::from(n)].lock().stems.clone()
+        app.player.decks[usize::from(n)].lock().stems.clone().map(|parts| (n, parts))
     });
+    let (deck, parts) = match completed {
+        Some((n, parts)) => (Some(n), Some(parts)),
+        None => (first, None),
+    };
     if parts.is_none() && crate::stems::existing_cache_path(&cache).is_none() {
         let Some(n) = deck else {
             return Err("Load this track into a deck and separate it with the selected model, then export.".into());
@@ -808,7 +837,7 @@ fn start_or_wait(app: &mut App, a: &mut Active) -> Result<(), String> {
         .name("rb-stem-export".into())
         .spawn(move || {
             let _ = tx.send(audio_export::stage(work, &cancel));
-            ctx.request_repaint();
+            ctx.request_repaint_of(egui::ViewportId::ROOT);
         })
         .map_err(|e| format!("Cannot start the stem export worker: {e}"))?;
     a.rx = Some(rx);
@@ -955,11 +984,8 @@ fn add_track(
     track.color = src.color;
     track.artwork = src.artwork.clone();
     let id = db.insert_track(&track)?;
-    if let Some(mut grid) = db.grid_checked(src.id)? {
-        for anchor in &mut grid.anchors {
-            anchor.time += shift;
-        }
-        db.save_grid(id, &grid)?;
+    if let Some(grid) = db.grid_checked(src.id)? {
+        db.save_grid(id, &grid.shifted(shift))?;
     }
     for c in db.cues(src.id)? {
         db.save_cue(&Cue {
@@ -1383,7 +1409,11 @@ mod tests {
         let db = crate::db::Db::open(&d.path().join("library.db"))?;
         let mut src = crate::importer::read_track(Path::new(&original));
         src.id = db.insert_track(&src)?;
-        db.save_grid(src.id, &BeatGrid::constant(0.2, 128.0, 1))?;
+        let source_grid = BeatGrid::from_listed(vec![
+            crate::model::GridAnchor { time: 0.2, bpm: 128.0, beat: 1 },
+            crate::model::GridAnchor { time: 0.83, bpm: 128.0, beat: 2 },
+        ]);
+        db.save_grid(src.id, &source_grid)?;
         db.save_cue(&Cue {
             id: 0,
             track_id: src.id,
@@ -1410,7 +1440,11 @@ mod tests {
         db.conn.execute_batch("DROP TRIGGER reject_link")?;
         let id = add_track(&db, &src, &exported, Part::Vocals, 0.05, None, None, Some(pl))?;
         assert_eq!(db.cues(id)?[0].start, 0.4 + 0.05);
-        assert_eq!(db.grid(id).unwrap().anchors[0].time, 0.2 + 0.05);
+        let derived_grid = db.grid_checked(id)?.unwrap();
+        assert!(derived_grid.has_listed_beats());
+        assert_eq!(derived_grid.beats(4.0).iter().map(|b| (b.time, b.beat)).collect::<Vec<_>>(),
+            vec![(0.2 + 0.05, 1), (0.83 + 0.05, 2)]);
+        assert_eq!(db.grid_checked(src.id)?.unwrap(), source_grid);
         assert_eq!(db.setting(&link_key(id)), Some(format!("{}:vocals", src.id)));
         assert_eq!(db.playlist_tracks(pl)?, vec![src.id, id]);
         Ok(())

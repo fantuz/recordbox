@@ -23,9 +23,11 @@ use windows_sys::Win32::Storage::FileSystem as winfs;
 
 use crate::export::usb::sha256_file;
 use crate::rbimport::{check_schema, MASTER_DB_KEY};
+use super::RecoveryFiles;
 
 const MARKER: &str = ".recordbox-writeback-pending.json";
 const MANIFEST: &str = "grid-recovery.json";
+const STAGE_PREFIX: &str = "recordbox-transaction-";
 const LOCK: &str = ".recordbox-writeback.lock";
 const MAX_MARKER: u64 = 256 * 1024;
 const MAX_MANIFEST: u64 = 16 * 1024 * 1024;
@@ -45,8 +47,18 @@ struct GridFile {
     after: [u8; 32],
 }
 
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq, Serialize)]
+enum CatalogProof {
+    #[default]
+    EncryptedBackup,
+    LockedTransactionV1,
+}
+
 #[derive(Deserialize, Serialize)]
 struct GridJournal {
+    // Existing manifests always used a full encrypted copy and keep that verification path.
+    #[serde(default)]
+    catalog_proof: CatalogProof,
     source: PathBuf,
     source_file: NativeFileId,
     before_db: [u8; 32],
@@ -588,6 +600,7 @@ fn stage_grids(
     directory: &Path,
     db: &Connection,
     changes: Vec<FileChange>,
+    locked_before: Option<[u8; 32]>,
 ) -> Result<GridJournal> {
     let mut files = Vec::new();
     let mut seen = HashSet::new();
@@ -627,16 +640,19 @@ fn stage_grids(
             after,
         });
     }
-    let before_db = logical_digest(&native(
-        &directory.join("master.db"),
-        OpenFlags::SQLITE_OPEN_READ_ONLY,
-    )?)?;
+    let (catalog_proof, before_db) = match locked_before {
+        Some(before) => (CatalogProof::LockedTransactionV1, before),
+        None => (CatalogProof::EncryptedBackup, logical_digest(&native(
+            &directory.join("master.db"), OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )?)?),
+    };
     let after_db = logical_digest(db)?;
     ensure!(
         before_db != after_db,
         "grid update requires a corresponding native database revision"
     );
     Ok(GridJournal {
+        catalog_proof,
         source: source.to_owned(),
         source_file: native_id(&source.join("master.db"))?,
         before_db,
@@ -770,11 +786,29 @@ fn writer(source: &Path) -> Result<Connection> {
 
 /// The callback re-reads previewed values on this connection. All its writes
 /// participate in this transaction and must not commit or open another writer.
-pub fn apply<T>(
+#[cfg(test)]
+fn apply<T>(
     source_dir: &Path,
     backup_root: &Path,
     under_lock: impl FnOnce(&Connection) -> Result<(T, Vec<FileChange>)>,
 ) -> Result<(T, PathBuf)> {
+    let (result, directory) = apply_with_policy(source_dir, backup_root, RecoveryCopy::Keep, under_lock)?;
+    Ok((result, directory.backup.context("missing requested recovery backup")?))
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum RecoveryCopy {
+    Keep,
+    TemporaryForGrids,
+    DatabaseTransaction,
+}
+
+pub(super) fn apply_with_policy<T>(
+    source_dir: &Path,
+    backup_root: &Path,
+    policy: RecoveryCopy,
+    under_lock: impl FnOnce(&Connection) -> Result<(T, Vec<FileChange>)>,
+) -> Result<(T, RecoveryFiles)> {
     let source = source_dir.canonicalize()?;
     let _guard = operation_lock(&source, false)?;
     let identity = native_id(&source.join("master.db"))?;
@@ -801,43 +835,62 @@ pub fn apply<T>(
         Err(error) => return Err(error.into()),
     }
     drop(triggers);
+    let verify_before_commit = || -> Result<()> {
+        check_native_files(&source, true)?;
+        ensure!(native_id(&source.join("master.db"))? == identity, "native library file changed during review");
+        ensure_apps_closed()
+    };
+    if policy == RecoveryCopy::DatabaseTransaction {
+        let (result, grids) = under_lock(&tx)?;
+        ensure!(grids.is_empty(), "a native analysis-file edit requires a recovery journal");
+        verify_before_commit()?;
+        tx.commit().context("committing the native database transaction")?;
+        return Ok((result, RecoveryFiles::default()));
+    }
+
     let root = backup_parent(&source, backup_root)?;
     let mut builder = tempfile::Builder::new();
-    builder.prefix("rekordbox-");
+    builder.prefix(if policy == RecoveryCopy::Keep { "rekordbox-" } else { STAGE_PREFIX });
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         builder.permissions(fs::Permissions::from_mode(0o700));
     }
     let backup = builder.tempdir_in(&root)?;
-    backup_database(&source, backup.path())?;
-    ensure!(
-        native_id(&source.join("master.db"))? == identity,
-        "native library file changed during backup"
-    );
-    let receipt = serde_json::json!({
-        "format": "recordbox-native-recovery-v1",
-        "captured_unix_seconds": std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_secs(),
-        "source": source.join("master.db"),
-        "source_file_identity": &identity,
-        "recovery_database": "master.db",
-        "sha256": sha256_file(&backup.path().join("master.db"))?.iter().map(|b| format!("{b:02x}")).collect::<String>(),
-        "includes_committed_wal": true,
-    });
-    save_new(
-        &backup.path().join("backup.json"),
-        &serde_json::to_vec_pretty(&receipt)?,
-    )?;
+    let locked_before = if policy == RecoveryCopy::Keep {
+        backup_database(&source, backup.path())?;
+        ensure!(
+            native_id(&source.join("master.db"))? == identity,
+            "native library file changed during backup"
+        );
+        let receipt = serde_json::json!({
+            "format": "recordbox-native-recovery-v1",
+            "captured_unix_seconds": std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_secs(),
+            "source": source.join("master.db"),
+            "source_file_identity": &identity,
+            "recovery_database": "master.db",
+            "sha256": sha256_file(&backup.path().join("master.db"))?.iter().map(|b| format!("{b:02x}")).collect::<String>(),
+            "includes_committed_wal": true,
+        });
+        save_new(
+            &backup.path().join("backup.json"),
+            &serde_json::to_vec_pretty(&receipt)?,
+        )?;
+        None
+    } else {
+        // BEGIN IMMEDIATE reserves the writer slot. This digest includes committed WAL
+        // frames and precedes every reviewed SQL edit. SQLite owns database rollback.
+        Some(logical_digest(&tx)?)
+    };
     let (result, grids) = under_lock(&tx)?;
-    check_native_files(&source, true)?;
-    ensure!(
-        native_id(&source.join("master.db"))? == identity,
-        "native library file changed during review"
-    );
-    ensure_apps_closed()?;
+    verify_before_commit()?;
     // Reopening a backup after a successful database-only operation always
     // yields its committed, pre-edit state, including the original WAL records.
     if grids.is_empty() {
+        if policy == RecoveryCopy::TemporaryForGrids {
+            tx.commit().context("committing the native database transaction")?;
+            return Ok((result, RecoveryFiles::default()));
+        }
         let directory = backup.keep();
         sync_directory(&root)?;
         tx.commit().with_context(|| {
@@ -846,22 +899,23 @@ pub fn apply<T>(
                 directory.display()
             )
         })?;
-        return Ok((result, directory));
+        return Ok((result, RecoveryFiles { backup: Some(directory), remaining_staging: None }));
     }
 
-    let journal = stage_grids(&source, backup.path(), &tx, grids)?;
+    let journal = stage_grids(&source, backup.path(), &tx, grids, locked_before)?;
     let manifest = serde_json::to_vec_pretty(&journal)?;
     ensure!(
         manifest.len() as u64 <= MAX_MANIFEST,
         "selection exceeds the recoverable grid batch size"
     );
     save_new(&backup.path().join(MANIFEST), &manifest)?;
-    let directory = backup.keep();
     sync_directory(&root)?;
     let intent = Pending {
-        directory: directory.clone(),
+        directory: backup.path().to_owned(),
         manifest_sha256: Sha256::digest(&manifest).into(),
     };
+    // Once the marker might be visible, even an fsync error must preserve its recovery set.
+    let directory = backup.keep();
     save_new(&source.join(MARKER), &serde_json::to_vec(&intent)?)?;
     let commit = || -> Result<()> {
         ensure_apps_closed()?;
@@ -881,16 +935,42 @@ pub fn apply<T>(
     };
     commit().with_context(|| {
         format!(
-            "Recover interrupted write-back before continuing. Verified backup: {}",
+            "Recover interrupted write-back before continuing. Recovery files: {}",
             directory.display()
         )
     })?;
-    Ok((result, directory))
+    Ok((result, finish_recovery_directory(directory, &journal)))
+}
+
+/// A successful transaction may retire only its own recognized staging files. Never
+/// recursively delete a directory recovered from a marker. Keep and report the path
+/// if another file appeared or the OS could not remove a staged file.
+fn finish_recovery_directory(directory: PathBuf, journal: &GridJournal) -> RecoveryFiles {
+    if journal.catalog_proof == CatalogProof::EncryptedBackup {
+        return RecoveryFiles { backup: Some(directory), remaining_staging: None };
+    }
+    let retire = || -> Result<()> {
+        let is_stage = directory.file_name().and_then(|s| s.to_str()).is_some_and(|name| name.starts_with(STAGE_PREFIX));
+        ensure!(is_stage, "unrecognized recovery directory");
+        let mut owned = HashSet::from([PathBuf::from(MANIFEST)]);
+        for i in 0..journal.files.len() {
+            owned.insert(format!("{i}.original").into());
+            owned.insert(format!("{i}.reviewed").into());
+        }
+        let actual = fs::read_dir(&directory)?.map(|entry| entry.map(|e| PathBuf::from(e.file_name())))
+            .collect::<std::io::Result<HashSet<_>>>()?;
+        ensure!(actual == owned, "unrecognized recovery files");
+        for name in &owned { regular(&directory.join(name))?; }
+        for name in owned { fs::remove_file(directory.join(name))?; }
+        fs::remove_dir(&directory)?;
+        Ok(())
+    };
+    RecoveryFiles { backup: None, remaining_staging: retire().err().map(|_| directory) }
 }
 
 /// Complete an interrupted grid publication according to the database state
 /// that actually committed. Never replace a file outside either recorded state.
-pub fn recover(source_dir: &Path, backup_root: &Path) -> Result<PathBuf> {
+pub fn recover(source_dir: &Path, backup_root: &Path) -> Result<RecoveryFiles> {
     let source = source_dir.canonicalize()?;
     let _guard = operation_lock(&source, true)?;
     let marker = source.join(MARKER);
@@ -917,18 +997,21 @@ pub fn recover(source_dir: &Path, backup_root: &Path) -> Result<PathBuf> {
     );
     ensure!(
         native_id(&source.join("master.db"))? == journal.source_file,
-        "the native library file was replaced; inspect the retained backup before recovery"
+        "the native library file was replaced; inspect the recovery files before proceeding"
     );
-    regular(&directory.join("master.db"))?;
-    let pre = native(
-        &directory.join("master.db"),
-        OpenFlags::SQLITE_OPEN_READ_ONLY,
-    )?;
-    integrity(&pre)?;
-    ensure!(
-        logical_digest(&pre)? == journal.before_db,
-        "recovery database has changed"
-    );
+    ensure!(journal.before_db != journal.after_db && !journal.files.is_empty(), "invalid recovery boundaries");
+    match journal.catalog_proof {
+        CatalogProof::EncryptedBackup => {
+            regular(&directory.join("master.db"))?;
+            let pre = native(&directory.join("master.db"), OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+            integrity(&pre)?;
+            ensure!(logical_digest(&pre)? == journal.before_db, "recovery database has changed");
+        }
+        CatalogProof::LockedTransactionV1 => {
+            ensure!(directory.file_name().and_then(|s| s.to_str()).is_some_and(|n| n.starts_with(STAGE_PREFIX)),
+                "unexpected location for a temporary analysis journal");
+        }
+    }
     // Only a verified, pending operation may ask SQLite to resolve a hot
     // rollback journal left behind by an interrupted native transaction.
     ensure_apps_closed()?;
@@ -948,13 +1031,13 @@ pub fn recover(source_dir: &Path, backup_root: &Path) -> Result<PathBuf> {
     }
     integrity(&tx)?;
     let state = logical_digest(&tx)?;
-    ensure!(state == journal.before_db || state == journal.after_db, "native database has newer or unrecognized changes; no recovery files were applied; backup: {}", directory.display());
+    ensure!(state == journal.before_db || state == journal.after_db, "native database has newer or unrecognized changes; no recovery files were applied; journal: {}", directory.display());
     ensure_apps_closed()?;
     copy_grids(&journal, &directory, state == journal.after_db)?;
     fs::remove_file(marker)?;
     sync_directory(&source)?;
     tx.commit()?;
-    Ok(directory)
+    Ok(finish_recovery_directory(directory, &journal))
 }
 
 #[cfg(test)]
@@ -1010,17 +1093,23 @@ mod tests {
         // Simulate either side of a crash at the SQLite commit boundary, with
         // the ANLZ rename either already visible or still at its old contents.
         fn interrupted(&self, committed: bool, published: bool, crash: bool) -> Result<PathBuf> {
+            self.interrupted_with_policy(committed, published, crash, RecoveryCopy::Keep)
+        }
+        fn interrupted_with_policy(&self, committed: bool, published: bool, crash: bool, policy: RecoveryCopy) -> Result<PathBuf> {
             let mut db = self.db()?;
             db.pragma_update(None, "cache_size", 4)?;
             let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
-            let directory = self.backups.join("fixture");
+            let directory = self.backups.join(if policy == RecoveryCopy::Keep { "fixture" } else { "recordbox-transaction-fixture" });
             fs::create_dir_all(&directory)?;
-            backup_database(&self.source, &directory)?;
+            let before = if policy == RecoveryCopy::Keep {
+                backup_database(&self.source, &directory)?;
+                None
+            } else { Some(logical_digest(&tx)?) };
             tx.execute("UPDATE djmdContent SET rating=3", [])?;
             if crash {
                 tx.execute("UPDATE spill SET chunk=zeroblob(8192)", [])?;
             }
-            let journal = stage_grids(&self.source, &directory, &tx, vec![self.change()])?;
+            let journal = stage_grids(&self.source, &directory, &tx, vec![self.change()], before)?;
             let manifest = serde_json::to_vec(&journal)?;
             save_new(&directory.join(MANIFEST), &manifest)?;
             let marker = Pending {
@@ -1165,6 +1254,75 @@ mod tests {
     }
 
     #[test]
+    fn optional_database_backup_uses_sql_rollback_and_refuses_unjournaled_grids() -> Result<()> {
+        let f = Fixture::new()?;
+        let update = |db: &Connection| -> Result<()> { db.execute("UPDATE djmdContent SET Rating=5", [])?; Ok(()) };
+        assert!(apply_with_policy::<()>(&f.source, &f.backups, RecoveryCopy::DatabaseTransaction, |db| {
+            update(db)?; bail!("interrupted before commit")
+        }).is_err());
+        assert!(apply_with_policy(&f.source, &f.backups, RecoveryCopy::DatabaseTransaction, |db| {
+            update(db)?; Ok(((), vec![f.change()]))
+        }).is_err());
+        assert_eq!(f.db()?.query_row("SELECT Rating FROM djmdContent", [], |r| r.get::<_, i64>(0))?, 1);
+        assert!(!pending(&f.source) && !f.backups.exists());
+        assert_eq!(f.bytes()?, b"original beats");
+        Ok(())
+    }
+
+    #[test]
+    fn optional_grid_backup_retires_only_its_own_files_after_success_or_recovery() -> Result<()> {
+        let f = Fixture::new()?;
+        let (_, retained) = apply_with_policy(&f.source, &f.backups, RecoveryCopy::TemporaryForGrids, |db| {
+            db.execute("UPDATE djmdContent SET Rating=5", [])?;
+            Ok(((), vec![f.change()]))
+        })?;
+        assert!(retained.backup.is_none() && retained.remaining_staging.is_none());
+        assert_eq!(fs::read_dir(&f.backups)?.count(), 0);
+        assert_eq!(f.bytes()?, b"reviewed beats");
+        assert!(!pending(&f.source));
+
+        for (committed, added_file) in [(false, false), (true, false), (false, true)] {
+            let f = Fixture::new()?;
+            let directory = f.interrupted_with_policy(committed, !committed, false, RecoveryCopy::TemporaryForGrids)?;
+            assert!(!directory.join("master.db").exists() && !directory.join("backup.json").exists());
+            if added_file { fs::write(directory.join("my-file"), b"keep")?; }
+            let retained = recover(&f.source, &f.backups)?;
+            if added_file {
+                assert!(retained.backup.is_none());
+                assert_eq!(retained.remaining_staging.as_deref(), Some(directory.as_path()));
+                assert_eq!(fs::read(directory.join("my-file"))?, b"keep");
+                assert!(directory.join("0.original").is_file());
+            } else {
+                assert!(retained.backup.is_none() && retained.remaining_staging.is_none() && !directory.exists());
+            }
+            assert!(!pending(&f.source));
+            assert_eq!(f.bytes()?, if committed { &b"reviewed beats"[..] } else { &b"original beats"[..] });
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn staging_only_recovery_refuses_unrecognized_database_sidecars_and_manifest() -> Result<()> {
+        for target in ["database", "original", "manifest"] {
+            let f = Fixture::new()?;
+            let directory = f.interrupted_with_policy(false, true, false, RecoveryCopy::TemporaryForGrids)?;
+            match target {
+                "database" => { f.db()?.execute("INSERT INTO djmdContent(ID,Rating) VALUES('later',5)", [])?; }
+                "original" => fs::write(directory.join("0.original"), b"user replaced the staging file")?,
+                _ => {
+                    let mut manifest = read_bounded(&directory.join(MANIFEST), MAX_MANIFEST)?;
+                    manifest.push(b' ');
+                    fs::write(directory.join(MANIFEST), manifest)?;
+                }
+            }
+            assert!(recover(&f.source, &f.backups).is_err());
+            assert!(pending(&f.source) && directory.is_dir());
+            assert_eq!(f.bytes()?, b"reviewed beats");
+        }
+        Ok(())
+    }
+
+    #[test]
     fn interrupted_grids_follow_the_state_that_committed() -> Result<()> {
         for (committed, installed) in [(false, true), (true, false), (true, true)] {
             let fixture = Fixture::new()?;
@@ -1173,7 +1331,7 @@ mod tests {
                 "pending transaction must stop new writes"
             ))
             .is_err());
-            assert_eq!(recover(&fixture.source, &fixture.backups)?, backup);
+            assert_eq!(recover(&fixture.source, &fixture.backups)?.backup, Some(backup));
             let expected: &[u8] = if committed {
                 b"reviewed beats"
             } else {
@@ -1196,36 +1354,44 @@ mod tests {
                 backups: base.join("backups"),
                 relative: "share/PIONEER/USBANLZ/ANLZ0000.DAT".into(),
             };
-            child.interrupted(false, true, true)?;
+            let policy = if std::env::var_os("RECORDBOX_TEST_SKIP_BACKUP") == Some("1".into()) {
+                RecoveryCopy::TemporaryForGrids
+            } else { RecoveryCopy::Keep };
+            child.interrupted_with_policy(false, true, true, policy)?;
             bail!("child should have exited with the transaction still open");
         }
-        let fixture = Fixture::new()?;
-        fixture.db()?.execute_batch("CREATE TABLE spill(chunk BLOB); WITH RECURSIVE n(i) AS (VALUES(1) UNION ALL SELECT i+1 FROM n WHERE i<40) INSERT INTO spill SELECT randomblob(8192) FROM n;")?;
-        let module = module_path!().split_once("::").unwrap().1;
-        let test =
-            format!("{module}::process_exit_with_a_hot_rollback_journal_restores_matching_grids");
-        let child = Command::new(std::env::current_exe()?)
-            .args(["--exact", &test])
-            .env(CHILD_FIXTURE, fixture.source.parent().unwrap())
-            .output()?;
-        assert_eq!(
-            child.status.code(),
-            Some(83),
-            "{} {}",
-            String::from_utf8_lossy(&child.stdout),
-            String::from_utf8_lossy(&child.stderr)
-        );
-        assert!(fs::metadata(fixture.source.join("master.db-journal"))?.len() > 0);
-        assert!(pending(&fixture.source));
-        assert_eq!(fixture.bytes()?, b"reviewed beats");
-        recover(&fixture.source, &fixture.backups)?;
-        assert_eq!(fixture.bytes()?, b"original beats");
-        assert_eq!(
-            fixture
-                .db()?
-                .query_row("SELECT rating FROM djmdContent", [], |r| r.get::<_, i64>(0))?,
-            1
-        );
+        for temporary in [false, true] {
+            let fixture = Fixture::new()?;
+            fixture.db()?.execute_batch("CREATE TABLE spill(chunk BLOB); WITH RECURSIVE n(i) AS (VALUES(1) UNION ALL SELECT i+1 FROM n WHERE i<40) INSERT INTO spill SELECT randomblob(8192) FROM n;")?;
+            let module = module_path!().split_once("::").unwrap().1;
+            let test =
+                format!("{module}::process_exit_with_a_hot_rollback_journal_restores_matching_grids");
+            let child = Command::new(std::env::current_exe()?)
+                .args(["--exact", &test])
+                .env(CHILD_FIXTURE, fixture.source.parent().unwrap())
+                .env("RECORDBOX_TEST_SKIP_BACKUP", if temporary { "1" } else { "0" })
+                .output()?;
+            assert_eq!(
+                child.status.code(),
+                Some(83),
+                "{} {}",
+                String::from_utf8_lossy(&child.stdout),
+                String::from_utf8_lossy(&child.stderr)
+            );
+            assert!(fs::metadata(fixture.source.join("master.db-journal"))?.len() > 0);
+            assert!(pending(&fixture.source));
+            assert_eq!(fixture.bytes()?, b"reviewed beats");
+            let files = recover(&fixture.source, &fixture.backups)?;
+            assert_eq!(files.backup.is_none(), temporary);
+            assert!(files.remaining_staging.is_none());
+            assert_eq!(fixture.bytes()?, b"original beats");
+            assert_eq!(
+                fixture
+                    .db()?
+                    .query_row("SELECT rating FROM djmdContent", [], |r| r.get::<_, i64>(0))?,
+                1
+            );
+        }
         Ok(())
     }
 

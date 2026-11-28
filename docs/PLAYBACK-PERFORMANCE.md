@@ -117,11 +117,22 @@ animation**. Export mode releases idle audio output after two seconds and
 reopens it on demand. Performance mode and an initialized sampler keep their
 output clock ready; library preview releases its own output on Stop or completion.
 
+## STEMS across decks and windows
+
+In **Export → 2 Players** and **Dual Player**, use **STEMS · SEPARATE** on one deck and **STEMS · QUEUE** on the other. Enable the STEMS button in the player layout options if the controls are hidden. Each deck has its own part switches. In Performance, hover the deck overview for its separation status. The footer identifies the active track.
+
+recordbox runs one full deck separation at a time. The deck reports when it is reading audio, checking the device, waiting for another GPU job, loading the model or saving. The first segment can take some time on older hardware. The percentage begins when the model reports measured progress. A queued track can play its original audio. Canceling that request leaves the running track alone. If both decks request the same track and model, they share one job.
+
+Switching layouts, entering Edit or Full Browser, and detaching or closing the library window let an existing job continue while its track stays on a deck. Ejecting or replacing the last copy requests cancellation. Completed parts load from cache on later deck loads and application launches, subject to the storage limits in Preferences. The Linux Vulkan build requires a manual request to start a new separation. [STEMS storage and backups](LIBRARY-SYNC.md#how-much-separation-is-saved)
+
+## Hardware setup
+
+On the first GUI launch of a new recordbox version or acceleration build, recordbox reads the CPU architecture and available instructions, usable logical CPUs, system memory and the GPU information available to that build. It checks for local beat-model and STEMS files. The setup record belongs to the active recordbox library. Changing the adapter or its reported driver can refresh the recommendation. On a later launch with the same hardware and version, recordbox reuses the saved setup and checks current eligibility. Running an actual separation exercises the selected backend.
+
 ## Track analysis workers
 
-In **Preferences → Analysis → Track Analysis → Analysis workers**, Automatic
-uses one fewer worker than the available logical CPUs, with a minimum of one
-and a maximum of twelve. On a four-core machine this gives three workers.
+In **Preferences → Analysis → Track Analysis**, **Automatic** reserves one logical CPU where possible, caps the pool at twelve workers and reduces the count when RAM is limited. A four-core machine can use up to three automatic workers. **Preferences → Extensions → STEMS** shows which backend the package supports and why a control is unavailable. An eligible adapter still needs to pass its first-use device check. A saved manual worker count or STEMS model selection carries across upgrades, subject to runtime safety checks.
+
 Pick one worker to limit CPU usage during a set. A single track can overlap
 waveform and loudness measurement with tempo and key detection. Key detection
 follows the beat grid. Several tracks share the same worker limit.
@@ -151,11 +162,12 @@ PREPDECK_PATHS="$PWD/tracks.txt" PREPDECK_N=3 cargo test --manifest-path app/Car
 
 ## High-precision beat grids
 
-Turn on **Preferences → Analysis → Track Analysis → Use high precision BeatGrid
-analysis** to refine beat times and fractional BPM using repeated attacks in the
-audio. **Normal** fits a steady tempo. **Dynamic** refines each detected tempo
+Turn on **Preferences → Analysis → Track Analysis → High precision: refine beat timing**
+to refine beat times and fractional BPM using repeated attacks in the audio. **Normal** fits a steady tempo. **Dynamic** refines each detected tempo
 segment and preserves the beat numbering across changes. The option starts off,
 including when upgrading from a version that showed an inactive switch.
+
+**Use installed beat grid model** is a separate option in the same panel. It uses compatible local beat-model files and the CPU. On eligible tracks up to 15 minutes, Normal can recognize changes in tempo and Dynamic follows changing tempo throughout. If the model files or a usable result are unavailable, recordbox uses the selected ordinary estimator. To use an existing model installation outside the default macOS path, set `PREPDECK_RB_MODELS` to its `detect_beat` directory before starting recordbox. The application does not download these files. This option works independently of the GPU backend selected for STEMS.
 
 New analyses use the setting immediately. For an already analyzed track, select
 **BPM / Grid** and choose **Track → Analyze Track**. Automatic analysis preserves
@@ -257,6 +269,14 @@ controls. Category savings depend on the expanded groups and library contents;
 100,000 distinct artists is a scaling stress case.
 
 ### Diagnosing interruptions when enabling effects
+
+In Performance mode, hover the small audio-load bar beside the master meters. It shows the latest callback load, the peak since the audio output opened, and how many callbacks took longer than their buffer period. Compare the counter over the same passage with STEMS idle and then separating. The counter measures time spent inside recordbox's output callback. A driver can also deliver a callback late, so its underrun counter provides a second observation.
+
+At 48 kHz a 128-frame buffer gives the mixer 2.67 ms. A 256-frame buffer gives it 5.33 ms and a 512-frame buffer 10.67 ms. If the counter climbs during separation, try the next supported buffer size in **Preferences → Audio** and compare the count again. A larger buffer adds latency. Separating a track before the set lets playback use the four cached parts.
+
+Live FX run on the CPU. Delays, filters and feedback use samples from the preceding frames, and the mixer needs the result in the current audio buffer. Sending each short block to the GPU would add a submission and a wait, competing with STEMS on a shared adapter. A long convolution rendered ahead of playback would have a different latency budget.
+
+In a device-free comparison on one Linux Xeon core, Echo's median processing time at 48 kHz and 128 frames went from 22.82 to 20.43 µs. Reverse Delay went from 17.14 to 15.74 µs. At 512 frames the corresponding times were 87.47 to 80.24 µs and 60.10 to 56.27 µs. Reverb Up stayed about the same. The comparison interleaved the same input across the revisions and verified the output samples. These rack timings exclude the driver and OS scheduling.
 
 When you first assign Beat FX to a channel, enable PAD FX, master RELEASE FX,
 or MERGE FX, the interface prepares the requested audio buffers with the

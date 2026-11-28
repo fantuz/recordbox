@@ -13,6 +13,9 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Instant;
 
+mod hardware_setup;
+mod match_enrichment;
+pub(crate) use match_enrichment::MATCH_LOOKUP_LIMIT;
 #[cfg(test)]
 mod stem_cache_tests;
 #[cfg(test)]
@@ -177,6 +180,7 @@ impl Col {
 
 /// The experimental hybrid backend is exercised by an explicit separation request.
 pub(crate) const MANUAL_STEMS_PREVIEW: bool = cfg!(all(target_os = "linux", feature = "vulkan"));
+pub(crate) const DEFAULT_STEM_CACHE_GB: u32 = 50;
 
 impl Prefs {
     pub(crate) fn auto_stems_on_load(&self, gpu: bool) -> bool {
@@ -275,9 +279,9 @@ pub struct Prefs {
     pub stems_auto_cpu: bool,
     /// Preview finalized sections during eligible GPU jobs started after this preference is set.
     pub stems_progressive_preview: bool,
-    /// Storage budget in decimal GB. At zero, each new save keeps only its own result.
+    /// Storage budget in decimal GB. At zero, each successful new save keeps only its own result.
     pub stem_cache_gb: u32,
-    /// Skip automatic eviction and retain the budget in case the user switches back.
+    /// Skip automatic eviction; writes in both modes must leave 10% of the volume free.
     pub keep_all_stems: bool,
     /// Import play histories from connected devices automatically.
     pub import_device_history: bool,
@@ -591,8 +595,9 @@ mod prefs_tests {
     #[test]
     fn stem_storage_preferences_preserve_legacy_budgets_and_opt_in() {
         let default: super::Prefs = serde_json::from_str("{}").unwrap();
-        assert_eq!(default.stem_cache_limit(), Some(20_000_000_000));
-        for gb in [0, 7, u32::MAX] {
+        assert_eq!(default.stem_cache_limit(), Some(50_000_000_000));
+        assert_eq!(super::Prefs::default().stem_cache_limit(), default.stem_cache_limit());
+        for gb in [0, 7, 20, u32::MAX] {
             let mut prefs: super::Prefs = serde_json::from_value(serde_json::json!({"stem_cache_gb": gb})).unwrap();
             assert_eq!(prefs.stem_cache_limit(), Some(u64::from(gb) * 1_000_000_000));
             prefs.keep_all_stems = true;
@@ -607,13 +612,13 @@ mod prefs_tests {
         let dir = tempfile::tempdir().unwrap();
         let old = dir.path().join("000000000000000000000001-htdemucs.stems");
         let new = dir.path().join("000000000000000000000001-htdemucs_ft.stems");
-        std::fs::write(&old, b"old").unwrap();
-        std::fs::write(&new, b"new").unwrap();
+        let parts = crate::stems::Stems { len: 1, data: vec![0.25; 8] };
+        crate::stems::save_with_policy(&old, &parts, || None).unwrap();
         let mut prefs = super::Prefs { stem_cache_gb: 0, ..Default::default() };
         let state = super::StemState::new();
         state.update_cache_limit(&prefs);
         let worker_limit = state.cache_limit.clone();
-        let finish_save = || crate::stems::trim_cache(&new, || *worker_limit.lock());
+        let finish_save = || crate::stems::save_with_policy(&new, &parts, || *worker_limit.lock()).unwrap();
 
         prefs.keep_all_stems = true;
         state.update_cache_limit(&prefs);
@@ -770,15 +775,15 @@ mod prefs_tests {
         use std::sync::atomic::Ordering;
         let mut state = super::StemState::new();
         state.separating = Some((4, 0.25));
-        state.pending = Some((cache_key(9, "htdemucs"), crate::stems::SeparationDevice::Cpu));
+        state.enqueue(cache_key(9, "htdemucs"), crate::stems::SeparationDevice::Cpu);
         state.retain_deck_tracks([None, Some(9), None, Some(4)]);
         assert!(!state.cancel.load(Ordering::Relaxed));
         state.retain_deck_tracks([None, Some(9), None, None]);
         assert!(state.cancel.load(Ordering::Relaxed));
-        assert_eq!(state.pending, Some((cache_key(9, "htdemucs"), crate::stems::SeparationDevice::Cpu)));
+        assert_eq!(state.pending.front(), Some(&(cache_key(9, "htdemucs"), crate::stems::SeparationDevice::Cpu)));
         assert!(state.separating.is_some(), "another model must wait until the cancelled worker exits");
         state.retain_deck_tracks([None; 4]);
-        assert!(state.pending.is_none());
+        assert!(state.pending.is_empty());
         assert!(!state.download_cancel.load(Ordering::Relaxed));
     }
 
@@ -986,7 +991,7 @@ mod related_tests {
 /// match the import. Allow floating-point round trips through the library.
 /// Sub-millisecond timing and fractional BPM edits belong to the saved grid.
 pub fn grids_match(a: &BeatGrid, b: &BeatGrid) -> bool {
-    a.anchors.len() == b.anchors.len() && a.anchors.iter().zip(&b.anchors).all(|(x, y)| {
+    a.has_listed_beats() == b.has_listed_beats() && a.anchors.len() == b.anchors.len() && a.anchors.iter().zip(&b.anchors).all(|(x, y)| {
         x.beat == y.beat && (x.time - y.time).abs() <= 1e-9 && (x.bpm - y.bpm).abs() <= 1e-9
     })
 }
@@ -1050,7 +1055,7 @@ impl Default for Prefs {
             stems_auto_separate: true,
             stems_auto_cpu: false,
             stems_progressive_preview: false,
-            stem_cache_gb: 20,
+            stem_cache_gb: DEFAULT_STEM_CACHE_GB,
             keep_all_stems: false,
             import_device_history: true,
             keymap: Default::default(),
@@ -1170,14 +1175,30 @@ impl StemError {
 }
 
 pub enum StemMsg {
-    Hardware(crate::stems::Hardware, String),
+    Hardware(anyhow::Result<(crate::stems::Hardware, hardware_setup::Extensions)>),
     Download(u64, u64),
     DownloadDone(Result<(), String>),
+    Phase(i64, crate::stems::SeparationPhase),
     Progress(i64, f32),
     Preview(StemCacheKey, Arc<crate::stems::Live>),
     CacheWrite(StemCacheKey, Result<(), String>),
+    VocalLevels(StemCacheKey, Vec<u8>),
     Cached(StemCacheKey, anyhow::Result<Arc<crate::stems::Stems>>),
     Done(i64, anyhow::Result<std::sync::Arc<crate::stems::Stems>>),
+}
+
+// Keep recoverable Rust panics on the job's normal error/completion path.
+pub(crate) fn guard_stem_work<T>(name: &str, run: impl FnOnce() -> anyhow::Result<T>) -> anyhow::Result<T> {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(run)).unwrap_or_else(|payload| {
+        let reason = payload.downcast_ref::<String>().map(String::as_str)
+            .or_else(|| payload.downcast_ref::<&str>().copied()).unwrap_or("unknown error");
+        Err(anyhow::anyhow!("{name} worker stopped unexpectedly: {reason}"))
+    })
+}
+
+fn finish_stem_job(tx: &crossbeam_channel::Sender<StemMsg>, track: i64,
+    run: impl FnOnce() -> anyhow::Result<Arc<crate::stems::Stems>>) {
+    let _ = tx.send(StemMsg::Done(track, guard_stem_work("Separation", run)));
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -1187,13 +1208,35 @@ pub struct StemCacheKey {
     pub(crate) path: std::path::PathBuf,
 }
 
+impl StemCacheKey {
+    fn send_vocal_levels(&self, tx: &crossbeam_channel::Sender<StemMsg>, parts: &crate::stems::Stems) {
+        if parts.len > 0 {
+            let _ = tx.send(StemMsg::VocalLevels(self.clone(), crate::stems::separated_vocal_levels(parts)));
+        }
+    }
+
+    fn save_completed(
+        &self, parts: &crate::stems::Stems, track: &Track, limit: impl Fn() -> Option<u64>,
+    ) -> Result<(), String> {
+        crate::stems::save_with_policy(&self.path, parts, limit).map_err(|error| {
+            let model = crate::stems::spec(self.model).map_or(self.model, |m| m.name);
+            format!(
+                "Could not save {model} parts for “{}”. The deck can play them from memory while this track and model stay loaded. {} ({error:#})",
+                track.display_title(), self.path.display(),
+            )
+        })
+    }
+}
+
 /// Stem separation status: hardware, model, download and the current separation.
 pub struct StemState {
     pub hw: Option<crate::stems::Hardware>,
     pub model: Option<String>,
     pub model_ready: bool,
     pub downloading: Option<(u64, u64)>,
+    download_model: Option<&'static str>,
     pub separating: Option<(i64, f32)>,
+    phase: crate::stems::SeparationPhase,
     // An explicit request can arrive while a deck is already reading the same cache file.
     // Only that request may start separation after the read fails in the manual preview.
     loading: HashMap<StemCacheKey, Option<crate::stems::SeparationDevice>>,
@@ -1206,8 +1249,8 @@ pub struct StemState {
     active_key: Option<StemCacheKey>,
     preview: Option<Arc<crate::stems::Live>>,
     pub execution: crate::stems::SeparationDevice,
-    /// Track to separate as soon as the model download finishes.
-    pending: Option<(StemCacheKey, crate::stems::SeparationDevice)>,
+    // Preserve requests from each deck while another track runs or weights download.
+    pending: std::collections::VecDeque<(StemCacheKey, crate::stems::SeparationDevice)>,
     pub cancel: Arc<std::sync::atomic::AtomicBool>,
     pub download_cancel: Arc<std::sync::atomic::AtomicBool>,
     pub tx: crossbeam_channel::Sender<StemMsg>,
@@ -1216,7 +1259,13 @@ pub struct StemState {
 
 impl StemState {
     pub(crate) fn pending_for(&self, track: i64) -> bool {
-        self.pending.as_ref().is_some_and(|(key, _)| key.track == track)
+        self.pending.iter().any(|(key, _)| key.track == track)
+    }
+
+    fn enqueue(&mut self, key: StemCacheKey, device: crate::stems::SeparationDevice) {
+        if !self.pending.iter().any(|(queued, _)| queued == &key) {
+            self.pending.push_back((key, device));
+        }
     }
 
     fn update_cache_limit(&self, prefs: &Prefs) {
@@ -1274,8 +1323,29 @@ impl StemState {
         }
     }
 
+    pub(crate) fn download_status(&self) -> Option<String> {
+        let (done, total) = self.downloading?;
+        let name = self.download_model.unwrap_or("STEMS model");
+        Some(if self.download_cancel.load(std::sync::atomic::Ordering::Relaxed) {
+            format!("Stopping download of {name}…")
+        } else if total == 0 {
+            format!("Downloading {name}…")
+        } else {
+            format!("Downloading {name} · {:.0}% received", 100.0 * done as f64 / total as f64)
+        })
+    }
+
     pub fn status_model(&self) -> Option<&'static crate::stems::ModelSpec> {
         self.active_key.as_ref().map(|key| key.model).or(self.model.as_deref()).and_then(crate::stems::spec)
+    }
+
+    pub(crate) fn separation_stage(&self) -> Option<String> {
+        let (_, progress) = self.separating?;
+        if self.phase == crate::stems::SeparationPhase::Separating && progress > 0.0 {
+            Some(if progress < 0.01 { "<1%".to_owned() } else { format!("{:.0}%", (progress * 100.0).floor()) })
+        } else {
+            Some(self.phase.label().into())
+        }
     }
 
     pub fn separation_status(&self) -> Option<String> {
@@ -1288,10 +1358,12 @@ impl StemState {
         } else {
             ""
         };
-        Some(if progress == 0.0 {
+        Some(if self.phase != crate::stems::SeparationPhase::Separating {
+            format!("{} · {model}{backend}", self.phase.label())
+        } else if progress == 0.0 {
             format!("Starting {model}{backend} · waiting for the first segment")
         } else {
-            format!("Separating with {model}{backend}: {:.0}%", progress * 100.0)
+            format!("Separating with {model}{backend}: {}", self.separation_stage()?)
         })
     }
 
@@ -1312,14 +1384,12 @@ impl StemState {
         if self.separating.is_some_and(|(id, _)| !tracks.contains(&Some(id))) {
             self.cancel.store(true, std::sync::atomic::Ordering::Relaxed);
         }
-        if self.pending.as_ref().is_some_and(|(key, _)| !tracks.contains(&Some(key.track))) {
-            self.pending = None;
-        }
+        self.pending.retain(|(key, _)| tracks.contains(&Some(key.track)));
     }
 
     pub fn new() -> Self {
         let (tx, rx) = crossbeam_channel::unbounded();
-        StemState { hw: None, model: None, active_key: None, preview: None, model_ready: false, downloading: None, separating: None, loading: HashMap::new(), errors: HashMap::new(), last_cache_warning: None, cache_limit: Default::default(), cache_usage: None, execution: crate::stems::SeparationDevice::Selected, pending: None, cancel: Default::default(), download_cancel: Default::default(), tx, rx }
+        StemState { hw: None, model: None, active_key: None, preview: None, model_ready: false, downloading: None, download_model: None, separating: None, phase: crate::stems::SeparationPhase::Separating, loading: HashMap::new(), errors: HashMap::new(), last_cache_warning: None, cache_limit: Default::default(), cache_usage: None, execution: crate::stems::SeparationDevice::Selected, pending: Default::default(), cancel: Default::default(), download_cancel: Default::default(), tx, rx }
     }
 }
 
@@ -1467,6 +1537,9 @@ pub struct Toast {
 #[derive(Default)]
 pub struct Dialogs {
     pub prefs_open: bool,
+    pub match_lookup: Option<crate::ui_dialogs::MatchLookupDialog>,
+    /// Chosen by the user in this session. An imported library cannot supply an executable.
+    pub onetagger_cli: Option<std::path::PathBuf>,
     pub confirm_clear_stems: bool,
     pub library_sync_review: Option<crate::ui_sync::Review>,
     pub prefs_tab: u8,
@@ -1620,6 +1693,8 @@ pub struct App {
     pub(crate) collection_categories: CollectionCategories,
     pub index: HashMap<i64, usize>,
     pub previews: HashMap<i64, Vec<u8>>,
+    /// Computed once per preview on demand. Preview replacements invalidate their entry.
+    pub(crate) match_audio: std::cell::RefCell<HashMap<i64, Option<[f64; 4]>>>,
     pub cue_counts: HashMap<i64, (usize, usize)>,
     pub hot_positions: HashMap<i64, Vec<(f64, i32, u8)>>,
     pub nodes: Vec<PlaylistNode>,
@@ -1631,7 +1706,7 @@ pub struct App {
     pub expanded: HashSet<i64>,
     pub list: Vec<i64>,
     pub(crate) list_totals: Option<(u64, String)>,
-    track_metadata_revision: u64,
+    pub(crate) track_metadata_revision: u64,
     pub list_dirty: bool,
     pub selected: HashSet<i64>,
     pub anchor: Option<usize>,
@@ -1692,6 +1767,7 @@ pub struct App {
     pub undo: Vec<Edit>,
     pub redo: Vec<Edit>,
     pub pool: AnalysisPool,
+    hardware_setup: hardware_setup::Setup,
     /// Hot slots the user cleared while this track's library analysis was outstanding.
     cleared_analysis_hot_slots: HashMap<i64, HashSet<i32>>,
     /// Keep saved track status intact while the UI shows "queued".
@@ -1753,6 +1829,7 @@ pub struct App {
     /// EDIT mode: the open project and the editor's state (ui_edit.rs).
     pub edit: crate::ui_edit::EditState,
     pub stemx: crate::stem_export::StemExport,
+    match_enrichment: match_enrichment::Enrichment,
 }
 
 impl App {
@@ -1810,6 +1887,7 @@ impl App {
             collection_categories: CollectionCategories::default(),
             index: HashMap::new(),
             previews: HashMap::new(),
+            match_audio: Default::default(),
             cue_counts: HashMap::new(),
             hot_positions: HashMap::new(),
             nodes: vec![],
@@ -1860,6 +1938,7 @@ impl App {
             load_target: 0,
             deck: Deck::default(),
             pool,
+            hardware_setup: Default::default(),
             cleared_analysis_hot_slots: HashMap::new(),
             analysis_previous_status: HashMap::new(),
             analysis_failures: None,
@@ -1899,6 +1978,7 @@ impl App {
             midi: Default::default(),
             edit: Default::default(),
             stemx: Default::default(),
+            match_enrichment: Default::default(),
         }
     }
 
@@ -2259,7 +2339,8 @@ impl App {
                                 Ok(st) => {
                                     eprintln!("separated {} ({:.0} s of audio) in {:.1} s", tr.display_title(), st.len as f64 / 44100.0, t0.elapsed().as_secs_f64());
                                     let key = app.stem_cache_key(t, m.id).unwrap();
-                                    let _ = crate::stems::save(&key.path, &st);
+                                    let saved = key.save_completed(&st, &tr, || app.prefs.stem_cache_limit());
+                                    let _ = app.stem.tx.send(StemMsg::CacheWrite(key.clone(), saved));
                                     app.deck.stem_cache_key = Some(key);
                                     let mut ps = app.player.state.lock();
                                     ps.stems = Some(std::sync::Arc::new(st));
@@ -2327,8 +2408,11 @@ impl App {
 
     // ------------------------------------------------------------------ loading
     pub fn reload_all(&mut self) {
+        self.ext.panel_cache = [None, None];
         self.reload_tracks();
+        self.reload_match_evidence();
         self.previews = self.db.previews().unwrap_or_default();
+        self.match_audio.get_mut().clear();
         self.cue_counts = self.db.tracks_with_cues().unwrap_or_default();
         self.hot_positions = self.db.hot_positions().unwrap_or_default();
         self.reload_playlists();
@@ -2554,55 +2638,7 @@ impl App {
 
     /// The same for any source track.
     pub fn related_tracks_of(&self, src: i64) -> Vec<i64> {
-        let Some(src) = self.track(src).cloned() else { return vec![] };
-        let r = &self.prefs.related;
-        let mut out: Vec<(i64, i64)> = self
-            .tracks
-            .iter()
-            .filter(|t| t.id != src.id && !t.missing)
-            .filter_map(|t| {
-                let mut score = 0i64;
-                if r.matching && !self.is_match(src.id, t.id) {
-                    return None;
-                }
-                if r.key > 0 {
-                    let d = key_distance(src.key, t.key)?;
-                    if d > r.key as i32 - 1 {
-                        return None;
-                    }
-                    score += (4 - d as i64) * 100;
-                }
-                if r.bpm {
-                    if src.bpm <= 0.0 || t.bpm <= 0.0 {
-                        return None;
-                    }
-                    let best = [t.bpm, t.bpm * 2.0, t.bpm / 2.0].iter().map(|b| ((b - src.bpm) / src.bpm * 100.0).abs()).fold(f64::MAX, f64::min);
-                    if best > r.bpm_pct {
-                        return None;
-                    }
-                    score += (100.0 - best * 10.0).max(0.0) as i64;
-                }
-                let same = |a: &str, b: &str| !a.trim().is_empty() && a.trim().eq_ignore_ascii_case(b.trim());
-                if r.genre && !same(&src.genre, &t.genre) {
-                    return None;
-                }
-                if r.artist && !same(&src.artist, &t.artist) {
-                    return None;
-                }
-                if r.label && !same(&src.label, &t.label) {
-                    return None;
-                }
-                if r.color && (src.color == 0 || src.color != t.color) {
-                    return None;
-                }
-                if r.rating && t.rating < src.rating {
-                    return None;
-                }
-                Some((t.id, score))
-            })
-            .collect();
-        out.sort_by(|a, b| b.1.cmp(&a.1));
-        out.into_iter().map(|x| x.0).collect()
+        self.related_for(src, 0)
     }
 
     fn folder_tracks(&self, id: i64, out: &mut Vec<i64>, seen: &mut HashSet<i64>) {
@@ -2860,7 +2896,7 @@ impl App {
         std::thread::spawn(move || {
             let from_rb = base.and_then(|b| {
                 let dat = b.with_extension("DAT");
-                let same = crate::rbimport::read_pqtz_grid(&dat).map(|r| grids_match(&r, &grid)).unwrap_or(false);
+                let same = crate::export::anlz::grid_pair::matches_source(&dat, &grid);
                 if !same || !crate::rbimport::pqtz_beat_indices_match(&dat, &beats) {
                     return None;
                 }
@@ -2896,16 +2932,22 @@ impl App {
         let (tx, rx) = crossbeam_channel::bounded(1);
         let ctx = self.ctx.clone();
         let cancel = self.deck.cancel_work.clone();
-        std::thread::spawn(move || {
-            let r = if rb && !cancel.load(std::sync::atomic::Ordering::Relaxed) {
-                crate::vocal_rb::analyse_file(&path, Some(&a))
-            } else if !cancel.load(std::sync::atomic::Ordering::Relaxed) && crate::stems::gpu_active() {
-                crate::stems::separate_vocals(&a.samples, a.sr, &mut |_| !cancel.load(std::sync::atomic::Ordering::Relaxed)).ok().map(|v| crate::stems::vocal_levels(&v, &crate::stems::mono_44k(&a.samples, a.sr)))
-            } else { None };
+        let worker = std::thread::Builder::new().name("rb-vocal-detection".into()).spawn(move || {
+            let r = guard_stem_work("Vocal detection", || {
+                let levels = if cancel.load(std::sync::atomic::Ordering::Relaxed) {
+                    None
+                } else if rb {
+                    crate::vocal_rb::analyse_file(&path, Some(&a))
+                } else if crate::stems::gpu_active() {
+                    crate::stems::separate_vocals(&a.samples, a.sr, &mut |_| !cancel.load(std::sync::atomic::Ordering::Relaxed))
+                        .ok().map(|v| crate::stems::vocal_levels(&v, &crate::stems::mono_44k(&a.samples, a.sr)))
+                } else { None };
+                Ok(levels)
+            }).unwrap_or_default();
             let _ = tx.send((id, r));
-            ctx.request_repaint();
+            ctx.request_repaint_of(egui::ViewportId::ROOT);
         });
-        self.deck.vocal_rx = Some(rx);
+        if worker.is_ok() { self.deck.vocal_rx = Some(rx); }
     }
 
 /// Track > Analyze Key. With a downloaded separation model and a GPU the key is found on the
@@ -2929,27 +2971,33 @@ impl App {
         let (tx, rx) = crossbeam_channel::unbounded();
         let ctx = self.ctx.clone();
         let n = jobs.len();
-        std::thread::spawn(move || {
-            for (id, path) in jobs {
-                let key = (|| {
-                    let d = crate::audio::decode_file(&path).ok()?;
-                    let mono = crate::stems::mono_44k(&d.samples, d.sr);
-                    if !crate::stems::gpu_active() { return Some(crate::key::detect_key(&mono, 44100.0)); }
-                    let drums = match crate::stems::separate_one(0, &d.samples, d.sr, &mut |_| true) {
-                        Ok(drums) => drums,
-                        Err(_) if crate::stems::backend_hold().is_some() => return Some(crate::key::detect_key(&mono, 44100.0)),
-                        Err(_) => return None,
-                    };
-                    let harm: Vec<f32> = mono.iter().zip(&drums).map(|(m, dr)| m - dr).collect();
-                    Some(crate::key::detect_key(&harm, 44100.0))
-                })()
-                .unwrap_or(-1);
-                if tx.send((id, key)).is_err() {
-                    return;
+        let worker = std::thread::Builder::new().name("rb-stem-key-analysis".into()).spawn(move || {
+            let _ = guard_stem_work("Key analysis", || {
+                for (id, path) in jobs {
+                    let key = (|| {
+                        let d = crate::audio::decode_file(&path).ok()?;
+                        let mono = crate::stems::mono_44k(&d.samples, d.sr);
+                        if !crate::stems::gpu_active() { return Some(crate::key::detect_key(&mono, 44100.0)); }
+                        let drums = match crate::stems::separate_one(0, &d.samples, d.sr, &mut |_| true) {
+                            Ok(drums) => drums,
+                            Err(_) if crate::stems::backend_hold().is_some() => return Some(crate::key::detect_key(&mono, 44100.0)),
+                            Err(_) => return None,
+                        };
+                        let harm: Vec<f32> = mono.iter().zip(&drums).map(|(m, dr)| m - dr).collect();
+                        Some(crate::key::detect_key(&harm, 44100.0))
+                    })()
+                    .unwrap_or(-1);
+                    if tx.send((id, key)).is_err() {
+                        break;
+                    }
+                    ctx.request_repaint_of(egui::ViewportId::ROOT);
                 }
-                ctx.request_repaint();
-            }
+                Ok(())
+            });
+            drop(tx);
+            ctx.request_repaint_of(egui::ViewportId::ROOT);
         });
+        if let Err(e) = worker { return self.toast_err(format!("Cannot start key analysis: {e}")); }
         self.key_job = Some((rx, n, 0));
         self.toast(format!("Analyzing the key of {n} track(s) with the stem model (about a minute each)…"));
     }
@@ -2957,11 +3005,14 @@ impl App {
     pub fn poll_key_job(&mut self) {
         let Some((rx, n, done)) = &mut self.key_job else { return };
         let mut results = vec![];
-        while let Ok(r) = rx.try_recv() {
-            results.push(r);
-            *done += 1;
-        }
-        let finished = *done >= *n;
+        let disconnected = loop {
+            match rx.try_recv() {
+                Ok(r) => { results.push(r); *done += 1; }
+                Err(crossbeam_channel::TryRecvError::Empty) => break false,
+                Err(crossbeam_channel::TryRecvError::Disconnected) => break true,
+            }
+        };
+        let completed = *done;
         let total = *n;
         for (id, key) in results {
             if key >= 0 && self.track(id).map(|t| t.key != key || t.key_manual).unwrap_or(false) {
@@ -2972,10 +3023,14 @@ impl App {
                 self.save_track(id);
             }
         }
-        if finished {
+        if completed >= total || disconnected {
             self.key_job = None;
             self.list_dirty = true;
-            self.toast(format!("Key analysis finished for {total} track(s)."));
+            if completed < total {
+                self.toast_err(format!("Key analysis stopped after {completed} of {total} tracks. Completed results were kept."));
+            } else {
+                self.toast(format!("Key analysis finished for {total} track(s)."));
+            }
         }
     }
 
@@ -3011,16 +3066,17 @@ impl App {
 
     pub fn poll_vocal(&mut self) {
         let Some(rx) = &self.deck.vocal_rx else { return };
-        if let Ok((id, r)) = rx.try_recv() {
-            self.deck.vocal_rx = None;
-            if r.is_none() {
-                self.vocal_failed.insert(id);
-            }
-            if let Some(levels) = r {
-                let _ = self.db.save_vocal(id, &levels);
-                if self.deck.track == Some(id) {
-                    self.deck.vocal = Some(std::sync::Arc::new((crate::stems::VOCAL_HOP as f64 / 44100.0, levels)));
-                }
+        let result = rx.try_recv();
+        if matches!(result, Err(crossbeam_channel::TryRecvError::Empty)) { return; }
+        self.deck.vocal_rx = None;
+        let Ok((id, r)) = result else { return };
+        if r.is_none() {
+            self.vocal_failed.insert(id);
+        }
+        if let Some(levels) = r {
+            let _ = self.db.save_vocal(id, &levels);
+            if self.deck.track == Some(id) {
+                self.deck.vocal = Some(std::sync::Arc::new((crate::stems::VOCAL_HOP as f64 / 44100.0, levels)));
             }
         }
     }
@@ -3070,7 +3126,7 @@ impl App {
         if self.view != v {
             self.view = v;
             self.colbrowse = Default::default();
-            let manual = matches!(self.view, View::History(_) | View::TagList | View::Suggest(_)) || matches!(self.view, View::Playlist(id) if self.node(id).map(|n| n.kind == NodeKind::Playlist).unwrap_or(false));
+            let manual = matches!(self.view, View::History(_) | View::TagList | View::Related | View::Suggest(_)) || matches!(self.view, View::Playlist(id) if self.node(id).map(|n| n.kind == NodeKind::Playlist).unwrap_or(false));
             // Switch to the other column set and sort when moving between playlists and the
             // rest; each keeps the user's own choices.
             if manual != self.prefs.columns_for_playlist {
@@ -3163,15 +3219,18 @@ impl App {
     // ------------------------------------------------------------------ stems
     /// Assess the hardware, settle on a model and download it if needed (background thread).
     pub fn stems_init(&mut self) {
+        self.hardware_setup.status = None;
         let tx = self.stem.tx.clone();
         let ctx = self.ctx.clone();
-        let wanted = std::env::var("PREPDECK_STEM_MODEL").ok().or_else(|| self.prefs.stem_model.clone());
-        std::thread::spawn(move || {
-            let hw = crate::stems::assess();
-            let m = wanted.as_deref().and_then(crate::stems::spec).unwrap_or_else(|| crate::stems::choose(&hw));
-            let _ = tx.send(StemMsg::Hardware(hw, m.id.to_string()));
-            ctx.request_repaint();
+        let worker = std::thread::Builder::new().name("rb-stems-setup".into()).spawn(move || {
+            let result = guard_stem_work("Hardware check", || Ok((crate::stems::assess(), hardware_setup::Extensions::inspect())));
+            let _ = tx.send(StemMsg::Hardware(result));
+            ctx.request_repaint_of(egui::ViewportId::ROOT);
         });
+        if let Err(e) = worker {
+            let _ = self.stem.tx.send(StemMsg::Hardware(Err(e.into())));
+            self.ctx.request_repaint_of(egui::ViewportId::ROOT);
+        }
     }
 
     pub fn stems_download(&mut self) {
@@ -3185,24 +3244,27 @@ impl App {
         }
         self.stem.download_cancel.store(false, std::sync::atomic::Ordering::Relaxed);
         self.stem.downloading = Some((0, 0));
+        self.stem.download_model = Some(m.name);
         self.stem.errors.remove(&None);
         let tx = self.stem.tx.clone();
         let ctx = self.ctx.clone();
         let cancel = self.stem.download_cancel.clone();
-        std::thread::spawn(move || {
-            let tx2 = tx.clone();
-            let ctx2 = ctx.clone();
+        let worker = std::thread::Builder::new().name("rb-stems-download".into()).spawn(move || {
             let mut last = std::time::Instant::now();
-            let r = crate::stems::download(m, &mut |d, t, _| {
+            let r = guard_stem_work("Model download", || crate::stems::download(m, &mut |d, t, _| {
                 if last.elapsed().as_millis() > 200 {
-                    let _ = tx2.send(StemMsg::Download(d, t));
-                    ctx2.request_repaint();
+                    let _ = tx.send(StemMsg::Download(d, t));
+                    ctx.request_repaint_of(egui::ViewportId::ROOT);
                     last = std::time::Instant::now();
                 }
-            }, &cancel);
-            let _ = tx.send(StemMsg::DownloadDone(r.map_err(|e| e.to_string())));
-            ctx.request_repaint();
+            }, &cancel));
+            let _ = tx.send(StemMsg::DownloadDone(r.map_err(|e| format!("{e:#}"))));
+            ctx.request_repaint_of(egui::ViewportId::ROOT);
         });
+        if let Err(e) = worker {
+            let _ = self.stem.tx.send(StemMsg::DownloadDone(Err(format!("Cannot start the model download worker: {e}"))));
+            self.ctx.request_repaint_of(egui::ViewportId::ROOT);
+        }
     }
 
     /// Stems for a track that has just been loaded: the kept ones if this track was separated
@@ -3217,7 +3279,9 @@ impl App {
         if self.load_cached_stems(&key, None) { return; }
         let quiet = self.screenshot.is_some() && std::env::var("PREPDECK_SHOT_STEMS").is_err();
         let ready = crate::stems::spec(key.model).is_some_and(crate::stems::model_ready);
-        if self.prefs.auto_stems_on_load(self.stem.gpu_available()) && ready && !quiet && self.deck.track == Some(id) {
+        let automatic_model = self.stem.hw.as_ref().zip(crate::stems::spec(key.model))
+            .is_some_and(|(hw, model)| crate::stems::runs_on(model, hw));
+        if automatic_model && self.prefs.auto_stems_on_load(self.stem.gpu_available()) && ready && !quiet && self.deck.track == Some(id) {
             let execution = if self.prefs.stems_auto_cpu { crate::stems::SeparationDevice::Selected } else { crate::stems::SeparationDevice::GpuOnly };
             self.start_stem_separation(key, execution);
         }
@@ -3230,14 +3294,21 @@ impl App {
     }
 
     fn resume_pending_stems(&mut self) {
-        let Some((key, execution)) = self.stem.pending.take() else { return };
-        if let Some(deck) = (0..4).find(|&n| self.deck_of(n).stem_cache_key.as_ref() == Some(&key)) {
-            self.with_deck(deck, |app| {
-                if !app.load_cached_stems(&key, Some(execution))
-                    && (execution == crate::stems::SeparationDevice::Cpu || crate::stems::backend_hold().is_none()) {
-                    app.start_stem_separation(key, execution);
-                }
-            });
+        while self.stem.separating.is_none() && self.stem.downloading.is_none() {
+            let Some((key, execution)) = self.stem.pending.pop_front() else { break };
+            if let Some(deck) = (0..4).find(|&n| self.deck_of(n).stem_cache_key.as_ref() == Some(&key)) {
+                self.with_deck(deck, |app| {
+                    if !app.load_cached_stems(&key, Some(execution)) {
+                        if execution != crate::stems::SeparationDevice::Cpu && crate::stems::backend_hold().is_some() {
+                            app.stem.errors.insert(Some(key.track), StemError {
+                                retry_model: Some(key.model), detail: "GPU separation paused. Retry on CPU.".into()
+                            });
+                        } else {
+                            app.start_stem_separation(key, execution);
+                        }
+                    }
+                });
+            }
         }
     }
 
@@ -3257,7 +3328,20 @@ impl App {
     // A model change can complete while reads or inference for the previous model are in flight.
     pub(crate) fn select_stem_model(&mut self, model: &'static crate::stems::ModelSpec) {
         self.prefs.stem_model = Some(model.id.to_owned());
-        self.stem.model = self.prefs.stem_model.clone();
+        self.activate_stem_model(model);
+    }
+
+    pub(crate) fn select_automatic_stem_model(&mut self) {
+        self.prefs.stem_model = None;
+        if let Some(hw) = self.stem.hw.as_ref() {
+            self.activate_stem_model(self.automatic_stem_model(hw));
+        } else {
+            self.stem.model = None;
+        }
+    }
+
+    fn activate_stem_model(&mut self, model: &'static crate::stems::ModelSpec) {
+        self.stem.model = Some(model.id.to_owned());
         self.stem.model_ready = crate::stems::model_ready(model);
         for n in 0..4 {
             self.with_deck(n, |app| {
@@ -3278,8 +3362,7 @@ impl App {
             let mut player = self.player.state.lock();
             player.stems = None;
             player.stem_preview = None;
-            self.deck.x.stem_wave = None;
-            self.deck.x.stem_wave_rx = None;
+            self.deck.x.clear_stem_wave();
         }
         if self.player.state.lock().stems.is_some() { return true; }
         if let Some(parts) = (0..4).filter(|&n| self.deck_of(n).stem_cache_key.as_ref() == Some(key))
@@ -3299,18 +3382,28 @@ impl App {
         let Some(saved) = crate::stems::existing_cache_path(&key.path) else { return false };
         let key = key.clone();
         self.stem.loading.insert(key.clone(), on_failure);
+        let needs_vocal = self.db.vocal(key.track).is_none();
         let tx = self.stem.tx.clone();
         let ctx = self.ctx.clone();
-        std::thread::spawn(move || {
-            let r = crate::stems::load(&saved).map(Arc::new).map_err(|error| anyhow::anyhow!("{}: {error:#}", saved.display()));
+        let requested = key.clone();
+        let worker = std::thread::Builder::new().name("rb-stems-cache".into()).spawn(move || {
+            let r = guard_stem_work("Cache read", || {
+                let parts = Arc::new(crate::stems::load(&saved)?);
+                if needs_vocal { key.send_vocal_levels(&tx, &parts); }
+                Ok(parts)
+            }).map_err(|error| anyhow::anyhow!("{}: {error:#}", saved.display()));
             let _ = tx.send(StemMsg::Cached(key, r));
-            ctx.request_repaint();
+            ctx.request_repaint_of(egui::ViewportId::ROOT);
         });
+        if let Err(error) = worker {
+            let _ = self.stem.tx.send(StemMsg::Cached(requested, Err(anyhow::anyhow!("Could not start STEMS cache reader: {error}"))));
+            self.ctx.request_repaint_of(egui::ViewportId::ROOT);
+        }
         true
     }
 
     pub fn manual_stem_device(&self) -> crate::stems::SeparationDevice {
-        self.stem.manual_device(self.deck.track, crate::stems::backend_hold().is_some())
+        self.stem.manual_device(self.deck.track, crate::stems::backend_hold().is_some() || crate::stems::forced_cpu())
     }
 
     /// Separate the loaded track (downloading the model first if it is missing).
@@ -3321,7 +3414,8 @@ impl App {
     pub fn separate_loaded_on(&mut self, execution: crate::stems::SeparationDevice) {
         let Some(id) = self.deck.track else { return };
         let Some(m) = self.stem.model_for(Some(id), execution) else {
-            self.toast_err("Checking this computer for stem separation; try again in a moment.");
+            let detail = self.stem_hardware_error().unwrap_or("Checking this computer for stem separation; try again in a moment.").to_owned();
+            self.toast_err(detail);
             return;
         };
         let Some(key) = self.stem_cache_key(id, m.id) else { return };
@@ -3331,21 +3425,27 @@ impl App {
     }
 
     fn start_stem_separation(&mut self, key: StemCacheKey, execution: crate::stems::SeparationDevice) {
-        if self.stem.separating.is_some() {
+        if self.stem.separating.is_some() || self.stem.downloading.is_some() {
             if self.stem.active_key.as_ref() != Some(&key) || self.stem.cancel.load(std::sync::atomic::Ordering::Relaxed) {
-                self.stem.pending = Some((key, execution));
+                self.stem.enqueue(key, execution);
             }
             return;
         }
         let id = key.track;
         let Some(m) = crate::stems::spec(key.model) else { return };
+        if let Some(reason) = self.stem.hw.as_ref().and_then(|hw|
+            hardware_setup::separation_limit(hw, m, crate::stems::gpu_capability().state, execution)) {
+            self.stem.errors.insert(Some(id), StemError { detail: reason.into(), retry_model: None });
+            return;
+        }
         if !crate::stems::model_ready(m) {
-            self.stem.pending = Some((key, execution));
+            self.stem.enqueue(key, execution);
             self.stems_download_for(m);
             return;
         }
         let Some(t) = self.track(id).cloned() else { return };
         self.stem.separating = Some((id, 0.0));
+        self.stem.phase = crate::stems::SeparationPhase::ReadingAudio;
         self.stem.active_key = Some(key.clone());
         self.stem.execution = execution;
         self.stem.errors.remove(&None);
@@ -3361,6 +3461,7 @@ impl App {
             self.prefs.stems_progressive_preview && crate::stems::Live::supported(hw, m, execution)
         ).cloned();
         let cache_limit = self.stem.cache_limit.clone();
+        let needs_vocal = self.db.vocal(id).is_none();
         let worker = std::thread::Builder::new().name("rb-stems".into()).spawn(move || {
             let run = || -> anyhow::Result<std::sync::Arc<crate::stems::Stems>> {
                 let cancelled = || cancel.load(std::sync::atomic::Ordering::Relaxed);
@@ -3375,31 +3476,28 @@ impl App {
                     let _ = tx.send(StemMsg::Preview(key.clone(), preview.clone()));
                 }
                 let mut last_progress = 0.0;
+                let mut phase = |stage| {
+                    let _ = tx.send(StemMsg::Phase(id, stage));
+                    ctx.request_repaint_of(egui::ViewportId::ROOT);
+                };
                 let st = crate::stems::separate_with_live(m, &dec.samples, dec.sr, &mut |p| {
                     if cancelled() { return false; }
                     if p > last_progress {
                         last_progress = p;
                         let _ = tx.send(StemMsg::Progress(id, p));
-                        ctx.request_repaint();
+                        ctx.request_repaint_of(egui::ViewportId::ROOT);
                     }
                     true
-                }, execution, preview.as_deref())?;
+                }, execution, preview.as_deref(), &mut phase)?;
                 if cancelled() { anyhow::bail!("stopped"); }
-                let saved = match crate::stems::save(&key.path, &st) {
-                    Ok(()) => {
-                        crate::stems::trim_cache(&key.path, || *cache_limit.lock());
-                        Ok(())
-                    }
-                    Err(error) => Err(format!(
-                        "Could not cache {} parts for “{}”. The deck can play them until the track is unloaded. Check free space and write access to {} ({error:#}).",
-                        m.name, t.display_title(), key.path.display()
-                    )),
-                };
+                phase(crate::stems::SeparationPhase::Saving);
+                let saved = key.save_completed(&st, &t, || *cache_limit.lock());
+                if needs_vocal && !cancelled() { key.send_vocal_levels(&tx, &st); }
                 let _ = tx.send(StemMsg::CacheWrite(key, saved));
                 Ok(std::sync::Arc::new(st))
             };
-            let _ = tx.send(StemMsg::Done(id, run()));
-            ctx.request_repaint();
+            finish_stem_job(&tx, id, run);
+            ctx.request_repaint_of(egui::ViewportId::ROOT);
         });
         if let Err(e) = worker {
             self.stem.separating = None;
@@ -3419,12 +3517,26 @@ impl App {
         }
     }
 
-    pub fn stop_separation(&mut self) {
-        self.stem.pending = None;
-        for request in self.stem.loading.values_mut() { *request = None; }
-        self.stem.download_cancel.store(true, std::sync::atomic::Ordering::Relaxed);
-        self.stem.cancel.store(true, std::sync::atomic::Ordering::Relaxed);
-        self.detach_stem_preview();
+    pub(crate) fn unrequested_stem_download(&self) -> bool {
+        self.stem.downloading.is_some() && self.stem.pending.is_empty()
+    }
+
+    pub(crate) fn queued_stems(&self) -> bool {
+        self.deck.stem_cache_key.as_ref().is_some_and(|key| self.stem.pending.iter().any(|(queued, _)| queued == key))
+    }
+
+    pub(crate) fn stop_deck_stems(&mut self) {
+        let Some(key) = &self.deck.stem_cache_key else { return };
+        let was_queued = self.queued_stems();
+        self.stem.pending.retain(|(queued, _)| queued != key);
+        if let Some(request) = self.stem.loading.get_mut(key) { *request = None; }
+        if was_queued && self.unrequested_stem_download() {
+            self.stem.download_cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+        if self.separating_stems() {
+            self.stem.cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+            self.detach_stem_preview();
+        }
     }
 
     /// Mute or unmute one part (source index: 0 drums, 1 bass, 2 other, 3 vocals).
@@ -3441,17 +3553,22 @@ impl App {
     pub fn poll_stems(&mut self) {
         while let Ok(m) = self.stem.rx.try_recv() {
             match m {
-                StemMsg::Hardware(hw, model) => {
-                    // Preferences can select a model while device detection is still running.
-                    let model = self.stem.model.clone().unwrap_or(model);
-                    self.stem.model_ready = crate::stems::spec(&model).map(crate::stems::model_ready).unwrap_or(false);
-                    if self.prefs.stem_model.is_none() {
-                        self.prefs.stem_model = Some(model.clone());
-                        self.save_prefs();
-                    }
-                    self.stem.model = Some(model);
+                StemMsg::Hardware(Err(e)) => {
+                    let message = format!("STEMS hardware check failed. Retry in Preferences → Extensions → STEMS. ({e:#})");
+                    self.hardware_setup.status = Some(message.clone());
+                    self.toast_err(message);
+                }
+                StemMsg::Hardware(Ok((hw, files))) => {
+                    self.apply_hardware_setup(&hw, files);
+                    // Resolve current intent only after detection. A temporary override or
+                    // an Automatic choice must never become a user's saved manual model.
+                    let session = std::env::var("PREPDECK_STEM_MODEL").ok();
+                    let model = hardware_setup::startup_model(self.automatic_stem_model(&hw), self.stem.model.as_deref(), session.as_deref(), self.prefs.stem_model.as_deref());
+                    let auto_download = self.prefs.stems_auto_download && crate::stems::runs_on(model, &hw);
+                    self.stem.model_ready = crate::stems::model_ready(model);
+                    self.stem.model = Some(model.id.to_owned());
                     self.stem.hw = Some(hw);
-                    if !self.stem.model_ready && self.prefs.stems_auto_download {
+                    if !self.stem.model_ready && auto_download {
                         self.stems_download();
                     }
                     for n in 0..4 {
@@ -3463,23 +3580,37 @@ impl App {
                 StemMsg::Download(d, t) => self.stem.downloading = Some((d, t)),
                 StemMsg::DownloadDone(r) => {
                     self.stem.downloading = None;
+                    self.stem.download_model = None;
+                    if let Some(files) = &mut self.hardware_setup.extensions { files.refresh_checkpoints(); }
                     match r {
                         Ok(()) => {
                             self.stem.model_ready = self.stem.model.as_deref().and_then(crate::stems::spec).is_some_and(crate::stems::model_ready);
                             self.resume_pending_stems();
                         }
                         Err(e) if e == "stopped" => {
-                            self.stem.pending = None;
+                            // A new deck request may have arrived while cancellation was in flight.
+                            self.resume_pending_stems();
                         }
                         Err(e) => {
                             self.stem.errors.insert(None, StemError { retry_model: None, detail: format!("Model download failed: {e}") });
-                            self.stem.pending = None;
+                            self.stem.pending.clear();
                         }
                     }
                 }
                 StemMsg::CacheWrite(key, result) => {
                     if let Err(warning) = &result { self.toast_err(warning.as_str()); }
                     self.stem.record_cache_write(key, result);
+                }
+                StemMsg::VocalLevels(key, levels) => {
+                    if (0..4).any(|n| self.deck_of(n).stem_cache_key.as_ref() == Some(&key))
+                        && self.db.vocal(key.track).is_none() {
+                        let _ = self.db.save_vocal(key.track, &levels);
+                        let vocal = Arc::new((crate::stems::VOCAL_HOP as f64 / 44100.0, levels));
+                        for n in 0..4 {
+                            let deck = self.deck_of_mut(n);
+                            if deck.track == Some(key.track) && deck.vocal.is_none() { deck.vocal = Some(vocal.clone()); }
+                        }
+                    }
                 }
                 StemMsg::Preview(key, preview) => {
                     if self.stem.active_key.as_ref() == Some(&key) && !self.stem.cancel.load(std::sync::atomic::Ordering::Relaxed) {
@@ -3489,6 +3620,11 @@ impl App {
                                 self.player.decks[n as usize].lock().stem_preview = Some(preview.clone());
                             }
                         }
+                    }
+                }
+                StemMsg::Phase(id, stage) => {
+                    if self.stem.separating.is_some_and(|(active, _)| active == id) {
+                        self.stem.phase = stage;
                     }
                 }
                 StemMsg::Progress(id, p) => {
@@ -3532,20 +3668,6 @@ impl App {
         match result {
             Ok(st) => {
                 self.stem.errors.remove(&Some(id));
-                // Separated stems give vocal detection for free.
-                if self.db.vocal(id).is_none() && st.len > 0 {
-                    let (l, r) = (&st.data[6 * st.len..7 * st.len], &st.data[7 * st.len..8 * st.len]);
-                    let mono: Vec<f32> = l.iter().zip(r).map(|(a, b)| 0.5 * (a + b)).collect();
-                    // The mix is the sum of the four stems.
-                    let mix: Vec<f32> = (0..st.len).map(|i| (0..8).map(|c| st.data[c * st.len + i]).sum::<f32>() * 0.5).collect();
-                    let levels = crate::stems::vocal_levels(&mono, &mix);
-                    let _ = self.db.save_vocal(id, &levels);
-                    let vocal = Arc::new((crate::stems::VOCAL_HOP as f64 / 44100.0, levels));
-                    for n in 0..4 {
-                        let deck = self.deck_of_mut(n);
-                        if deck.track == Some(id) && deck.vocal.is_none() { deck.vocal = Some(vocal.clone()); }
-                    }
-                }
                 for n in 0..4 {
                     if self.deck_of(n).stem_cache_key.as_ref() == Some(key) { self.player.decks[n as usize].lock().stems = Some(st.clone()); }
                 }
@@ -3811,6 +3933,7 @@ impl App {
     }
 
     pub fn poll_analysis(&mut self) {
+        self.pool.apply_thread_change();
         if self.analysis_total == 0 { return; }
         // Leave time for input and rendering when a large batch finishes or is stopped.
         let start = Instant::now();
@@ -3920,6 +4043,7 @@ impl App {
                 let preview: Vec<u8> = res.wave.columns(400).iter().flat_map(|c| c.iter().copied()).collect();
                 let _ = self.db.save_wave(id, &res.wave, &preview);
                 self.previews.insert(id, preview);
+                self.match_audio.get_mut().remove(&id);
                 if let Some(v) = &res.vocal {
                     let _ = self.db.save_vocal(id, v);
                     if self.deck.track == Some(id) && self.deck.vocal.is_none() {
@@ -4711,12 +4835,16 @@ impl App {
         if !self.grid_editable() {
             return;
         }
-        let mut g = self.deck.grid.clone();
         let from = if self.prefs.grid_from_current { self.anchor_at(self.pos()) } else { 0 };
-        for a in g.anchors.iter_mut().skip(from) {
-            a.time += secs;
+        if from == 0 {
+            self.push_grid(self.deck.grid.shifted(secs));
+        } else {
+            let mut g = self.deck.grid.clone();
+            for a in g.anchors.iter_mut().skip(from) {
+                a.time += secs;
+            }
+            self.push_grid(g);
         }
-        self.push_grid(g);
     }
     pub fn grid_scale_bpm(&mut self, f: impl Fn(f64) -> f64) {
         if !self.grid_editable() {
@@ -4738,7 +4866,7 @@ impl App {
         } else {
             // Whole track: one tempo, keeping the beat nearest the playhead in place.
             let bpm = f(g.anchors[self.anchor_at(b.time)].bpm).clamp(40.0, 499.0);
-            g = BeatGrid { anchors: vec![GridAnchor { time: b.time, bpm, beat: b.beat }] };
+            g = BeatGrid::from_anchors(vec![GridAnchor { time: b.time, bpm, beat: b.beat }]);
         }
         self.push_grid(g);
     }

@@ -546,6 +546,13 @@ fn check_item(ui: &mut Ui, on: bool, label: &str) -> egui::Response {
     ui.checkbox(&mut v, label)
 }
 
+fn match_lookup_item(app: &mut App, ui: &mut Ui, sel: &[i64]) {
+    if ui.button("Look up related track tags…").clicked() {
+        crate::ui_dialogs::open_match_lookup(app, sel);
+        ui.close_menu();
+    }
+}
+
 /// The track context menu, in the order rekordbox 7.2.19 builds it for collection and
 /// playlist rows (`BrowsePopupMenuManager::showListViewPopupMenu`, traced in
 /// `checks/re-7.2.19/shell-menus-traffic.md` section 5). recordbox's own entries, which
@@ -594,6 +601,7 @@ pub fn track_menu(app: &mut App, ui: &mut Ui, sel: &[i64]) {
             crate::collection_cleanup::ui::open(app, Some(sel.iter().copied().collect()));
             ui.close_menu();
         }
+        match_lookup_item(app, ui, sel);
         return;
     }
     // Load > Deck1..Deck4: always listed, usable in PERFORMANCE.
@@ -621,6 +629,7 @@ pub fn track_menu(app: &mut App, ui: &mut Ui, sel: &[i64]) {
         app.reanalyze(sel);
         ui.close_menu();
     }
+    match_lookup_item(app, ui, sel);
     let locked = sel.iter().all(|id| app.track(*id).map(|t| t.grid_locked).unwrap_or(false));
     let unlocked = sel.iter().all(|id| app.track(*id).map(|t| !t.grid_locked).unwrap_or(false));
     ui.menu_button("Analysis Lock", |ui| {
@@ -1389,6 +1398,9 @@ pub fn related_criteria(app: &mut App, ui: &mut Ui) {
         app.related_store();
         app.list_dirty = true;
         app.save_prefs();
+    }
+    if app.match_enrichment_running() && ui.button("View lookup progress…").clicked() {
+        crate::ui_dialogs::open_match_lookup(app, &[]);
     }
 }
 

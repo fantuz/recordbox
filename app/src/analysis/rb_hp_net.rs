@@ -34,8 +34,12 @@ const GATES: usize = 4 * UNITS;
 fn read_model_file(path: &Path, limit: usize) -> Result<Vec<u8>> {
     let meta = path.metadata()?;
     if !meta.is_file() || meta.len() > limit as u64 { bail!("unexpected beat model file: {}", path.display()); }
-    let mut buf = Vec::with_capacity(meta.len() as usize);
-    std::fs::File::open(path)?.take(limit as u64 + 1).read_to_end(&mut buf)?;
+    let file = std::fs::File::open(path)?;
+    let opened = file.metadata()?;
+    if !opened.is_file() || opened.len() > limit as u64 { bail!("unexpected beat model file: {}", path.display()); }
+    let mut buf = Vec::new();
+    buf.try_reserve_exact(usize::try_from(opened.len())?)?;
+    file.take(limit as u64 + 1).read_to_end(&mut buf)?;
     if buf.len() > limit { bail!("beat model file exceeds size limit"); }
     Ok(buf)
 }
@@ -351,9 +355,16 @@ impl Net {
     }
 
     /// The 314 input values per frame, row-major (frames x 314).
+    #[cfg(test)]
     pub fn features(&self, mono: &[f32]) -> Vec<f32> {
+        self.features_cancellable(mono, &|| false).expect("test feature window")
+    }
+
+    fn features_cancellable(&self, mono: &[f32], cancelled: &dyn Fn() -> bool) -> Option<Vec<f32>> {
+        if cancelled() { return None; }
         let n = Net::frames(mono.len());
-        let mut out = vec![0f32; n * NUM_FEATURES];
+        let mut out = zeroed(n.checked_mul(NUM_FEATURES)?)?;
+        let log: fn(f32) -> f32 = if use_tf_packets() { tf_log_packet } else { f32::ln };
         let mut planner = FftPlanner::<f32>::new();
         let mut col = 0;
         for (k, &size) in FRAME_SIZES.iter().enumerate() {
@@ -364,9 +375,10 @@ impl Net {
             let mut buf = vec![Complex::new(0f32, 0f32); size];
             let mut scratch = vec![Complex::new(0f32, 0f32); fft.get_inplace_scratch_len()];
             let mut mag = vec![0f32; size / 2];
-            let mut spec = vec![0f32; n * bands];
+            let d = DIFF_FRAMES[k];
             let half = size / 2;
             for f in 0..n {
+                if f % 16 == 0 && cancelled() { return None; }
                 let start = (f * HOP) as isize - half as isize;
                 for (i, c) in buf.iter_mut().enumerate() {
                     let p = start + i as isize;
@@ -377,121 +389,421 @@ impl Net {
                 for (m, c) in mag.iter_mut().zip(&buf[..size / 2]) {
                     *m = c.re.hypot(c.im);
                 }
-                let row = &mut spec[f * bands..(f + 1) * bands];
-                for (r, band) in row.iter_mut().zip(bank) {
+                for (b, band) in bank.iter().enumerate() {
                     let mut s = 0f32;
                     for (w, m) in band.w.iter().zip(&mag[band.first..]) {
                         s += m * w;
                     }
-                    *r = (s * 1.0 + 1.0).ln() / std::f32::consts::LN_10;
-                }
-            }
-            let d = DIFF_FRAMES[k];
-            for f in 0..n {
-                let o = &mut out[f * NUM_FEATURES + col..f * NUM_FEATURES + col + 2 * bands];
-                for b in 0..bands {
-                    let s = spec[f * bands + b];
-                    o[b] = s;
-                    o[bands + b] = if f >= d { (s - spec[(f - d) * bands + b]).max(0.0) } else { 0.0 };
+                    // TensorFlow applies Log to the whole frames × bands tensor. Keep the
+                    // result directly in the feature matrix; it also supplies the lagged value.
+                    let value = tf_elementwise(f * bands + b, n * bands, s + 1.0, log, f32::ln) / std::f32::consts::LN_10;
+                    let i = f * NUM_FEATURES + col + b;
+                    out[i] = value;
+                    out[i + bands] = if f >= d { (value - out[i - d * NUM_FEATURES]).max(0.0) } else { 0.0 };
                 }
             }
             col += 2 * bands;
         }
-        out
+        Some(out)
     }
 
     /// Beat and downbeat activations per frame for the given features (frames x 314).
+    #[cfg(test)]
     pub fn activations(&self, feats: &[f32]) -> Vec<[f32; 2]> {
-        let n = feats.len() / NUM_FEATURES;
-        let mut x = feats.to_vec();
-        for layer in &self.layers {
-            let mut y = vec![0f32; n * 2 * UNITS];
-            run_lstm(&layer[0], &x, n, false, &mut y, 0);
-            run_lstm(&layer[1], &x, n, true, &mut y, UNITS);
-            x = y;
-        }
-        (0..n)
-            .map(|t| {
-                let h = &x[t * 2 * UNITS..(t + 1) * 2 * UNITS];
-                let mut z = [0f32; 3];
-                for (j, zj) in z.iter_mut().enumerate() {
-                    let mut s = 0f32;
-                    for (k, hk) in h.iter().enumerate() {
-                        s += hk * self.dense_w[k * 3 + j];
-                    }
-                    *zj = s + self.dense_b[j];
-                }
-                let m = z[0].max(z[1]).max(z[2]);
-                let e = z.map(|v| (v - m).exp());
-                let sum = e[0] + e[1] + e[2];
-                [e[1] / sum, e[2] / sum]
-            })
-            .collect()
+        self.activations_cancellable(feats.to_vec(), &|| false).expect("test activations")
     }
 
-    pub fn run(&self, mono: &[f32]) -> Vec<[f32; 2]> {
-        self.activations(&self.features(mono))
+    fn activations_cancellable(&self, mut x: Vec<f32>, cancelled: &dyn Fn() -> bool) -> Option<Vec<[f32; 2]>> {
+        let n = x.len() / NUM_FEATURES;
+        for layer in &self.layers {
+            if cancelled() { return None; }
+            let mut y = zeroed(n.checked_mul(2 * UNITS)?)?;
+            run_lstm(&layer[0], &x, n, false, &mut y, 0, cancelled)?;
+            run_lstm(&layer[1], &x, n, true, &mut y, UNITS, cancelled)?;
+            x = y;
+        }
+        let mut result = Vec::new();
+        result.try_reserve_exact(n).ok()?;
+        for (t, h) in x.chunks_exact(2 * UNITS).enumerate() {
+            if t % 16 == 0 && cancelled() { return None; }
+            let mut z = [0f32; 3];
+            for (j, zj) in z.iter_mut().enumerate() {
+                let mut s = 0f32;
+                for (k, hk) in h.iter().enumerate() {
+                    s += hk * self.dense_w[k * 3 + j];
+                }
+                *zj = s + self.dense_b[j];
+            }
+            let m = z[0].max(z[1]).max(z[2]);
+            let e = z.map(|v| (v - m).exp());
+            let sum = e[0] + e[1] + e[2];
+            if !sum.is_finite() || sum <= 0.0 { return None; }
+            result.push([e[1] / sum, e[2] / sum]);
+        }
+        Some(result)
     }
+
+    /// Model7/8 operate on at most a minute per inference after the existing
+    /// 44.1/48 kHz conversion. Long tracks are submitted as separate windows.
+    pub fn run_cancellable(&self, mono: &[f32], cancelled: &dyn Fn() -> bool) -> Option<Vec<[f32; 2]>> {
+        if mono.is_empty() || mono.len() > 60 * 48_000 { return None; }
+        self.activations_cancellable(self.features_cancellable(mono, cancelled)?, cancelled)
+    }
+
+    #[cfg(test)]
+    pub fn run(&self, mono: &[f32]) -> Vec<[f32; 2]> {
+        self.run_cancellable(mono, &|| false).expect("test network window")
+    }
+}
+
+fn zeroed(n: usize) -> Option<Vec<f32>> {
+    let mut values = Vec::new();
+    values.try_reserve_exact(n).ok()?;
+    values.resize(n, 0.0);
+    Some(values)
 }
 
 /// tf.signal.hann_window(size, periodic=True) as the graph computes it in single precision.
+/// (The graph's `Cos` is TensorFlow's kernel; the sizes are multiples of four, so every value
+/// takes its packet path.)
 pub fn hann_periodic(size: usize) -> Vec<f32> {
-    (0..size).map(|i| 0.5f32 - 0.5f32 * (6.283_185_5f32 * i as f32 / size as f32).cos()).collect()
+    let cos: fn(f32) -> f32 = if use_tf_packets() { tf_cos_packet } else { f32::cos };
+    (0..size).map(|i| 0.5f32 - 0.5f32 * tf_elementwise(i, size, 6.283_185_5f32 * i as f32 / size as f32, cos, f32::cos)).collect()
+}
+
+// TensorFlow 2.16's CPU kernels as rekordbox's bundled libtensorflow_cc runs them on arm64
+// (read from its disassembly: `EvalRange<... scalar_tanh_op<float> ...>::run` 0x8d21850,
+// `generic_fast_tanh_float<float>` 0x66a51c4, `EvalRange<... scalar_logistic_op<float> ...>::run`
+// 0x8c8bc58). An element-wise op runs on NEON packets of four and on the elements left over one
+// at a time, and the two paths round differently: in a 25-unit gate, units 0-23 take the packet
+// path and unit 24 the scalar one.
+
+/// Eigen's rational tanh on a packet (fused multiply-adds; the clamp is the non-FMA one).
+#[inline]
+pub(crate) fn tf_tanh_packet(a: f32) -> f32 {
+    let c = f32::from_bits(0x40fcf84f);
+    let x = a.min(c).max(-c);
+    let x2 = x * x;
+    let mut p = x2.mul_add(f32::from_bits(0xa59f25c0), f32::from_bits(0x2a61337e));
+    for k in [0xaebd37ffu32, 0x335c0041, 0x3779434a, 0x3a270ded, 0x3ba059dc] {
+        p = x2.mul_add(p, f32::from_bits(k));
+    }
+    let p = x * p;
+    let mut q = x2.mul_add(f32::from_bits(0x35a0d3d8), f32::from_bits(0x38f895d6));
+    q = q.mul_add(x2, f32::from_bits(0x3b14aa05));
+    q = q.mul_add(x2, f32::from_bits(0x3ba059dd));
+    if a.abs() < f32::from_bits(0x39d1b717) {
+        x
+    } else {
+        p / q
+    }
+}
+
+/// The same rational on a single element (separate multiplies and adds).
+#[inline]
+pub(crate) fn tf_tanh_scalar(a: f32) -> f32 {
+    let c = f32::from_bits(0x40fcf84f);
+    let x = a.min(c).max(-c);
+    let x2 = x * x;
+    let mut p = x2 * f32::from_bits(0xa59f25c0) + f32::from_bits(0x2a61337e);
+    for k in [0xaebd37ffu32, 0x335c0041, 0x3779434a, 0x3a270ded, 0x3ba059dc] {
+        p = x2 * p + f32::from_bits(k);
+    }
+    let mut q = f32::from_bits(0x35a0d3d8) * x2 + f32::from_bits(0x38f895d6);
+    q = q * x2 + f32::from_bits(0x3b14aa05);
+    let p = x * p;
+    let q = x2 * q + f32::from_bits(0x3ba059dd);
+    if a.abs() < f32::from_bits(0x39d1b717) {
+        x
+    } else {
+        p / q
+    }
+}
+
+/// Eigen's `pexp` on a packet: Cody-Waite reduction, a degree-5 polynomial, 2^m in three steps.
+#[inline]
+pub(crate) fn tf_exp_packet(x0: f32) -> f32 {
+    let x = x0.min(f32::from_bits(0x42b1722d));
+    let m = f32::from_bits(0x3fb8aa3b).mul_add(x, 0.5).floor();
+    let r = f32::from_bits(0xbf318000).mul_add(m, x);
+    let r = f32::from_bits(0x395e8083).mul_add(m, r);
+    let r2 = r * r;
+    let a = f32::from_bits(0x3ab42872).mul_add(r2, f32::from_bits(0x3d2aadcc));
+    let b = f32::from_bits(0x3c091de6).mul_add(r2, f32::from_bits(0x3e2aaa47));
+    let c = a.mul_add(r2, f32::from_bits(0x3efffffc));
+    let c = b.mul_add(r, c);
+    let y = c.mul_add(r2, r + 1.0);
+    let mi = m.max(-278.0).min(278.0) as i32;
+    let b = mi >> 2;
+    let f = f32::from_bits(((b << 23) + 0x3f80_0000) as u32);
+    let y = y * f * f * f;
+    let g = f32::from_bits((((mi - b - 2 * b) << 23) + 0x3f80_0000) as u32);
+    let e = (y * g).max(x0);
+    if x0 < -104.0 {
+        0.0
+    } else {
+        e
+    }
+}
+
+/// Eigen's logistic on a packet: e / (1 + e) with e = exp(x), 1 where e overflows.
+#[inline]
+pub(crate) fn tf_sigmoid_packet(x: f32) -> f32 {
+    let e = tf_exp_packet(x);
+    if e == f32::INFINITY {
+        1.0
+    } else {
+        e / (e + 1.0)
+    }
+}
+
+/// The same on a single element, with the C library's expf.
+#[inline]
+pub(crate) fn tf_sigmoid_scalar(x: f32) -> f32 {
+    let e = x.exp();
+    if e == f32::INFINITY {
+        1.0
+    } else {
+        e / (e + 1.0)
+    }
+}
+
+/// Eigen's cosine on a packet (`psincos_float`, `EvalRange<... scalar_cos_op<float> ...>::run`
+/// 0x86e5030): reduction by pi/2 in three parts, then the cosine or sine polynomial by quadrant.
+/// Arguments of 71476 and more (a slower reduction in the original) do not occur here.
+#[inline]
+pub(crate) fn tf_cos_packet(a: f32) -> f32 {
+    let x = a.abs();
+    let y = x * f32::from_bits(0x3f22f983) + 12_582_912.0;
+    let yr = y + -12_582_912.0;
+    let r = f32::from_bits(0xbfc90fd8).mul_add(yr, x);
+    let r = f32::from_bits(0xb4a8885a).mul_add(yr, r);
+    let r = f32::from_bits(0xa7c234c4).mul_add(yr, r);
+    let n = y.to_bits();
+    let sign = (n << 30).wrapping_add(0x4000_0000) & 0x8000_0000;
+    let x2 = r * r;
+    let c = f32::from_bits(0x37cc730b).mul_add(x2, f32::from_bits(0xbab6036e));
+    let c = x2.mul_add(c, f32::from_bits(0x3d2aaa9e));
+    let c = x2.mul_add(c, -0.5);
+    let c = x2.mul_add(c, 1.0);
+    let sn = f32::from_bits(0xb94d70ca).mul_add(x2, f32::from_bits(0x3c0885d3));
+    let sn = x2.mul_add(sn, f32::from_bits(0xbe2aaaa8));
+    let sn = r.mul_add(x2 * sn, r);
+    let v = if n & 1 == 0 { c } else { sn };
+    f32::from_bits(v.to_bits() ^ sign)
+}
+
+/// Eigen's natural log on a packet (`plog_float`, `EvalRange<... scalar_log_op<float> ...>::run`
+/// 0x89fc968): frexp (denormals scaled by 2^24), the mantissa moved to [sqrt(1/2), sqrt(2)) - 1, a
+/// [2/3] rational, plus e * ln 2.
+#[inline]
+pub(crate) fn tf_log_packet(a: f32) -> f32 {
+    // (TensorFlow runs with denormals flushed to zero: their log is -inf)
+    if a != 0.0 && a.abs() < f32::MIN_POSITIVE {
+        return f32::NEG_INFINITY;
+    }
+    let den = a.abs() < f32::from_bits(0x0080_0000);
+    let xs = if den { a * f32::from_bits(0x4b80_0000) } else { a };
+    let bias = if den { -150.0f32 } else { -126.0 };
+    let expo = (xs.abs().to_bits() >> 23) as f32;
+    let zero = a == 0.0;
+    let special = expo == 255.0 || zero;
+    let (m, e) = if special { (a, 0.0f32) } else { (f32::from_bits((xs.to_bits() & 0x807f_ffff) | 0x3f00_0000), bias + expo) };
+    let lt = m < f32::from_bits(0x3f3504f3);
+    let tmp = if lt { m } else { 0.0 };
+    let x = m + -1.0;
+    let e = e - if lt { 1.0 } else { 0.0 };
+    let x = x + tmp;
+    let p = f32::from_bits(0x3e3af1c9).mul_add(x, 1.0);
+    let p = p.mul_add(x, 1.0);
+    let p = x * p;
+    let q = f32::from_bits(0x3d4b3a68).mul_add(x, f32::from_bits(0x3f19674d));
+    let q = q.mul_add(x, 1.5);
+    let q = q.mul_add(x, 1.0);
+    let r = f32::from_bits(0x3f317218).mul_add(e, p / q);
+    if a == f32::INFINITY {
+        f32::INFINITY
+    } else if !(a >= 0.0) {
+        f32::NAN
+    } else if zero {
+        f32::NEG_INFINITY
+    } else {
+        r
+    }
+}
+
+/// An element-wise kernel over `n` values as TensorFlow runs it on one block: packets of four,
+/// the rest one at a time.
+#[inline]
+fn tf_elementwise(i: usize, n: usize, x: f32, packet: fn(f32) -> f32, scalar: fn(f32) -> f32) -> f32 {
+    if i < (n & !3) {
+        packet(x)
+    } else {
+        scalar(x)
+    }
+}
+
+/// One row times a matrix (`MatMul` of [1 x k] by [k x 100]) as Eigen's matrix-vector product
+/// does it: per output, a fused multiply-add chain over a block of columns (all of them when
+/// there are fewer than 128, else 16 at a time), each block's sum added to the result.
+#[inline(always)]
+fn tf_gemv<const FUSED: bool>(x: &[f32], w: &[f32], out: &mut [f32; GATES]) {
+    if !FUSED {
+        // Older x86 machines have no native FMA. Keep the fork's original, vectorizable
+        // single-precision projection there instead of one libm call per model weight.
+        *out = [0.0; GATES];
+        for (&sample, row) in x.iter().zip(w.chunks_exact(GATES)) {
+            if sample != 0.0 {
+                for (out, &weight) in out.iter_mut().zip(row) { *out += sample * weight; }
+            }
+        }
+        return;
+    }
+    let k = x.len();
+    let block = if k < 128 { k.max(1) } else { 16 };
+    *out = [0f32; GATES];
+    let mut j2 = 0;
+    while j2 < k {
+        let jend = (j2 + block).min(k);
+        let mut acc = [0f32; GATES];
+        for j in j2..jend {
+            let xv = x[j];
+            let wr = &w[j * GATES..(j + 1) * GATES];
+            for (a, &wv) in acc.iter_mut().zip(wr) {
+                *a = wv.mul_add(xv, *a);
+            }
+        }
+        for (o, a) in out.iter_mut().zip(&acc) {
+            *o += a;
+        }
+        j2 = jend;
+    }
 }
 
 #[inline]
-fn sigmoid(x: f32) -> f32 {
+fn use_tf_packets() -> bool {
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    { std::is_x86_feature_detected!("fma") }
+    #[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
+    { true }
+}
+
+/// The activation used by the original portable x86 path.
+#[inline]
+fn sigmoid_unfused(x: f32) -> f32 {
     1.0 / (1.0 + (-x).exp())
 }
 
-/// One direction of a peephole LSTM layer over `n` frames of `x` (n x l.input); writes the 25
-/// outputs per frame into `y` (n x 50) at column `off`.
-fn run_lstm(l: &Lstm, x: &[f32], n: usize, reverse: bool, y: &mut [f32], off: usize) {
-    // Input projection for every frame at once: zx = x * W.
-    let mut zx = vec![0f32; n * GATES];
-    for t in 0..n {
-        let xr = &x[t * l.input..(t + 1) * l.input];
-        let zr = &mut zx[t * GATES..(t + 1) * GATES];
-        for (k, &xv) in xr.iter().enumerate() {
-            if xv == 0.0 {
-                continue;
-            }
-            let wr = &l.w[k * GATES..(k + 1) * GATES];
-            for (z, w) in zr.iter_mut().zip(wr) {
-                *z += xv * w;
-            }
+/// The fused dot products are substantially slower in software on generic x86 releases.
+/// Select the hardware path once per direction, outside the frame and gate loops.
+fn run_lstm(l: &Lstm, x: &[f32], n: usize, reverse: bool, y: &mut [f32], off: usize, cancelled: &dyn Fn() -> bool) -> Option<()> {
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    {
+        if use_tf_packets() {
+            // SAFETY: the runtime feature check covers this function's only requirement.
+            return unsafe { run_lstm_fma(l, x, n, reverse, y, off, cancelled) };
         }
+        run_lstm_rows::<false>(l, x, n, reverse, y, off, cancelled)
     }
+    #[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
+    run_lstm_rows::<true>(l, x, n, reverse, y, off, cancelled)
+}
+
+#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+#[target_feature(enable = "fma")]
+unsafe fn run_lstm_fma(l: &Lstm, x: &[f32], n: usize, reverse: bool, y: &mut [f32], off: usize, cancelled: &dyn Fn() -> bool) -> Option<()> {
+    run_lstm_rows::<true>(l, x, n, reverse, y, off, cancelled)
+}
+
+#[inline(always)]
+fn run_lstm_rows<const FUSED: bool>(l: &Lstm, x: &[f32], n: usize, reverse: bool, y: &mut [f32], off: usize, cancelled: &dyn Fn() -> bool) -> Option<()> {
+    // A projection is independent of other frames. Materialize only the row about
+    // to be consumed, in either traversal direction, using the original dot order.
+    let mut row = [0f32; GATES];
     let mut h = [0f32; UNITS];
     let mut c = [0f32; UNITS];
     let mut z = [0f32; GATES];
+    let mut zh = [0f32; GATES];
+    type Op = fn(f32) -> f32;
+    let (sp, ss, tp, ts): (Op, Op, Op, Op) = if FUSED {
+        (tf_sigmoid_packet, tf_sigmoid_scalar, tf_tanh_packet, tf_tanh_scalar)
+    } else {
+        (sigmoid_unfused, sigmoid_unfused, f32::tanh, f32::tanh)
+    };
     for step in 0..n {
+        if step % 16 == 0 && cancelled() { return None; }
         let t = if reverse { n - 1 - step } else { step };
-        let mut zh = [0f32; GATES];
-        for (k, &hv) in h.iter().enumerate() {
-            let ur = &l.u[k * GATES..(k + 1) * GATES];
-            for (a, u) in zh.iter_mut().zip(ur) {
-                *a += hv * u;
-            }
-        }
+        tf_gemv::<FUSED>(&x[t * l.input..(t + 1) * l.input], &l.w, &mut row);
+        tf_gemv::<FUSED>(&h, &l.u, &mut zh);
         for j in 0..GATES {
-            z[j] = (zx[t * GATES + j] + zh[j]) + l.b[j];
+            z[j] = (row[j] + zh[j]) + l.b[j];
         }
         for j in 0..UNITS {
-            let i_g = sigmoid(z[j] + l.pi[j] * c[j]);
-            let f_g = sigmoid(z[UNITS + j] + l.pf[j] * c[j]);
-            let c_new = f_g * c[j] + i_g * z[2 * UNITS + j].tanh();
-            let o_g = sigmoid(z[3 * UNITS + j] + l.po[j] * c_new);
+            let i_g = tf_elementwise(j, UNITS, z[j] + l.pi[j] * c[j], sp, ss);
+            let f_g = tf_elementwise(j, UNITS, z[UNITS + j] + l.pf[j] * c[j], sp, ss);
+            let c_new = f_g * c[j] + i_g * tf_elementwise(j, UNITS, z[2 * UNITS + j], tp, ts);
+            let o_g = tf_elementwise(j, UNITS, z[3 * UNITS + j] + l.po[j] * c_new, sp, ss);
             c[j] = c_new;
-            h[j] = o_g * c_new.tanh();
+            h[j] = o_g * tf_elementwise(j, UNITS, c_new, tp, ts);
         }
         y[t * 2 * UNITS + off..t * 2 * UNITS + off + UNITS].copy_from_slice(&h);
     }
+    Some(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fused_projection_matches_tensorflow_blocks_and_portable_keeps_the_old_sum() {
+        for width in [UNITS, 127, 128, NUM_FEATURES] {
+            let x: Vec<_> = (0..width).map(|i| ((i % 19) as f32 - 13.0) / 17.0).collect();
+            let w: Vec<_> = (0..width * GATES).map(|i| ((i % 37) as f32 - 17.0) / 31.0).collect();
+            let mut fused = [0.0; GATES];
+            let mut portable = [0.0; GATES];
+            tf_gemv::<true>(&x, &w, &mut fused);
+            tf_gemv::<false>(&x, &w, &mut portable);
+            for j in 0..GATES {
+                let block = if width < 128 { width } else { 16 };
+                let expected = (0..width).step_by(block).map(|start| {
+                    (start..width.min(start + block)).fold(0.0, |sum, k| x[k].mul_add(w[k * GATES + j], sum))
+                }).sum::<f32>();
+                let original = (0..width).fold(0.0f32, |sum, k| sum + x[k] * w[k * GATES + j]);
+                assert_eq!(fused[j].to_bits(), expected.to_bits());
+                assert_eq!(portable[j].to_bits(), original.to_bits());
+            }
+        }
+        // Keras' 25 gates have six four-wide packets and one scalar remainder.
+        for i in 0..UNITS {
+            let a = (i as f32 - 12.0) / 7.0;
+            let expected = if i < 24 { tf_tanh_packet(a) } else { tf_tanh_scalar(a) };
+            assert_eq!(tf_elementwise(i, UNITS, a, tf_tanh_packet, tf_tanh_scalar).to_bits(), expected.to_bits());
+        }
+    }
+
+    #[test]
+    fn cancellation_discards_partial_features_and_either_lstm_direction() {
+        use std::cell::Cell;
+        let net = Net { banks: Default::default(), layers: vec![], dense_w: vec![], dense_b: vec![] };
+        let polls = Cell::new(0);
+        let stop = || { polls.set(polls.get() + 1); polls.get() == 3 };
+        assert!(net.run_cancellable(&vec![0.0; 33 * HOP], &stop).is_none());
+        assert_eq!(polls.get(), 3);
+        let layer = Lstm {
+            input: 1, w: vec![0.1; GATES], u: vec![0.1; UNITS * GATES], b: vec![0.1; GATES],
+            pi: vec![0.1; UNITS], pf: vec![0.1; UNITS], po: vec![0.1; UNITS],
+        };
+        for reverse in [false, true] {
+            polls.set(0);
+            let mut output = vec![0.0; 64 * 2 * UNITS];
+            assert!(run_lstm(&layer, &[1.0; 64], 64, reverse, &mut output, 0, &stop).is_none());
+            let untouched = if reverse { 0 } else { 63 };
+            let processed = if reverse { 63 } else { 0 };
+            assert_eq!(output[untouched * 2 * UNITS], 0.0);
+            assert!(output[processed * 2 * UNITS] > 0.0);
+        }
+    }
 
     #[test]
     fn incomplete_model_metadata_does_not_yield_partial_fields() {
@@ -526,7 +838,7 @@ mod tests {
             po: vec![0.5; UNITS],
         };
         let mut y = vec![0f32; 2 * UNITS];
-        run_lstm(&l, &[1.0], 1, false, &mut y, 0);
+        run_lstm(&l, &[1.0], 1, false, &mut y, 0, &|| false).unwrap();
         let s = 1.0 / (1.0 + (-0.1f64).exp());
         let c = s * 0.1f64.tanh();
         let o = 1.0 / (1.0 + (-(0.1 + 0.5 * c)).exp());
@@ -535,7 +847,7 @@ mod tests {
         assert!(y[UNITS..].iter().all(|&v| v == 0.0));
         // Second step: h and c from step one feed back through U and the peepholes.
         let mut y2 = vec![0f32; 4 * UNITS];
-        run_lstm(&l, &[1.0, 0.0], 2, false, &mut y2, 0);
+        run_lstm(&l, &[1.0, 0.0], 2, false, &mut y2, 0, &|| false).unwrap();
         let zz = 0.1 * 25.0 * h; // x = 0, h . U column = 25 * 0.1 * h
         let i2 = 1.0 / (1.0 + (-(zz + 0.5 * c)).exp());
         let c2 = i2 * c + i2 * zz.tanh();

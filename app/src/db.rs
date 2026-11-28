@@ -209,6 +209,9 @@ impl Db {
             CREATE TABLE IF NOT EXISTS track_tags(track_id INTEGER NOT NULL REFERENCES tracks(id) ON DELETE CASCADE,
                 tag_id INTEGER NOT NULL REFERENCES mytags(id) ON DELETE CASCADE, PRIMARY KEY(track_id, tag_id));
             CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY, value TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS match_enrichment(
+                track_id INTEGER PRIMARY KEY REFERENCES tracks(id) ON DELETE CASCADE,
+                path TEXT NOT NULL, artist TEXT NOT NULL, title TEXT NOT NULL, mix_name TEXT NOT NULL, evidence TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS native_edit_baseline(
                 track_id INTEGER NOT NULL REFERENCES tracks(id) ON DELETE CASCADE, field TEXT NOT NULL,
                 source TEXT NOT NULL, native_id TEXT NOT NULL, uuid TEXT NOT NULL, path TEXT NOT NULL,
@@ -689,6 +692,8 @@ impl Db {
     pub(crate) fn missing_grids(&self, ids: &[i64]) -> Result<Vec<i64>> {
         #[derive(serde::Deserialize)]
         struct GridPresence {
+            #[serde(default, rename = "beat_list_signature")]
+            _beat_list_signature: u64,
             #[serde(deserialize_with = "read_anchors")]
             anchors: bool,
         }

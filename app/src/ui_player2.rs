@@ -672,6 +672,55 @@ fn row_button(ui: &mut Ui, r: Rect, id: &str, label: &str, lit: bool, enabled: b
     resp
 }
 
+/// One separation worker serves both decks, while each deck owns its request and part controls.
+fn deck_stems(app: &mut App, ui: &mut Ui, rect: Rect) {
+    let loaded = app.deck.track.is_some();
+    let ready = app.player.state.lock().stems.is_some();
+    let active = app.separating_stems();
+    let queued = app.queued_stems();
+    let stopping = active && app.stem.cancel.load(std::sync::atomic::Ordering::Relaxed);
+    let loading = app.loading_stems();
+    let label = if stopping {
+        "STEMS · STOPPING".into()
+    } else if active {
+        format!("{} · STOP", app.stem.separation_stage().unwrap_or_default())
+    } else if queued {
+        if app.stem.downloading.is_some() { "Download · CANCEL".into() } else { "Queued · CANCEL".into() }
+    } else if loading {
+        "STEMS · LOADING".into()
+    } else if ready {
+        "STEMS · READY".into()
+    } else if loaded && app.stem.error_for(app.deck.track).is_some() {
+        if app.manual_stem_device() == crate::stems::SeparationDevice::Cpu { "STEMS · RETRY CPU".into() } else { "STEMS · RETRY".into() }
+    } else if app.stem.separating.is_some() || app.stem.downloading.is_some() {
+        "STEMS · QUEUE".into()
+    } else if loaded && app.manual_stem_device() == crate::stems::SeparationDevice::Cpu {
+        "STEMS · SEPARATE CPU".into()
+    } else {
+        "STEMS · SEPARATE".into()
+    };
+    let enabled = loaded && !ready && !loading && !stopping;
+    let action = Rect::from_min_size(rect.min, vec2(116.0, rect.height()));
+    let response = row_button(ui, action, "stems_job", &label, ready || queued || active, loaded);
+    let help = if active {
+        app.stem.separation_status().unwrap_or_default()
+    } else if queued {
+        "Waiting to separate this track. Cancel removes its request.".into()
+    } else if let Some(error) = app.stem.error_for(app.deck.track) {
+        error.detail.clone()
+    } else {
+        "Separate this track into parts. Tracks from both decks are processed one at a time.".into()
+    };
+    if tip(response, app, &help).clicked() && enabled {
+        if active || queued { app.stop_deck_stems(); } else { app.separate_loaded(); }
+    }
+    let count = if app.prefs.stem_parts == 3 { 3 } else { 4 };
+    let width = (rect.right() - action.right()) / count as f32;
+    crate::ui_player::stem_part_buttons(app, ui, |i| {
+        Rect::from_min_size(pos2(action.right() + 3.0 + i as f32 * width, rect.top()), vec2(width - 3.0, rect.height()))
+    });
+}
+
 /// A raised icon tile of the deck rows.
 fn row_icon(ui: &mut Ui, r: Rect, id: &str, draw: impl FnOnce(&Painter, Pos2, Color32, bool)) -> egui::Response {
     row_icon_on(ui, r, id, true, draw)
@@ -796,6 +845,11 @@ fn deck_rows(app: &mut App, ui: &mut Ui, g: &TwoGeom, rows: &DeckRows, n: u8, is
         let clip = p.with_clip_rect(Rect::from_min_max(pos2(mx0 + 49.0, y0 - 4.0), pos2(d1 - 8.0, y0 + 38.0)));
         clip.text(pos2(mx0 + 49.5, y0 + 8.3), Align2::LEFT_CENTER, tr.display_title(), bold(15.5), WHITE.c());
         clip.text(pos2(mx0 + 49.5, y0 + 28.7), Align2::LEFT_CENTER, &tr.artist, FontId::proportional(12.25), DIM.c());
+    }
+    // The time/key/BPM readouts occupy the second line. Their first line is free.
+    if app.prefs.show_stems {
+        let sync_left = mx1 - if g.dual { 165.0 } else { 81.0 };
+        deck_stems(app, ui, Rect::from_min_max(pos2(d1, y0), pos2(sync_left, y0 + 16.0)));
     }
     let ty = y0 + 28.0;
     for x in [d1, d2, d3] {

@@ -1372,6 +1372,9 @@ pub fn normalize_date(s: &str) -> String {
 /// players show as the track's BPM in lists.
 pub fn row_tempo(grid: Option<&BeatGrid>, duration: f64, fallback: f64) -> u32 {
     let bpm = match grid {
+        // The model and imported device row have their own track-wide tempo. A
+        // finite list can have long gaps that distort a duration-based average.
+        Some(g) if (0.01..=655.35).contains(&fallback) && g.has_listed_beats() => fallback,
         Some(g) if g.anchors.len() > 1 => {
             let beats = g.beats(duration.max(g.anchors.last().map(|a| a.time + 1.0).unwrap_or(0.0)));
             match (beats.first(), beats.last()) {
@@ -1450,7 +1453,7 @@ pub fn run_export(mut req: ExportRequest, progress: &dyn Fn(Progress), cancel: &
     // Tracks whose grid is still the one rekordbox analysed can use its phrases/extended grid.
     for et in req.tracks.values_mut() {
         if let (Some(b), Some(g)) = (&et.rb_anlz, &et.grid) {
-            et.grid_same = crate::rbimport::read_pqtz_grid(&b.with_extension("DAT")).map(|r| crate::app::grids_match(&r, g)).unwrap_or(false);
+            et.grid_same = crate::export::anlz::grid_pair::matches_source(&b.with_extension("DAT"), g);
         }
     }
 
@@ -2260,19 +2263,11 @@ fn write_artwork(root: &Path, rel: &str, src: &str, created: &mut Created) -> Re
 }
 
 pub fn free_space(root: &Path) -> Option<u64> {
-    let out = std::process::Command::new("/bin/df").arg("-k").arg(root).output().ok()?;
-    let s = String::from_utf8_lossy(&out.stdout);
-    let line = s.lines().nth(1)?;
-    let cols: Vec<&str> = line.split_whitespace().collect();
-    cols.get(3)?.parse::<u64>().ok().map(|k| k * 1024)
+    crate::disk_space::on(root).ok().map(|s| s.available)
 }
 
 pub fn total_space(root: &Path) -> Option<u64> {
-    let out = std::process::Command::new("/bin/df").arg("-k").arg(root).output().ok()?;
-    let s = String::from_utf8_lossy(&out.stdout);
-    let line = s.lines().nth(1)?;
-    let cols: Vec<&str> = line.split_whitespace().collect();
-    cols.get(1)?.parse::<u64>().ok().map(|k| k * 1024)
+    crate::disk_space::on(root).ok().map(|s| s.capacity)
 }
 
 // ------------------------------------------------------------------------------------------

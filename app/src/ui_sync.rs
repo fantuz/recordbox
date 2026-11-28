@@ -2,7 +2,7 @@
 //! requires its own field preview, selection and confirmation.
 use crate::app::App;
 use crate::db::Db;
-use crate::rbimport::writeback::{self, Plan, Receipt};
+use crate::rbimport::writeback::{self, Plan, Receipt, RecoveryFiles};
 use crate::theme::hex;
 use crate::ui_kit::{self as kit, btn};
 use crossbeam_channel::Receiver;
@@ -19,7 +19,7 @@ enum Direction {
 enum ResultView {
     Preview(Plan),
     Applied(Receipt),
-    Recovered(PathBuf),
+    Recovered(RecoveryFiles),
 }
 
 enum Outbound {
@@ -35,9 +35,10 @@ enum Outbound {
         links: Vec<Option<usize>>,
         page: usize,
         confirm: bool,
+        retain_backup: bool,
     },
     Applied(Receipt),
-    Recovered(PathBuf),
+    Recovered(RecoveryFiles),
     Failed(String),
 }
 
@@ -129,6 +130,7 @@ impl Review {
                 selected: BTreeSet::new(),
                 page: 0,
                 confirm: false,
+                retain_backup: true,
             },
             Ok(ResultView::Applied(receipt)) => Outbound::Applied(receipt),
             Ok(ResultView::Recovered(path)) => Outbound::Recovered(path),
@@ -184,7 +186,7 @@ pub fn show(app: &mut App, ctx: &Context) {
         .id(egui::Id::new("library_sync_review"))
         .collapsible(false)
         .default_width(620.0)
-        .vscroll(ctx.screen_rect().height() < 680.0);
+        .vscroll(true);
     if !working {
         window = window.open(&mut open);
     }
@@ -259,7 +261,7 @@ fn library_path(ui: &mut Ui, label: &str, path: Option<&Path>) {
     ui.label(RichText::new(label).strong());
     ui.add(
         egui::Label::new(
-            path.map(|p| p.display().to_string())
+            path.map(display_library_path)
                 .unwrap_or_else(|| "Path unavailable".into()),
         )
         .selectable(true)
@@ -267,8 +269,45 @@ fn library_path(ui: &mut Ui, label: &str, path: Option<&Path>) {
     );
 }
 
+/// Format an absolute Windows drive or share for the path label. Keep the native path
+/// for every filesystem operation, particularly when SQLite returns a verbatim path.
+fn display_library_path(path: &Path) -> String {
+    let raw = path.to_string_lossy();
+    let sep = |b: u8| matches!(b, b'/' | b'\\');
+    let bytes = raw.as_bytes();
+    let verbatim = matches!(bytes, [a, b, b'?', d, ..] if sep(*a) && sep(*b) && sep(*d));
+    let rest = if verbatim { &raw[4..] } else { &raw };
+    if matches!(rest.as_bytes(), [drive, b':', slash, ..] if drive.is_ascii_alphabetic() && sep(*slash)) {
+        return rest.replace('/', "\\");
+    }
+    let share = if verbatim && rest.get(..3).is_some_and(|s| s.eq_ignore_ascii_case("UNC"))
+        && rest.as_bytes().get(3).is_some_and(|b| sep(*b)) {
+        Some(&rest[4..])
+    } else if !verbatim && (raw.starts_with(r"\\") || (cfg!(windows) && raw.starts_with("//"))) {
+        Some(&raw[2..])
+    } else { None };
+    if let Some(share) = share {
+        let mut parts = share.split(['/', '\\']);
+        if parts.next().is_some_and(|server| !matches!(server, "" | "?" | "."))
+            && parts.next().is_some_and(|folder| !folder.is_empty()) {
+            return format!(r"\\{}", share.replace('/', "\\"));
+        }
+    }
+    raw.into_owned()
+}
+
 fn changes(n: usize) -> String {
     format!("{n} change{}", if n == 1 { "" } else { "s" })
+}
+
+fn recovery_paths(ui: &mut Ui, backup: Option<&Path>, staging: Option<&Path>) {
+    if let Some(backup) = backup {
+        library_path(ui, "Recovery backup", Some(backup));
+    }
+    if let Some(staging) = staging {
+        ui.colored_label(ui.visuals().error_fg_color, "Some temporary recovery files could not be removed.");
+        library_path(ui, "Remaining recovery files", Some(staging));
+    }
 }
 
 fn writeback_view(review: &mut Review, ui: &mut Ui, library_protected: bool) {
@@ -317,20 +356,35 @@ fn writeback_view(review: &mut Review, ui: &mut Ui, library_protected: bool) {
             links,
             page,
             confirm,
+            retain_backup,
         } => {
+            if !plan.rows.is_empty() {
+                ui.checkbox(retain_backup, "Keep a recovery backup before applying changes (recommended)")
+                    .on_hover_text("Keeps a verified copy of the original desktop database and any affected analysis files in your recovery folder.");
+                if !*retain_backup {
+                    ui.colored_label(ui.visuals().error_fg_color, RichText::new(
+                        "Backup disabled for this write-back. To undo completed changes, you will need your own backup."
+                    ).strong());
+                    ui.label("Beat-grid changes use temporary recovery files until the write-back finishes.");
+                }
+            }
             if *confirm {
                 let count = selected.len();
                 ui.label(format!(
                     "Apply {} to the original desktop library shown above?",
                     changes(count)
                 ));
-                if let Some(path) = review.local.as_deref().and_then(|p| writeback::backup_root(p).ok()) {
-                    library_path(ui, "Create recovery backup in", Some(&path));
+                if *retain_backup {
+                    if let Some(path) = review.local.as_deref().and_then(|p| writeback::backup_root(p).ok()) {
+                        library_path(ui, "Create recovery backup in", Some(&path));
+                    }
                 }
-                ui.label("recordbox rechecks the selected fields and creates a verified recovery copy of the database and affected analysis files before writing. Close AlphaTheta Rekordbox and its agents. Use a local library with Cloud Library Sync turned off on every linked computer.");
+                ui.label("recordbox rechecks the selected fields before writing. Close AlphaTheta Rekordbox and its agents. Use a local library with Cloud Library Sync turned off on every linked computer.");
                 ui.horizontal_wrapped(|ui| {
+                    let label = if *retain_backup { format!("Back up and apply {}", changes(count)) }
+                        else { format!("Apply {} without keeping a backup", changes(count)) };
                     apply = ui
-                        .add_enabled(!library_protected && count > 0, btn(format!("Back up and apply {}", changes(count))))
+                        .add_enabled(!library_protected && count > 0, btn(label))
                         .clicked();
                     if ui.add(btn("Back to selection")).clicked() {
                         *confirm = false;
@@ -353,11 +407,17 @@ fn writeback_view(review: &mut Review, ui: &mut Ui, library_protected: bool) {
                 "Applied {} to the AlphaTheta Rekordbox library.",
                 changes(receipt.applied)
             ));
-            library_path(ui, "Recovery backup", Some(&receipt.backup));
+            recovery_paths(ui, receipt.backup.as_deref(), receipt.remaining_staging.as_deref());
+            if receipt.backup.is_none() {
+                ui.label("You chose to skip the backup for this write-back.");
+            }
         }
-        Outbound::Recovered(backup) => {
+        Outbound::Recovered(files) => {
             ui.label("Recovery completed. A fresh preview will show the current values.");
-            library_path(ui, "Recovery backup", Some(backup));
+            recovery_paths(ui, files.backup.as_deref(), files.remaining_staging.as_deref());
+            if files.backup.is_none() && files.remaining_staging.is_none() {
+                ui.label("Temporary recovery files were removed.");
+            }
         }
         Outbound::Ready => {
             ui.label("Compare imported ratings, cues, BPM, keys and beat grids. Use a local library with Cloud Library Sync turned off on every linked computer.");
@@ -366,13 +426,13 @@ fn writeback_view(review: &mut Review, ui: &mut Ui, library_protected: bool) {
     }
 
     if apply {
-        if let Outbound::Preview { plan, selected, .. } = std::mem::replace(&mut review.outbound, Outbound::Ready) {
+        if let Outbound::Preview { plan, selected, retain_backup, .. } = std::mem::replace(&mut review.outbound, Outbound::Ready) {
             let rows = selected.into_iter().collect::<Vec<_>>();
             review.start(
                 ui.ctx(),
-                "Backing up and applying the selected changes…",
+                if retain_backup { "Backing up and applying the selected changes…" } else { "Applying the selected changes…" },
                 true,
-                move |local, desktop| writeback::apply(local, desktop, &plan, &rows).map(ResultView::Applied),
+                move |local, desktop| writeback::apply_with_backup(local, desktop, &plan, &rows, retain_backup).map(ResultView::Applied),
             );
         }
     } else if ui
@@ -519,6 +579,53 @@ fn preview_rows(ui: &mut Ui, plan: &Plan, selected: &mut BTreeSet<usize>, links:
 mod tests {
     use super::*;
     use egui::{Color32, Shape};
+
+    #[test]
+    fn library_path_labels_format_windows_drives_and_shares_and_preserve_other_namespaces() {
+        for (native, label) in [
+            (r"\\?\C:\Users\DJ\master.db", r"C:\Users\DJ\master.db"),
+            (r"C:/Users/DJ\library.db", r"C:\Users\DJ\library.db"),
+            (r"\\?\UNC\音楽/share\master.db", r"\\音楽\share\master.db"),
+            (r"//?/unc/host/share/master.db", r"\\host\share\master.db"),
+            (r"\\host\share/master.db", r"\\host\share\master.db"),
+            (r"\\?\Volume{abc}\master.db", r"\\?\Volume{abc}\master.db"),
+            (r"\\.\pipe\local/db", r"\\.\pipe\local/db"),
+            (r"\\?\UNC\missing_share", r"\\?\UNC\missing_share"),
+            (r"/Volumes/Music/DJ\Set/library.db", r"/Volumes/Music/DJ\Set/library.db"),
+            (r"local\directory/library.db", r"local\directory/library.db"),
+        ] {
+            assert_eq!(display_library_path(Path::new(native)), label);
+        }
+        #[cfg(not(windows))]
+        assert_eq!(display_library_path(Path::new("//server/share/master.db")), "//server/share/master.db");
+    }
+
+    #[test]
+    fn completed_writeback_only_labels_a_retained_backup_as_a_backup() {
+        let ctx = Context::default();
+        crate::theme::apply(&ctx);
+        let path = PathBuf::from(r"\\?\C:\DJ/conflict");
+        for (retain, dir, expected) in [
+            (true, Some(path.clone()), "Recovery backup"),
+            (false, None, "You chose to skip the backup for this write-back."),
+            (false, Some(path), "Remaining recovery files"),
+        ] {
+            let mut review = Review {
+                desktop: None, local: None, found: false, direction: Some(Direction::WriteBack),
+                outbound: Outbound::Applied(Receipt { applied: 1, backup: dir.clone().filter(|_| retain), remaining_staging: dir.clone().filter(|_| !retain) }),
+                recovery: Ok(false), confirm_recovery: false,
+            };
+            let output = ctx.run(Default::default(), |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| writeback_view(&mut review, ui, false));
+            });
+            let labels: Vec<_> = output.shapes.iter().filter_map(|s| match &s.shape {
+                Shape::Text(t) => Some(t.galley.text()), _ => None,
+            }).collect();
+            assert!(labels.contains(&expected), "{labels:?}");
+            assert_eq!(labels.contains(&"Recovery backup"), retain);
+            assert_eq!(labels.contains(&r"C:\DJ\conflict"), dir.is_some());
+        }
+    }
 
     #[test]
     fn active_desktop_writes_keep_main_alive_and_allow_library_redocking() {

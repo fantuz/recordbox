@@ -52,7 +52,7 @@ pub struct DeckExt {
     /// STEM Waveform Display: the waveform of the parts that sound (which parts, waveform),
     /// and the one being worked out in the background.
     pub stem_wave: Option<([bool; 4], Waveform)>,
-    pub stem_wave_rx: Option<(i64, [bool; 4], crossbeam_channel::Receiver<Waveform>)>,
+    stem_wave_failed: Option<[bool; 4]>,
     /// SLIP is on for this deck (Performance).
     pub slip: bool,
     /// Pad pages: HOT CUE shows I-P instead of A-H; BEAT JUMP's and BEAT LOOP's second page.
@@ -65,6 +65,11 @@ pub struct DeckExt {
 }
 
 impl DeckExt {
+    pub(crate) fn clear_stem_wave(&mut self) {
+        self.stem_wave = None;
+        self.stem_wave_failed = None;
+    }
+
     /// What stays on a deck when another track is loaded or it is emptied: the switches of
     /// the deck itself (MT, BEAT SYNC, KEY SYNC, isolator), not the settings made for a track.
     /// The deck's switches and tempo as plain values (for handing to the audio thread).
@@ -86,8 +91,49 @@ pub struct DeckSwitches {
     pub eq_kill: [bool; 3],
 }
 
+struct StemWaveJob {
+    track: i64,
+    parts: std::sync::Weak<crate::stems::Stems>,
+    mask: [bool; 4],
+    rx: crossbeam_channel::Receiver<Waveform>,
+}
+
+/// Playback uses the mix minus the other parts for instruments when the original rate matches.
+fn render_stem_wave(stems: &crate::stems::Stems, on: [bool; 4], original: Option<&crate::audio::Decoded>) -> Waveform {
+    let n = stems.len;
+    let mut mono = vec![0.0f32; n];
+    let mut add = |src: usize, k: f32| {
+        let (l, r) = (&stems.data[src * 2 * n..(src * 2 + 1) * n], &stems.data[(src * 2 + 1) * n..(src * 2 + 2) * n]);
+        for i in 0..n {
+            mono[i] += k * 0.5 * (l[i] + r[i]);
+        }
+    };
+    match original.filter(|_| on[2]) {
+        Some(a) => {
+            for src in [0, 1, 3] {
+                if !on[src] {
+                    add(src, -1.0);
+                }
+            }
+            for (i, m) in mono.iter_mut().enumerate().take(a.frames()) {
+                *m += 0.5 * (a.samples[i * 2] + a.samples[i * 2 + 1]);
+            }
+        }
+        None => {
+            for (src, on) in on.iter().enumerate() {
+                if *on {
+                    add(src, 1.0);
+                }
+            }
+        }
+    }
+    crate::analysis::waveform(&mono, crate::stems::htdemucs::SAMPLE_RATE as f64)
+}
+
 /// Player state shared by the layouts (a field of `App`).
 pub struct PlayerExt {
+    // One slot per physical deck survives track/model/layout switches until its worker exits.
+    stem_wave_jobs: [Option<StemWaveJob>; 4],
     /// The decks that are not active, by deck number (0 = deck 1): `parked[n]` holds deck n
     /// while another deck is `App::deck`; the active deck's own slot holds an empty deck.
     pub parked: [Deck; 4],
@@ -165,7 +211,7 @@ impl MixStrip {
 
 impl Default for PlayerExt {
     fn default() -> Self {
-        PlayerExt { parked: std::array::from_fn(|_| Deck::default()), parked_backup: [None, None, None, None], active: 0, muted: false, master: 0, crossfader: 0.5, dual_control: false, wave_link: false, mix: [MixStrip::new(1), MixStrip::new(2), MixStrip::new(1), MixStrip::new(2)], hp_mix: 0.5, hp_level: 0.5, master_db: [-120.0; 2], pad_mode: [0; 4], loop_manual: [false; 4], stem_fx: [true; 4], fx: [crate::ui_fx::FxUi::new(), crate::ui_fx::FxUi::new()], cfx_kind: 0, cfx_user: false, cfx_param: 0.5, cfx_color: [0.5; 5], fxx: Default::default(), parked_quantize: [true; 4], parked_loop: [None; 4], sampler: crate::ui_sampler::SamplerUi::new() }
+        PlayerExt { stem_wave_jobs: Default::default(), parked: std::array::from_fn(|_| Deck::default()), parked_backup: [None, None, None, None], active: 0, muted: false, master: 0, crossfader: 0.5, dual_control: false, wave_link: false, mix: [MixStrip::new(1), MixStrip::new(2), MixStrip::new(1), MixStrip::new(2)], hp_mix: 0.5, hp_level: 0.5, master_db: [-120.0; 2], pad_mode: [0; 4], loop_manual: [false; 4], stem_fx: [true; 4], fx: [crate::ui_fx::FxUi::new(), crate::ui_fx::FxUi::new()], cfx_kind: 0, cfx_user: false, cfx_param: 0.5, cfx_color: [0.5; 5], fxx: Default::default(), parked_quantize: [true; 4], parked_loop: [None; 4], sampler: crate::ui_sampler::SamplerUi::new() }
     }
 }
 
@@ -1025,7 +1071,7 @@ impl App {
             return false;
         }
         let s = self.player.state.lock();
-        s.stems.is_some() && !s.stem_on.iter().all(|x| *x) && !self.deck.x.stem_wave.as_ref().map(|w| w.0 == s.stem_on).unwrap_or(false)
+        s.stems.is_some() && !s.stem_on.iter().all(|x| *x) && self.deck.x.stem_wave_failed != Some(s.stem_on) && !self.deck.x.stem_wave.as_ref().map(|w| w.0 == s.stem_on).unwrap_or(false)
     }
 
     /// The stem waveform of every deck, each frame and in every mode. (It used to be polled
@@ -1040,62 +1086,48 @@ impl App {
     /// Keep the active deck's stem waveform in step with its part switches: worked out on a
     /// background thread from the audible stems whenever the set of parts changes.
     pub fn poll_stem_wave(&mut self) {
+        self.poll_stem_wave_with(render_stem_wave);
+    }
+
+    pub(crate) fn poll_stem_wave_with(&mut self, render: impl FnOnce(&crate::stems::Stems, [bool; 4], Option<&crate::audio::Decoded>) -> Waveform + Send + 'static) {
         let (stems, on) = {
             let s = self.player.state.lock();
             (s.stems.clone(), s.stem_on)
         };
-        let (Some(stems), Some(tid), true, false) = (stems, self.deck.track, self.prefs.stem_waveform, on.iter().all(|x| *x)) else {
-            self.deck.x.stem_wave_rx = None;
-            return;
-        };
-        if let Some((id, key, rx)) = &self.deck.x.stem_wave_rx {
-            if let Ok(w) = rx.try_recv() {
-                if *id == tid {
-                    self.deck.x.stem_wave = Some((*key, w));
-                }
-                self.deck.x.stem_wave_rx = None;
-            }
+        let wanted = self.prefs.stem_waveform && !on.iter().all(|x| *x);
+        if !wanted || self.deck.x.stem_wave_failed != Some(on) {
+            self.deck.x.stem_wave_failed = None;
         }
-        let have = self.deck.x.stem_wave.as_ref().map(|w| w.0 == on).unwrap_or(false);
-        let running = self.deck.x.stem_wave_rx.as_ref().map(|j| j.1 == on && j.0 == tid).unwrap_or(false);
-        if !have && !running {
-            let (tx, rx) = crossbeam_channel::bounded(1);
-            let ctx = self.ctx.clone();
-            // The instruments are the mix less the other parts (as in playback), which needs
-            // the decoded original at the stems' rate; otherwise the model's own part is used.
-            let orig = self.deck.audio.clone().filter(|a| a.sr == crate::stems::htdemucs::SAMPLE_RATE as u32);
-            std::thread::spawn(move || {
-                let n = stems.len;
-                let mut mono = vec![0.0f32; n];
-                let mut add = |src: usize, k: f32| {
-                    let (l, r) = (&stems.data[src * 2 * n..(src * 2 + 1) * n], &stems.data[(src * 2 + 1) * n..(src * 2 + 2) * n]);
-                    for i in 0..n {
-                        mono[i] += k * 0.5 * (l[i] + r[i]);
-                    }
-                };
-                match orig.as_deref().filter(|_| on[2]) {
-                    Some(a) => {
-                        for src in [0, 1, 3] {
-                            if !on[src] {
-                                add(src, -1.0);
-                            }
-                        }
-                        for (i, m) in mono.iter_mut().enumerate().take(a.frames()) {
-                            *m += 0.5 * (a.samples[i * 2] + a.samples[i * 2 + 1]);
-                        }
-                    }
-                    None => {
-                        for (src, on) in on.iter().enumerate() {
-                            if *on {
-                                add(src, 1.0);
-                            }
-                        }
-                    }
+        let slot = &mut self.px.stem_wave_jobs[self.px.active as usize];
+        if let Some(job) = slot {
+            let current = wanted && self.deck.track == Some(job.track) && job.mask == on
+                && stems.as_ref().is_some_and(|parts| job.parts.ptr_eq(&std::sync::Arc::downgrade(parts)));
+            match job.rx.try_recv() {
+                Ok(wave) => { if current { self.deck.x.stem_wave = Some((on, wave)); } }
+                Err(crossbeam_channel::TryRecvError::Empty) => return,
+                Err(crossbeam_channel::TryRecvError::Disconnected) => {
+                    if current { self.deck.x.stem_wave_failed = Some(on); }
                 }
-                let _ = tx.send(crate::analysis::waveform(&mono, crate::stems::htdemucs::SAMPLE_RATE as f64));
-                ctx.request_repaint();
-            });
-            self.deck.x.stem_wave_rx = Some((tid, on, rx));
+            }
+            *slot = None;
+        }
+        let (Some(stems), Some(track), true) = (stems, self.deck.track, wanted) else { return };
+        if self.deck.x.stem_wave_failed == Some(on) || self.deck.x.stem_wave.as_ref().is_some_and(|(mask, _)| *mask == on) { return; }
+        let (tx, rx) = crossbeam_channel::bounded(1);
+        let parts = std::sync::Arc::downgrade(&stems);
+        let original = self.deck.audio.clone().filter(|a| a.sr == crate::stems::htdemucs::SAMPLE_RATE as u32);
+        let ctx = self.ctx.clone();
+        let worker = std::thread::Builder::new().name("rb-stems-wave".into()).spawn(move || {
+            if let Ok(wave) = guard_stem_work("Stem waveform", || Ok(render(&stems, on, original.as_deref()))) {
+                let _ = tx.send(wave);
+            }
+            drop(tx);
+            ctx.request_repaint_of(egui::ViewportId::ROOT);
+        });
+        if worker.is_ok() {
+            *slot = Some(StemWaveJob { track, mask: on, parts, rx });
+        } else {
+            self.deck.x.stem_wave_failed = Some(on);
         }
     }
 

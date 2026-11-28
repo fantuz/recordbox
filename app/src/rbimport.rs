@@ -441,7 +441,7 @@ pub(crate) fn parse_pqtz_grid(b: &[u8]) -> Option<BeatGrid> {
             last_tempo = Some(beat.bpm);
         }
     }
-    (!anchors.is_empty()).then_some(BeatGrid { anchors })
+    (!anchors.is_empty()).then_some(BeatGrid::from_anchors(anchors))
 }
 
 /// Native phrase beat numbers are positions in PQTZ, so reuse them only when the

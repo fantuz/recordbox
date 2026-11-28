@@ -461,20 +461,35 @@ pub fn related_window(app: &mut App, ui: &mut Ui, r: Rect, which: usize) {
             }
         }
     });
-    // Rows (re-read at most once a second, or when what they depend on changes).
+    // Keep an idle collection's ranking. Coalesce writes from a running analysis,
+    // while source, target and criteria changes take effect on the next frame.
+    use crate::library_ext::{MatchPanelQuery, MatchPanelRows};
     let now = ui.input(|i| i.time);
-    let key = format!("{:?}|{}|{}|{:?}|{}|{}", src, target, app.tracks.len(), if which == 0 { format!("{:?}", app.prefs.related) } else { app.prefs.bx.suggest_kind.to_string() }, app.ext.matches.len(), app.prefs.related_sel);
-    let rows = match app.ext.panel_cache[which].clone().filter(|c| c.0 == key && now - c.1 < 1.0) {
-        Some(c) => c.2,
-        None => {
-            let v: Vec<(i64, f64)> = match src {
+    let kind = app.prefs.bx.suggest_kind.min(3);
+    let query = if which == 0 {
+        MatchPanelQuery::Related(src, target, app.prefs.related.clone())
+    } else {
+        MatchPanelQuery::Suggest(src, target, kind)
+    };
+    let revision = (app.track_metadata_revision, app.db.conn.total_changes());
+    let rows = match &app.ext.panel_cache[which] {
+        Some(cached) if cached.reusable(&query, revision, now) => {
+            if cached.revision != revision {
+                ui.ctx().request_repaint_after(std::time::Duration::from_secs_f64(
+                    (cached.built_at + 1.0 - now).clamp(0.0, 1.0)
+                ));
+            }
+            cached.rows.clone()
+        }
+        _ => {
+            let rows = match src {
                 None => vec![],
                 Some(s) if which == 0 => app.related_for(s, target).into_iter().map(|id| (id, 0.0)).collect(),
-                Some(s) => app.suggestions(s, target, app.prefs.bx.suggest_kind),
+                Some(s) => app.suggestions(s, target, kind),
             };
-            let v = std::sync::Arc::new(v);
-            app.ext.panel_cache[which] = Some((key, now, v.clone()));
-            v
+            let rows = std::sync::Arc::new(rows);
+            app.ext.panel_cache[which] = Some(MatchPanelRows { query, revision, built_at: now, rows: rows.clone() });
+            rows
         }
     };
     let body = Rect::from_min_max(pos2(l, t + 80.0), pos2(right, r.max.y));
@@ -536,8 +551,15 @@ pub fn related_window(app: &mut App, ui: &mut Ui, r: Rect, which: usize) {
                     pt.text(pos2(edge - 20.0, y), Align2::RIGHT_CENTER, tr.date_added.get(..10).unwrap_or(&tr.date_added), rb(SUB_ARTIST_FONT), WHITE.c());
                 }
             }
-            if which == 1 && tips && resp.hovered() {
-                resp.clone().on_hover_text(format!("{} {:.0} %", SUGGEST_KINDS[app.prefs.bx.suggest_kind.min(3) as usize], (score.min(1.0)) * 100.0));
+            if tips {
+                if let Some(source) = src {
+                    resp.clone().on_hover_ui(|ui| {
+                        if which == 1 {
+                            ui.label(format!("{} · {:.0}% match", SUGGEST_KINDS[kind as usize], score.min(1.0) * 100.0));
+                        }
+                        ui.label(app.match_explanation(source, id, (which == 1).then_some(kind)));
+                    });
+                }
             }
             drop(_sel_dark);
             if resp.clicked() {

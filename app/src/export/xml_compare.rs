@@ -53,7 +53,7 @@ fn export_matches_collection_xml() {
         // With PREPDECK_ANLZ_PAIRS, tracks carry rekordbox's own analysis files (as after a sync).
         let rb_anlz = rb_pairs.get(&t.path).cloned().filter(|b: &std::path::PathBuf| b.with_extension("DAT").is_file());
         let grid_same = match (&rb_anlz, &xt.grid) {
-            (Some(b), Some(g)) => crate::rbimport::read_pqtz_grid(&b.with_extension("DAT")).map(|r| crate::app::grids_match(&r, g)).unwrap_or(false),
+            (Some(b), Some(g)) => crate::export::anlz::grid_pair::matches_source(&b.with_extension("DAT"), g),
             _ => false,
         };
         tracks.insert(id, ExportTrack { track: t, cues, grid: xt.grid.clone(), wave: r.map(|r| r.wave), tags: vec![], rb_anlz, grid_same, vocal: None, phrases: None });

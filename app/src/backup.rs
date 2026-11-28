@@ -447,6 +447,8 @@ pub fn poll(app: &mut crate::app::App) {
 
 /// Everything the app holds in memory is read again from the restored database.
 fn reload_after_restore(app: &mut crate::app::App) {
+    app.cancel_match_enrichment();
+    app.dialogs.match_lookup = None;
     // Both decks are emptied: their tracks may not exist in the restored library.
     for d in 0..2u8 {
         app.with_deck(d, |a| a.unload_track());
@@ -459,6 +461,7 @@ fn reload_after_restore(app: &mut crate::app::App) {
         app.prefs = p;
         app.prefs.audio_device = dev;
         app.prefs.devices_extra = extra;
+        app.restored_hardware_preferences();
         app.save_prefs();
     }
     app.textures.clear();

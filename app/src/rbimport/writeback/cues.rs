@@ -1015,7 +1015,7 @@ mod tests {
             &reviewed,
             &select(&reviewed),
         )?;
-        let copy = read(&native(&receipt.backup.join("master.db"))?, "10")?;
+        let copy = read(&native(&receipt.backup.as_ref().expect("retained by default").join("master.db"))?, "10")?;
         assert_eq!(copy.view.0[0].1.comment, "First");
         let written = read(&native(&master)?, "10")?;
         assert_eq!(written.view.0[0].1.comment, "Refrain");
@@ -1168,7 +1168,7 @@ mod tests {
             .collect();
         assert_eq!(selected.len(), 2, "{:#?}", reviewed.rows);
         let receipt = writeback::apply(&dest, &source, &reviewed, &selected)?;
-        let old = native(&receipt.backup.join("master.db"))?;
+        let old = native(&receipt.backup.as_ref().expect("retained by default").join("master.db"))?;
         assert_eq!(read(&old, &content)?, baseline);
         let rating = |db: &Connection| {
             db.query_row(

@@ -234,7 +234,10 @@ pub fn import_track(root: &Path, lib: &DeviceLibrary, id: u32, music_dir: &Path,
     let dat_sections = dat.map(anlz::section_list).unwrap_or_default();
     let ext_sections = companion("EXT").map(anlz::section_list).unwrap_or_default();
     let cues = anlz::parse_cues(&ext_sections, &dat_sections);
-    let grid = dat.and_then(crate::rbimport::parse_pqtz_grid);
+    let grid = dat.and_then(|bytes| {
+        companion("EXT").and_then(|ext| anlz::grid_pair::read(std::io::Cursor::new(bytes), std::io::Cursor::new(ext)))
+            .or_else(|| crate::rbimport::parse_pqtz_grid(bytes))
+    });
     let anlz_base = if dat.is_some() { Some(cache_device_analysis(data_dir, &analysis)?) } else { None };
     // Artwork: the file's embedded picture when it has one, else the device's (the larger
     // "_m" version when it exists).
@@ -416,6 +419,38 @@ mod tests {
             file_path: "/song.mp3".into(),
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn unknown_or_inconsistent_usb_mirrors_keep_the_dat_grid_and_original_bytes() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let device = dir.path().join("usb");
+        let mut track = device_track();
+        track.analyze_path = "/PIONEER/USBANLZ/P001/00000001/ANLZ0000.DAT".into();
+        let dat = device.join(track.analyze_path.trim_start_matches('/'));
+        std::fs::create_dir_all(dat.parent().unwrap())?;
+        std::fs::write(device.join("song.mp3"), b"fixture")?;
+        let beats: Vec<_> = [0.100501, 0.900866, 1.400011].iter().enumerate()
+            .map(|(i,&time)| Beat { time, index: i, beat: i as u8 + 1, bpm: 120.0 }).collect();
+        let source = anlz::build(&track.file_path, &beats, &Waveform::default(), &[], 0, 44100);
+        std::fs::write(&dat, &source.dat)?;
+        let section = source.ext.windows(4).position(|tag| tag == b"PQT2").context("missing extended grid")?;
+        let mut lib = DeviceLibrary::default();
+        lib.tracks.insert(1, track);
+        let data = dir.path().join("data");
+        for (field, value) in [(16, 2u8), (16, 9), (47, source.ext[section + 47] ^ 1), (56, 0xff)] {
+            let mut modified = source.ext.clone();
+            modified[section + field] = value;
+            std::fs::write(dat.with_extension("EXT"), &modified)?;
+            let import = import_track(&device, &lib, 1, &dir.path().join("music"), &data, &dir.path().join("art"))?;
+            let grid = import.grid.context("DAT tempo segments should remain readable")?;
+            assert!(!grid.has_listed_beats());
+            assert_eq!(grid.anchors[0].time, 0.1);
+            let cached = import.anlz_base.context("USB analysis files remain available")?;
+            assert_eq!(std::fs::read(cached.with_extension("EXT"))?, modified);
+            assert_eq!(std::fs::read(dat.with_extension("EXT"))?, modified);
+        }
+        Ok(())
     }
 
     #[test]

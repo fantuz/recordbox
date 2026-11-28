@@ -81,7 +81,8 @@ const CHAPTERS: [(&str, &str, &str); 15] = [
 <h3>My Tag</h3>
 <p><i>View &gt; My Tag Configuration Window</i> shows your tag categories; tick tags for the selected tracks. With Preferences &gt; Advanced &gt; Browse &gt; Add "My Tag" to the "Comments", a track's tags are also written at the end of its comment as <code>/* Tag / Tag */</code>.</p>
 <h3>Related Tracks</h3>
-<p>The Related Tracks source lists tracks that go with the loaded track by the rules you tick: BPM range, same or related key, genre, colour, rating, My Tag.</p>
+<p>Choose a source track and a collection or playlist. BPM range, harmonic key, genre and the other checked criteria filter the results. Registered matching pairs lead eligible tracks. Track Suggestion also ranks by waveform, credits, era and shared My Tags. Hover over a panel result to see which details contributed.</p>
+<p>To add recording genres, select up to 100 tracks and choose <i>Look up related track tags…</i>. Choose a OneTagger CLI that supports <kbd>lookup --json</kbd>. OneTagger sends the catalog artist and title, including any mix name, to MusicBrainz. An unambiguous match can add genre information to the private recordbox catalog. Check <i>Also run local track analysis</i> to queue audio analysis alongside the lookup.</p>
 "#),
     ("player", "The player", r#"
 <ul>
@@ -115,8 +116,9 @@ const CHAPTERS: [(&str, &str, &str); 15] = [
 </ul>
 "#),
     ("stems", "Stems", r#"
+<p>In <i>Export &gt; Dual Player</i>, use <b>STEMS · SEPARATE</b> on each deck. While one track runs, use <b>STEMS · QUEUE</b> on the other. Each deck shows its own stage and part controls. You can cancel a waiting track or stop the running one. Requesting the same separation on both decks shares the work. If the controls are hidden, enable <i>STEMS button</i> in the player layout options. The experimental Linux Vulkan build requires a manual request for each new separation.</p>
 <p>Recordbox can split a loaded track into vocal, instrument, bass and drum parts with a local separation model. Choose the model in <i>Preferences &gt; Extensions &gt; STEMS</i>. After a successful separation, Recordbox saves a <code>.stems</code> file for reuse with that track and model. The header starts with <code>PDSTEMS1</code>. Desktop library sync handles track edits separately from these audio caches.</p>
-<p>Export and Performance decks share saved parts. Quality and speed each save four stereo parts in a separate file. The three-part layout groups bass with instruments. A four-minute track uses about 169 MB per model, or 339 MB for both. Completed results survive a restart. In STEMS preferences, set a shared storage budget (20 GB by default) or choose <i>Keep all saved stems</i>. Copy the stems folder separately when backing up your library.</p>
+<p>Export and Performance decks share saved parts. Quality and speed each save four stereo parts in a separate file. The three-part layout groups bass with instruments. A four-minute track uses about 169 MB per model, or 339 MB for both. Completed results survive a restart. In STEMS preferences, set a shared storage budget (50 GB by default) or choose <i>Keep all saved stems</i>. Both settings reserve 10% of the cache drive. If a save would cross that limit, the finished parts remain playable on the loaded deck. Copy the stems folder separately when backing up your library.</p>
 <p>The part buttons mute, unmute or solo a part. Preferences controls three or four parts, sound quality or speed, and whether muted parts come back when a track is loaded. The same model detects vocal positions, shown above the overview.</p>
 "#),
     ("stemexport", "Export vocals or an instrumental", r#"

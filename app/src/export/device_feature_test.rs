@@ -57,6 +57,12 @@ fn b1_a_device_track_is_imported_with_cues_grid_tags_and_analysis() {
         t.track.comment = "Peak time".into();
         t.track.rating = 4;
         t.track.color = 3;
+        t.track.bpm = 121.5;
+        t.grid = Some(crate::model::BeatGrid::from_listed(vec![
+            crate::model::GridAnchor { time: 0.120501, bpm: 120.37, beat: 3 },
+            crate::model::GridAnchor { time: 0.920064, bpm: 120.37, beat: 4 },
+            crate::model::GridAnchor { time: 1.386999, bpm: 129.97, beat: 1 },
+        ]));
         t.track.key_text = "7A".into();
         t.track.artwork = art.to_string_lossy().to_string();
         t.tags = vec![("Situation".into(), "Warm Up".into())];
@@ -95,10 +101,13 @@ fn b1_a_device_track_is_imported_with_cues_grid_tags_and_analysis() {
     let mem = it.cues.iter().find(|c| c.kind == CueKind::Memory).unwrap();
     assert_eq!((mem.start, mem.comment.as_str(), mem.color), (8.25, "Break", 2));
     let (g, want) = (it.grid.as_ref().unwrap(), tracks[&1].grid.as_ref().unwrap());
-    assert!((g.first_bpm() - want.first_bpm()).abs() < 0.01);
-    assert!((g.beats(10.0)[0].time - want.beats(10.0)[0].time).abs() < 0.0011);
+    assert_eq!(t.bpm, 121.5, "the device row keeps the published whole-track tempo");
+    assert!(g.has_listed_beats());
+    assert_eq!(g, want, "all measured beat numbers, tempi and microsecond times survive the import");
     // The device's analysis files are kept next to the library, valid, for display and re-export.
     let base = it.anlz_base.as_ref().unwrap();
+    assert!(super::anlz::grid_pair::matches_source(&base.with_extension("DAT"), g));
+    assert!(!super::anlz::grid_pair::matches_source(&base.with_extension("DAT"), &g.shifted(0.000001)));
     for e in ["DAT", "EXT", "2EX"] {
         assert!(super::anlz::validate(&std::fs::read(base.with_extension(e)).unwrap()).is_ok(), "{e}");
     }

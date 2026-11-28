@@ -102,6 +102,22 @@ impl Libraries {
 }
 
 #[test]
+fn native_catalog_only_opt_out_applies_reviewed_delta_without_a_recovery_copy() -> Result<()> {
+    let f = Libraries::new()?;
+    f.edit()?;
+    let plan = preview(&f.local, &f.source)?;
+    let row = plan.rows.iter().position(|r| r.reason.is_none() && r.field == Field::Rating).unwrap();
+    let receipt = apply_with_backup(&f.local, &f.source, &plan, &[row], false)?;
+    assert_eq!(receipt.applied, 1);
+    assert!(receipt.backup.is_none() && !backup_root(&f.local)?.exists());
+    assert_eq!(f.state(&f.source.join("master.db"))?.0, 4);
+    assert_eq!(std::fs::read(&f.audio)?, b"opaque audio content");
+    let next = preview(&f.local, &f.source)?;
+    assert!(!next.rows.iter().any(|r| r.field == Field::Rating && r.reason.is_none()));
+    Ok(())
+}
+
+#[test]
 fn import_preview_and_write_selected_native_fields_once() -> Result<()> {
     let f = Libraries::new()?;
     let master = f.source.join("master.db");
@@ -126,7 +142,7 @@ fn import_preview_and_write_selected_native_fields_once() -> Result<()> {
     );
     let receipt = apply(&f.local, &f.source, &plan, &selected)?;
     assert_eq!(receipt.applied, 3);
-    assert_eq!(f.state(&receipt.backup.join("master.db"))?, before);
+    assert_eq!(f.state(&receipt.backup.as_ref().expect("retained by default").join("master.db"))?, before);
     let (rating, bpm, key, title, usn) = f.state(&master)?;
     assert_eq!(
         (rating, bpm, key.as_str(), title.as_str()),
@@ -249,11 +265,11 @@ fn registered_grid_nudge_rechecks_ownership_and_backs_up_both_tables() -> Result
     let receipt = apply(&f.local, &f.source, &plan, &[i])?;
     assert_eq!(receipt.applied, 1);
     let backups = [
-        std::fs::read(receipt.backup.join("0.original"))?,
-        std::fs::read(receipt.backup.join("1.original"))?,
+        std::fs::read(receipt.backup.as_ref().expect("retained by default").join("0.original"))?,
+        std::fs::read(receipt.backup.as_ref().expect("retained by default").join("1.original"))?,
     ];
     let current = native(&master)?;
-    let old = native(&receipt.backup.join("master.db"))?;
+    let old = native(&receipt.backup.as_ref().expect("retained by default").join("master.db"))?;
     for (ext, original) in &siblings {
         let actual = std::fs::read(dat.with_extension(ext))?;
         let registered = |c: &Connection| {
@@ -401,7 +417,7 @@ fn published_v6_catalog_keeps_native_anlz_registrations_in_sync() -> Result<()> 
         &desired
     ));
     let db = native(&active)?;
-    let old = native(&receipt.backup.join("master.db"))?;
+    let old = native(&receipt.backup.as_ref().expect("retained by default").join("master.db"))?;
     assert_eq!(
         db.query_row("SELECT Rating FROM djmdContent WHERE ID=?", [&owner], |r| r
             .get::<_, i64>(0))?,

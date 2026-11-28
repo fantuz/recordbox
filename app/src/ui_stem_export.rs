@@ -82,10 +82,7 @@ pub fn strip_control(app: &mut App, ui: &mut Ui, r: Rect) {
 
 /// The strip's status line while an export of the deck's track runs.
 pub fn strip_status(app: &App) -> Option<String> {
-    if !sx::busy_for(app, app.deck.track) {
-        return None;
-    }
-    sx::status(app).or_else(|| Some("Waiting to export stems…".into()))
+    sx::status_for(app, app.deck.track?)
 }
 
 /// "Export Stems > Vocals / Instrumental" (and Stop) in the track list's menu.

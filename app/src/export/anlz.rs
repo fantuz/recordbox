@@ -1,6 +1,8 @@
 //! Writer for the players' analysis files (ANLZ0000.DAT / .EXT / .2EX), big-endian tagged
 //! sections inside a PMAI container. Section layouts are listed in MECHANICS.md.
 
+pub(crate) mod grid_pair;
+
 use crate::model::{Beat, Cue, CueKind, Waveform};
 
 fn section(tag: &[u8; 4], header_extra: &[u8], body: &[u8]) -> Vec<u8> {
@@ -134,6 +136,11 @@ fn padded_frames(w: &Waveform, raw_samples: u64, sample_rate: u32) -> Vec<[u8; 8
     v
 }
 
+/// Beat number, centi-BPM, and whole milliseconds as written in classic USB analysis files.
+pub(crate) fn beat_record(b: &Beat) -> (u16, u16, u32) {
+    (u16::from(b.beat), (b.bpm * 100.0).round() as u16, ms(b.time))
+}
+
 fn pqtz(beats: &[Beat]) -> Vec<u8> {
     let mut h = vec![];
     h.extend_from_slice(&0u32.to_be_bytes());
@@ -141,12 +148,10 @@ fn pqtz(beats: &[Beat]) -> Vec<u8> {
     h.extend_from_slice(&(beats.len() as u32).to_be_bytes());
     let mut body = Vec::with_capacity(beats.len() * 8);
     for b in beats {
-        body.extend_from_slice(&(b.beat as u16).to_be_bytes());
-        body.extend_from_slice(&((b.bpm * 100.0).round() as u16).to_be_bytes());
-        // Whole milliseconds, cut not rounded: the sub-millisecond part goes to PQT2 (in real
-        // files PQTZ time + PQT2 fraction gives evenly spaced beats; e.g. 1900.861 ms is
-        // stored as 1900 and 861).
-        body.extend_from_slice(&ms(b.time).to_be_bytes());
+        let (bar, tempo, whole_ms) = beat_record(b);
+        body.extend_from_slice(&bar.to_be_bytes());
+        body.extend_from_slice(&tempo.to_be_bytes());
+        body.extend_from_slice(&whole_ms.to_be_bytes());
     }
     section(b"PQTZ", &h, &body)
 }
@@ -979,6 +984,34 @@ mod tests {
         bytes[36..40].copy_from_slice(&u32::MAX.to_be_bytes());
         std::fs::write(&path, &bytes).unwrap();
         assert!(read_pssi(&path).is_none());
+    }
+
+    #[test]
+    fn irregular_model_grid_keeps_exact_dat_and_ext_beats_after_reopening_sqlite() -> anyhow::Result<()> {
+        use crate::model::{BeatGrid, GridAnchor};
+        let root = tempfile::tempdir()?;
+        let path = root.path().join("library.db");
+        let grid = BeatGrid::from_listed(vec![
+            GridAnchor { time: 1.000501, bpm: 120.37, beat: 3 },
+            GridAnchor { time: 1.800064, bpm: 120.37, beat: 4 },
+            GridAnchor { time: 2.266999, bpm: 129.97, beat: 1 },
+        ]);
+        let id = {
+            let db = crate::db::Db::open(&path)?;
+            let track = crate::importer::read_track(&root.path().join("example.wav"));
+            let id = db.insert_track(&track)?;
+            db.save_grid(id, &grid)?;
+            id
+        };
+        let db = crate::db::Db::open(&path)?;
+        let loaded = db.grid_checked(id)?.unwrap();
+        let beats = loaded.beats(10.0);
+        let files = build("/Contents/example.wav", &beats, &Waveform::default(), &[], 0, 44100);
+        let dat = section_list(&files.dat).into_iter().find(|(tag, _)| tag == "PQTZ").unwrap().1;
+        let ext = section_list(&files.ext).into_iter().find(|(tag, _)| tag == "PQT2").unwrap().1;
+        assert_eq!(pqtz_entries(&dat), [(3, 12037, 1000), (4, 12037, 1800), (1, 12997, 2266)]);
+        assert_eq!(pqt2_fractions(&ext), [501, 64, 999]);
+        Ok(())
     }
 
     #[test]
