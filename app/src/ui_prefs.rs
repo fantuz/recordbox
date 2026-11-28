@@ -59,7 +59,7 @@ fn tabs_of(page: u8, mode: Mode) -> &'static [&'static str] {
 }
 
 /// Every setting by name, for the search field: (page, tab, name).
-const SETTINGS: [(u8, &str, &str); 188] = [
+const SETTINGS: &[(u8, &str, &str)] = &[
     (7, "Effect", "Apply CFX to Sampler using MIC COLOR control knob."),
     (7, "Sampler", "SLOT"),
     (7, "Sampler", "Do not overwrite the loaded Slot."),
@@ -259,7 +259,7 @@ pub fn search_settings(q: &str, mode: Mode) -> Vec<(u8, usize, String)> {
         return vec![];
     }
     let mut v = vec![];
-    for (page, tab, name) in SETTINGS {
+    for &(page, tab, name) in SETTINGS {
         if !name.to_lowercase().contains(&q) || !rb::categories(mode).contains(&page) {
             continue;
         }
@@ -1812,7 +1812,7 @@ mod tests {
         assert_eq!(search_settings("needle lock", Mode::Performance), vec![(7, 0, "Needle Lock".to_string())]);
         assert!(search_settings("Play/Pause", Mode::Performance).iter().any(|h| h.0 == 3));
         // Every indexed setting points at a tab that exists in some mode.
-        for (page, tab, name) in SETTINGS {
+        for &(page, tab, name) in SETTINGS {
             assert!([Mode::Export, Mode::Performance].iter().any(|m| rb::categories(*m).contains(&page) && tabs_of(page, *m).contains(&tab)), "{name}: {page} > {tab}");
         }
     }
