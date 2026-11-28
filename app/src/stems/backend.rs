@@ -1,11 +1,17 @@
 use candle_core::Device;
 use std::sync::OnceLock;
+mod inventory;
+pub use inventory::{GpuCapability, GpuState};
+pub(super) use inventory::{adapter_identity, discover_adapters};
+pub use inventory::gpu_capability;
 
 struct Backend {
     #[cfg(all(windows, feature = "directml"))]
     directml: Option<super::directml::Binding>,
     #[cfg(all(target_os = "linux", feature = "vulkan"))]
     vulkan: Option<super::vulkan::Engine>,
+    #[cfg(all(feature = "cuda12", not(any(target_os = "macos", all(windows, feature = "directml"), all(target_os = "linux", feature = "vulkan")))))]
+    preview_limit: Option<&'static str>,
     device: Device,
     label: String,
 }
@@ -17,6 +23,8 @@ impl Backend {
             directml: None,
             #[cfg(all(target_os = "linux", feature = "vulkan"))]
             vulkan: None,
+            #[cfg(all(feature = "cuda12", not(any(target_os = "macos", all(windows, feature = "directml"), all(target_os = "linux", feature = "vulkan")))))]
+            preview_limit: None,
             device: Device::Cpu,
             label: format!("CPU · {reason}"),
         }
@@ -24,6 +32,11 @@ impl Backend {
 }
 
 static BACKEND: OnceLock<Backend> = OnceLock::new();
+static FORCED_CPU: OnceLock<()> = OnceLock::new();
+
+pub fn forced_cpu() -> bool {
+    FORCED_CPU.get().is_some()
+}
 
 // Device callbacks can run while BACKEND is initializing. They only touch this
 // separate lock, so queued jobs and the UI retain the first failure.
@@ -56,7 +69,9 @@ pub(super) fn vulkan_hold() -> Option<&'static str> {
 }
 
 pub fn force_cpu() {
-    let _ = BACKEND.set(Backend::cpu("selected for this session"));
+    if BACKEND.set(Backend::cpu("selected for this session")).is_ok() {
+        let _ = FORCED_CPU.set(());
+    }
 }
 
 pub fn device() -> Device {
@@ -119,44 +134,18 @@ fn select() -> Backend {
     }
 }
 
-/// Enumerate physical adapters without creating a device or compiling a shader.
-#[cfg(all(target_os = "linux", feature = "vulkan"))]
-pub(super) fn vulkan_detection() -> (bool, &'static str) {
-    static DETECTED: OnceLock<(bool, String)> = OnceLock::new();
-    let (available, label) = DETECTED.get_or_init(|| match super::vulkan::adapter_names() {
-        Ok(names) if names.is_empty() => (false, "CPU · no physical Vulkan compute adapter detected".into()),
-        Ok(names) => (true, format!("Experimental Vulkan + CPU · {} · device checked on first use", names.join(", "))),
-        Err(error) => (false, format!("CPU · Vulkan adapter detection failed: {error:#}")),
-    });
-    (*available, label)
+/// Reading the published snapshot is safe on the UI thread. The setup worker
+/// inventories adapters; only explicit device checks and jobs can open compute.
+pub fn status() -> (bool, &'static str) {
+    let gpu = gpu_capability();
+    (gpu.candidate(), gpu.detail)
 }
 
-/// Startup and Preferences enumerate DirectML and Vulkan adapters. The first job or
-/// --stems-device performs the compute check.
-pub fn status() -> (bool, &'static str) {
-    #[cfg(all(windows, feature = "directml"))]
-    {
-        if let Some(reason) = radeon_hold() { return (false, reason); }
-        if let Some(active) = BACKEND.get() {
-            return (active.directml.is_some(), &active.label);
-        }
-        static DETECTED: OnceLock<(bool, String)> = OnceLock::new();
-        let (available, label) = DETECTED.get_or_init(|| match super::directml::available() {
-            Ok(name) => (true, format!("{name} · DirectML checked on first use")),
-            Err(e) => (false, format!("CPU · {e:#}")),
-        });
-        radeon_hold().map_or((*available, label.as_str()), |reason| (false, reason))
-    }
-    #[cfg(all(target_os = "linux", feature = "vulkan"))]
-    {
-        if let Some(reason) = backend_hold() { return (false, reason); }
-        match BACKEND.get() {
-            Some(active) => (active.vulkan.is_some(), &active.label),
-            None => vulkan_detection(),
-        }
-    }
-    #[cfg(not(any(all(windows, feature = "directml"), all(target_os = "linux", feature = "vulkan"))))]
-    { (gpu_active(), backend_label()) }
+pub(super) fn preview_device_limit() -> Option<&'static str> {
+    #[cfg(all(feature = "cuda12", not(any(target_os = "macos", all(windows, feature = "directml"), all(target_os = "linux", feature = "vulkan")))))]
+    { BACKEND.get().and_then(|b| b.preview_limit) }
+    #[cfg(not(all(feature = "cuda12", not(any(target_os = "macos", all(windows, feature = "directml"), all(target_os = "linux", feature = "vulkan"))))))]
+    { None }
 }
 
 pub fn backend_label() -> &'static str {
@@ -216,7 +205,8 @@ fn cuda_device(ordinal: usize) -> anyhow::Result<Backend> {
     let column = Tensor::new(&[[1f32], [2.]], &device)?;
     let result = conv.matmul(&column)?.flatten_all()?.to_vec1::<f32>()?;
     anyhow::ensure!(result == [18.0], "{name} failed the FP32 calculation check");
-    Ok(Backend { device, label: format!("CUDA 12 · {name} · SM {major}.{minor} · {mib} MiB VRAM") })
+    let preview_limit = if major < 8 || mib < 8192 { Some("CUDA progressive preview needs SM 8.0 or newer and at least 8 GiB VRAM.") } else { None };
+    Ok(Backend { device, preview_limit, label: format!("CUDA 12 · {name} · SM {major}.{minor} · {mib} MiB VRAM") })
 }
 
 #[cfg(all(test, windows, feature = "directml"))]

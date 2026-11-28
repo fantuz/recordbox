@@ -13,6 +13,9 @@ mod bench;
 #[cfg(test)]
 mod cache_tests;
 mod backend;
+mod hardware;
+pub use hardware::Hardware;
+pub use backend::{forced_cpu, gpu_capability, GpuState};
 #[cfg(feature = "directml")]
 mod directml;
 #[cfg(all(target_os = "linux", feature = "vulkan"))]
@@ -22,64 +25,34 @@ pub use backend::{backend_hold, backend_label, force_cpu, gpu_active, radeon_hol
 pub use compare::compare_track;
 
 use anyhow::{anyhow, Context, Result};
-use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
-/// What this computer offers for running a separation model.
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct Hardware {
-    pub cpu: String,
-    pub cores: usize,
-    pub ram_gb: f64,
-    pub apple_silicon: bool,
-    /// A GPU is available for STEMS. DirectML and Vulkan detection is passive until first use.
-    pub gpu: bool,
-}
-
-fn sysctl(name: &str) -> Option<String> {
-    let o = std::process::Command::new("/usr/sbin/sysctl").arg("-n").arg(name).output().ok()?;
-    o.status.success().then(|| String::from_utf8_lossy(&o.stdout).trim().to_string())
-}
-
+/// Inventory for the setup worker. Never starts a compute device, model or inference.
 pub fn assess() -> Hardware {
-    system_hardware(backend_status().0)
+    backend::discover_adapters();
+    hardware::system_hardware()
 }
 
-fn system_hardware(gpu: bool) -> Hardware {
-    let cores = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
-    let (cpu, ram_gb) = if cfg!(target_os = "macos") {
-        (sysctl("machdep.cpu.brand_string").unwrap_or_default(), sysctl("hw.memsize").and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0) / 1e9)
-    } else if cfg!(windows) {
-        (String::new(), windows_ram_gb())
-    } else {
-        let mem = std::fs::read_to_string("/proc/meminfo").ok().and_then(|s| s.lines().find(|l| l.starts_with("MemTotal")).and_then(|l| l.split_whitespace().nth(1)?.parse::<f64>().ok())).unwrap_or(0.0);
-        (String::new(), mem * 1024.0 / 1e9)
-    };
-    let apple_silicon = cfg!(all(target_os = "macos", target_arch = "aarch64"));
-    Hardware { cpu, cores, ram_gb, apple_silicon, gpu }
-}
-
-/// Passive support report. In particular, do not call assess()/backend_status() here:
-/// a CUDA or Metal build would initialize its compute backend.
+/// Passive support report, also available before the first separation job.
 pub fn status_report() -> String {
-    let hw = system_hardware(false);
-    let build = if cfg!(all(windows, feature = "directml")) { "Windows DirectML" }
-        else if cfg!(target_os = "macos") { "Apple Metal" }
-        else if cfg!(all(target_os = "linux", feature = "vulkan")) { "experimental Linux Vulkan + CPU" }
-        else if cfg!(feature = "cuda12") { "CUDA 12" }
-        else { "standard CPU" };
+    let hw = assess();
+    let gpu = gpu_capability();
+    let build = gpu.package;
     let ram = if hw.ram_gb > 0.0 { format!("{:.1} GB", hw.ram_gb) } else { "unknown".into() };
     let mut lines = vec![
         format!("Recordbox {} · {build} build", env!("CARGO_PKG_VERSION")),
+        format!("CPU: {} · {} · {} available thread(s)", hw.cpu, hw.arch, hw.cores),
+        format!("SIMD: {} · FMA: {}", hw.simd, if hw.fma { "available" } else { "unavailable" }),
         format!("System RAM: {ram}"),
+        format!("STEMS device: {}", gpu.detail),
     ];
-    #[cfg(all(target_os = "linux", feature = "vulkan"))]
-    lines.push(backend::vulkan_detection().1.to_owned());
     #[cfg(all(windows, feature = "directml"))]
     {
-        lines.push(directml::adapter_status().unwrap_or_else(|e| format!("DXGI adapter status: {e:#}")));
+        if !forced_cpu() {
+            lines.push(directml::adapter_status().unwrap_or_else(|e| format!("DXGI adapter status: {e:#}")));
+        }
         if let Ok(executable) = std::env::current_exe() {
             let missing: Vec<_> = ["onnxruntime.dll", "onnxruntime_providers_shared.dll", "directml.dll"]
                 .into_iter().filter(|dll| !executable.with_file_name(dll).is_file()).collect();
@@ -97,17 +70,6 @@ pub fn status_report() -> String {
     }
     lines.join("\n")
 }
-
-#[cfg(windows)]
-fn windows_ram_gb() -> f64 {
-    use windows_sys::Win32::System::SystemInformation::{GlobalMemoryStatusEx, MEMORYSTATUSEX};
-    let mut status = MEMORYSTATUSEX { dwLength: std::mem::size_of::<MEMORYSTATUSEX>() as u32, ..Default::default() };
-    // The API writes to this correctly sized structure for the duration of the call.
-    if unsafe { GlobalMemoryStatusEx(&mut status) } == 0 { 0.0 } else { status.ullTotalPhys as f64 / 1e9 }
-}
-
-#[cfg(not(windows))]
-fn windows_ram_gb() -> f64 { 0.0 }
 
 pub use backend::device;
 
@@ -1101,8 +1063,8 @@ mod tests {
 
     #[test]
     fn chooses_best_model_for_hardware() {
-        let big = Hardware { cpu: String::new(), cores: 10, ram_gb: 32.0, apple_silicon: true, gpu: true };
-        let small = Hardware { cpu: String::new(), cores: 4, ram_gb: 8.0, apple_silicon: false, gpu: false };
+        let big = Hardware { cores: 10, ram_gb: 32.0, apple_silicon: true, gpu: true, ..Hardware::default() };
+        let small = Hardware { cores: 4, ram_gb: 8.0, ..Hardware::default() };
         let no_gpu = Hardware { gpu: false, ..big.clone() };
         // The single model is recommended everywhere; the fine-tuned set is an option where
         // it can run.

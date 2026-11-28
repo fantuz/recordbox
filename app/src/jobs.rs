@@ -109,11 +109,21 @@ pub struct AnalysisPool {
     stopped: Mutex<VecDeque<i64>>,
     pub pending: Arc<AtomicUsize>,
     pub available_cpus: usize,
+    pub(crate) automatic_limit: usize,
+    desired_workers: usize,
 }
 
 fn analysis_threads(requested: usize, available: usize) -> usize {
     let limit = available.clamp(1, 12);
     if requested == 0 { available.saturating_sub(1).clamp(1, limit) } else { requested.min(limit) }
+}
+
+/// Size Automatic for a typical four-minute, 48 kHz analysis job. Actual jobs still
+/// reserve their measured duration/rate and share the batch's live memory ceiling.
+pub(crate) fn automatic_workers(cpus: usize, analysis_bytes: u64) -> usize {
+    let per_track = crate::analysis::estimated_working_bytes(240.0, 48_000);
+    let memory_limit = usize::try_from(analysis_bytes / per_track).unwrap_or(usize::MAX).max(1);
+    analysis_threads(0, cpus).min(memory_limit)
 }
 
 fn build_workers(count: usize) -> rayon::ThreadPool {
@@ -165,17 +175,19 @@ pub(crate) fn analysis_memory_budget() -> u64 {
 impl AnalysisPool {
     pub fn new(ctx: egui::Context, requested: usize) -> AnalysisPool {
         let available = std::thread::available_parallelism().map(usize::from).unwrap_or(1);
+        let automatic_limit = automatic_workers(available, analysis_memory_budget());
+        let count = analysis_threads(if requested == 0 { automatic_limit } else { requested }, available);
         // At most two finished results wait in this channel. Lightweight IDs
         // cancelled on the UI thread travel separately so Stop never blocks.
         let (tx, results) = bounded(2);
         let pending = Arc::<AtomicUsize>::default();
         let batch = Arc::new(Batch {
-            workers: build_workers(analysis_threads(requested, available)),
+            workers: build_workers(count),
             queue: Mutex::new(AnalysisQueue { jobs: VecDeque::new(), active: 0, reserved: 0,
                 budget: 0, cancel: Arc::default() }),
             results: tx, pending: pending.clone(), ctx,
         });
-        AnalysisPool { batch, results, stopped: Default::default(), pending, available_cpus: available }
+        AnalysisPool { batch, results, stopped: Default::default(), pending, available_cpus: available, automatic_limit, desired_workers: count }
     }
 
     pub fn thread_count(&self) -> usize {
@@ -183,7 +195,17 @@ impl AnalysisPool {
     }
 
     pub fn set_threads(&mut self, requested: usize) {
-        let count = analysis_threads(requested, self.available_cpus);
+        self.desired_workers = analysis_threads(if requested == 0 { self.automatic_limit } else { requested }, self.available_cpus);
+        self.apply_thread_change();
+    }
+
+    pub(crate) fn configure_automatic(&mut self, limit: usize, requested: usize) {
+        self.automatic_limit = limit.clamp(1, analysis_threads(0, self.available_cpus));
+        self.set_threads(requested);
+    }
+
+    pub(crate) fn apply_thread_change(&mut self) {
+        let count = self.desired_workers;
         if count != self.thread_count() && self.pending.load(Ordering::Acquire) == 0 {
             // A just-completed worker may still be exiting. Keep its pool until
             // the last task drops it; preserve results already sent to the UI.

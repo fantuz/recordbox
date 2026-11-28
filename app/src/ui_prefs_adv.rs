@@ -527,6 +527,48 @@ pub fn dj_link_monitor(app: &mut App, ui: &mut Ui) {
 
 // ------------------------------------------------------------------ Extensions > STEMS
 
+fn quality_unavailable(ram: Option<f64>, minimum: f64, state: crate::stems::GpuState, detail: &str) -> Option<String> {
+    use crate::stems::GpuState::*;
+    let Some(ram) = ram else { return Some("Checking system memory before enabling the quality model.".into()); };
+    if !ram.is_finite() || ram <= 0.0 {
+        return Some(format!("Quality needs {minimum:.0} GB of system RAM. The memory size could not be read."));
+    }
+    if ram < minimum {
+        return Some(format!("Quality needs {minimum:.0} GB of system RAM. This machine reports {ram:.1} GB."));
+    }
+    match state {
+        CpuOnly | Unavailable | Paused => Some(format!("Quality needs GPU acceleration. {detail}")),
+        Unchecked | Detected | Ready => None,
+    }
+}
+
+enum ModelChoice {
+    Automatic,
+    Model(&'static crate::stems::ModelSpec),
+}
+
+fn model_controls(ui: &mut Ui, saved: Option<&str>, quality_reason: Option<&str>) -> Option<ModelChoice> {
+    let [quality, speed] = &crate::stems::CATALOG;
+    let mut pick = None;
+    item(ui, "ExtensionPartAnalysisQuality", 144.0, |it| {
+        it.title_tip("STEMS Analysis Process", &format!("Prioritize sound quality · {} — {}\nPrioritize speed · {} — {}", quality.name, quality.about, speed.name, speed.about));
+        if it.radio(52.0, 54.0, saved.is_none(), "Automatic (recommended)") {
+            pick = Some(ModelChoice::Automatic);
+        }
+        if let Some(reason) = quality_reason { it.en = false; it.hint(reason); }
+        if it.radio(52.0, 80.0, saved == Some(quality.id), "Prioritize sound quality") {
+            pick = Some(ModelChoice::Model(quality));
+        }
+        it.en = true;
+        it.no_hint();
+        if it.radio(52.0, 106.0, saved == Some(speed.id), "Prioritize speed") {
+            pick = Some(ModelChoice::Model(speed));
+        }
+    });
+    if let Some(reason) = quality_reason { crate::ui_kit::note(ui, reason); }
+    pick
+}
+
 pub fn page_stems(app: &mut App, ui: &mut Ui) {
     let before = (app.prefs.rb.clone(), app.prefs.show_stems, app.prefs.stem_parts, app.prefs.stem_waveform, app.prefs.stem_reset_on_load);
     item_bare(ui, "ExtensionEnableSTEMS", 39.0, |it| {
@@ -541,27 +583,13 @@ pub fn page_stems(app: &mut App, ui: &mut Ui) {
             app.prefs.stem_parts = 4;
         }
     });
-    let [quality, speed] = &crate::stems::CATALOG;
-    let cur = app.stem.model.clone().or_else(|| app.prefs.stem_model.clone()).unwrap_or_default();
-    let able = app.stem.hw.as_ref().is_none_or(|hw| hw.ram_gb >= quality.min_ram_gb && crate::stems::backend_status().0);
-    let mut pick = None;
-    item(ui, "ExtensionPartAnalysisQuality", 118.0, |it| {
-        it.title_tip("STEMS Analysis Process", &format!("Prioritize sound quality: {} - {}\nPrioritize speed: {} - {}", quality.name, quality.about, speed.name, speed.about));
-        if !able && cur != quality.id {
-            it.en = false;
-            it.hint(format!("{} requires GPU acceleration and {:.0} GB of system RAM. Selected backend: {}.", quality.name, quality.min_ram_gb, crate::stems::backend_status().1));
-        }
-        if it.radio(52.0, 54.0, cur == quality.id, "Prioritize sound quality") {
-            pick = Some(quality);
-        }
-        it.en = true;
-        it.no_hint();
-        if it.radio(52.0, 80.0, cur != quality.id, "Prioritize speed") {
-            pick = Some(speed);
-        }
-    });
-    if let Some(m) = pick.filter(|m| m.id != cur) {
-        app.select_stem_model(m);
+    let saved = app.prefs.stem_model.as_deref();
+    let gpu = crate::stems::gpu_capability();
+    let quality_reason = quality_unavailable(app.stem.hw.as_ref().map(|hw| hw.ram_gb), crate::stems::CATALOG[0].min_ram_gb, gpu.state, gpu.detail);
+    match model_controls(ui, saved, quality_reason.as_deref()) {
+        Some(ModelChoice::Automatic) if saved.is_some() => app.select_automatic_stem_model(),
+        Some(ModelChoice::Model(model)) if saved != Some(model.id) => app.select_stem_model(model),
+        _ => {}
     }
     let four = app.prefs.stem_parts != 3;
     item(ui, "ExtensionLayout", 210.0, |it| {
@@ -683,5 +711,63 @@ pub fn page_stems(app: &mut App, ui: &mut Ui) {
     let after = (app.prefs.rb.clone(), app.prefs.show_stems, app.prefs.stem_parts, app.prefs.stem_waveform, app.prefs.stem_reset_on_load);
     if after != before {
         app.save_prefs();
+    }
+}
+
+#[cfg(test)]
+mod hardware_preferences_tests {
+    use super::*;
+    use crate::stems::GpuState;
+    use eframe::egui::{self, Event, Pos2};
+
+    #[test]
+    fn quality_model_explains_memory_and_driver_limits_without_executing_a_gpu_job() {
+        let reason = |memory, state| quality_unavailable(memory, 15.0, state, "Driver paused after a device hang");
+        assert!(reason(None, GpuState::Ready).unwrap().contains("Checking"));
+        assert!(reason(Some(0.0), GpuState::Ready).unwrap().contains("could not be read"));
+        assert!(reason(Some(8.0), GpuState::Ready).unwrap().contains("8.0 GB"));
+        assert!(reason(Some(19.3), GpuState::Paused).unwrap().contains("Driver paused"));
+        for state in [GpuState::CpuOnly, GpuState::Unavailable] {
+            assert!(reason(Some(19.3), state).is_some());
+        }
+        for state in [GpuState::Unchecked, GpuState::Detected, GpuState::Ready] {
+            assert!(reason(Some(15.0), state).is_none());
+        }
+    }
+
+    #[test]
+    fn blocked_quality_explains_itself_and_the_other_model_buttons_still_work() {
+        let ctx = egui::Context::default();
+        crate::theme::apply(&ctx);
+        let saved = Some(crate::stems::CATALOG[0].id);
+        let why = "Quality needs 15 GB of system RAM. This machine reports 8.0 GB.";
+        let draw = |events: Vec<Event>, blocked: bool| {
+            let raw = egui::RawInput { screen_rect: Some(egui::Rect::from_min_size(Pos2::ZERO, egui::vec2(760.0, 380.0))), events, ..Default::default() };
+            let mut picked = None;
+            let out = ctx.run(raw, |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    picked = model_controls(ui, saved, blocked.then_some(why));
+                });
+            });
+            (out, picked)
+        };
+        let (out, _) = draw(Vec::new(), true);
+        let find = |label: &str| -> Pos2 {
+            out.shapes.iter().find_map(|s| match &s.shape {
+                egui::Shape::Text(t) if t.galley.text() == label => Some(t.visual_bounding_rect().center()),
+                _ => None,
+            }).unwrap_or_else(|| panic!("missing visible text {label}"))
+        };
+        find(why);
+        let click = |label: &str, blocked| {
+            let pos = find(label);
+            let button = |pressed| Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed, modifiers: Default::default() };
+            draw(vec![Event::PointerMoved(pos), button(true)], blocked);
+            draw(vec![button(false)], blocked).1
+        };
+        assert!(click("Prioritize sound quality", true).is_none());
+        assert!(matches!(click("Prioritize speed", true), Some(ModelChoice::Model(m)) if m.id == crate::stems::CATALOG[1].id));
+        assert!(matches!(click("Automatic (recommended)", true), Some(ModelChoice::Automatic)));
+        assert!(matches!(click("Prioritize sound quality", false), Some(ModelChoice::Model(m)) if m.id == crate::stems::CATALOG[0].id));
     }
 }

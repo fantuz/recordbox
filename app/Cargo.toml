@@ -10,7 +10,7 @@ path = "src/main.rs"
 
 [features]
 directml = ["dep:ort", "dep:onnx-rs", "dep:bumpalo", "dep:windows"]
-cuda12 = ["candle-core/cuda", "candle-nn/cuda"]
+cuda12 = ["candle-core/cuda", "candle-nn/cuda", "dep:windows"]
 vulkan = ["dep:wgpu", "dep:pollster", "dep:bytemuck"]
 
 [dependencies]

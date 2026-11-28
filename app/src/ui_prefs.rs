@@ -178,6 +178,7 @@ const SETTINGS: [(u8, &str, &str); 188] = [
     (0, "Display Type", "Playback animation"),
     (1, "Track Analysis", "Analysis workers"),
     (1, "Track Analysis", "Use installed beat grid model"),
+    (1, "Track Analysis", "Hardware setup"),
     (2, "Others", "Supported devices"),
     (0, "Display Type", "Tooltips"),
     (0, "Display Type", "Waveform Drawing Rate"),
@@ -680,6 +681,7 @@ fn reset_row(app: &mut App, ui: &mut Ui) {
                     crate::ui_prefs_keys::reset_current(&mut app.prefs, mode);
                 } else {
                     app.prefs = reset_prefs(&app.prefs);
+                    app.pool.set_threads(app.prefs.analysis_threads);
                     crate::prefs_ext::set_stream_opts(&app.prefs);
                     let _ = app.player.switch_device(app.prefs.audio_device.as_deref());
                     app.list_dirty = true;
@@ -989,6 +991,11 @@ fn page_analysis(app: &mut App, ui: &mut Ui, tab: usize) {
         });
         return;
     }
+    card(ui, "Hardware setup", |ui| {
+        kit::line(ui, &app.hardware_setup_summary());
+        note(ui, &app.hardware_extensions_summary());
+        note(ui, "Track analysis uses CPU workers. GPU acceleration for stem separation has its own settings under Extensions → STEMS.");
+    });
     let no_cloud = "recordbox has no cloud service: nothing is collected or uploaded.";
     card(ui, "Track Analysis", |ui| {
         kit::labeled(ui, "Beat grid estimator", |ui| {
@@ -1028,12 +1035,22 @@ fn page_analysis(app: &mut App, ui: &mut Ui, tab: usize) {
             kit::toggle_raw(ui, &mut app.prefs.refine_beatgrid_transients, "High precision: refine beat timing");
             kit::help(ui, 37.5, "Align beats and tempo to repeated attacks in the audio. Works with either estimator in Normal and Dynamic mode.");
         });
-        toggle(ui, &mut app.prefs.use_installed_beatgrid_model, "Use installed beat grid model");
-        note(ui, "On eligible tracks up to 15 minutes long, Normal mode picks the model for a steady or changing tempo. Dynamic mode uses the changing-tempo model. The selected estimator supplies the grid if the local model cannot run.");
+        let dynamic = app.local_grid_available(true);
+        let local = if app.prefs.analysis_mode == 1 { dynamic } else { app.local_grid_available(false).zip(dynamic).map(|(steady, changing)| steady || changing) };
+        let grid_reason = match local {
+            None => Some("Checking the local beat grid model files."),
+            Some(false) if app.prefs.analysis_mode == 1 => Some("The local Dynamic beat grid model is missing. Restart recordbox after installing the model to check again."),
+            Some(false) => Some("No local beat grid model was found. Restart recordbox after installing the model to check again."),
+            Some(true) => None,
+        };
+        capability_toggle(ui, &mut app.prefs.use_installed_beatgrid_model, "Use installed beat grid model", grid_reason);
+        if grid_reason.is_none() {
+            note(ui, "On eligible tracks up to 15 minutes long, Normal mode picks the model for a steady or changing tempo. Dynamic uses the changing-tempo model. The selected estimator supplies the grid if the local model cannot run.");
+        }
+        let busy = app.pool.pending.load(std::sync::atomic::Ordering::Acquire) != 0;
         kit::labeled(ui, "Analysis workers", |ui| {
             let before = app.prefs.analysis_threads;
             let label = if before == 0 { format!("Automatic ({})", app.pool.thread_count()) } else { app.pool.thread_count().to_string() };
-            let busy = app.pool.pending.load(std::sync::atomic::Ordering::Acquire) != 0;
             ui.add_enabled_ui(!busy, |ui| {
                 kit::combo("analysis_workers", 170.0, label, 14.0).show_ui(ui, |ui| {
                     ui.selectable_value(&mut app.prefs.analysis_threads, 0, "Automatic");
@@ -1041,9 +1058,12 @@ fn page_analysis(app: &mut App, ui: &mut Ui, tab: usize) {
                         ui.selectable_value(&mut app.prefs.analysis_threads, n, n.to_string());
                     }
                 });
-            }).response.on_hover_text("Automatic leaves one processor available for playback when possible. Change this between analysis batches.");
+            }).response.on_hover_text("Automatic uses this computer’s recommended worker count. Choose a fixed count between batches.");
             if app.prefs.analysis_threads != before { app.pool.set_threads(app.prefs.analysis_threads); }
         });
+        if busy {
+            note(ui, "The analysis queue is running. Change the worker count after this batch finishes or is stopped.");
+        }
         kit::labeled(ui, "BPM Range", |ui| {
             let (lo, hi) = BPM_RANGES[app.prefs.bpm_range.min(BPM_RANGES.len() - 1)];
             kit::combo("bpmrange", 400.0, format!("{lo:.0}-{hi:.0}"), 14.0).show_ui(ui, |ui| {
@@ -1462,27 +1482,54 @@ fn page_stems(app: &mut App, ui: &mut Ui) {
     crate::ui_prefs_adv::page_stems(app, ui);
 }
 
+fn gpu_state_label(state: crate::stems::GpuState) -> &'static str {
+    use crate::stems::GpuState::*;
+    match state {
+        CpuOnly => "CPU separation",
+        Unchecked => "GPU unverified",
+        Detected => "GPU detected",
+        Ready => "GPU initialized",
+        Unavailable => "GPU unavailable",
+        Paused => "GPU paused",
+    }
+}
+
+/// A disabled control shows its effective state. The saved preference survives a change of device.
+fn capability_toggle(ui: &mut Ui, preference: &mut bool, label: &str, unavailable: Option<&str>) {
+    if let Some(reason) = unavailable {
+        ui.add_enabled_ui(false, |ui| { toggle(ui, &mut false, label); });
+        note(ui, reason);
+    } else {
+        toggle(ui, preference, label);
+    }
+}
+
 pub(crate) fn stem_model_card(app: &mut App, ui: &mut Ui) {
     let cur = app.stem.model.clone().or_else(|| app.prefs.stem_model.clone()).unwrap_or_default();
     card(ui, "Stem separation model (recordbox)", |ui| {
+        let gpu = crate::stems::gpu_capability();
+        kit::line(ui, &format!("STEMS build · {}", gpu.package));
+        kit::line(ui, &format!("{} · {}", gpu_state_label(gpu.state), gpu.detail));
+        if matches!(gpu.state, crate::stems::GpuState::Unchecked | crate::stems::GpuState::Detected) {
+            note(ui, "Choosing a model saves a preference. Starting a separation checks the device.");
+        }
         if let Some(hw) = &app.stem.hw {
-            kit::line(
-                ui,
-                &format!(
-                    "{}{} CPU threads{} · STEMS backend: {}",
-                    if hw.cpu.is_empty() { String::new() } else { format!("{}, ", hw.cpu) },
-                    hw.cores,
-                    if hw.ram_gb > 0.0 { format!(", {:.0} GB system RAM", hw.ram_gb) } else { String::new() },
-                    crate::stems::backend_status().1
-                ),
-            );
-            note(ui, &format!("Recommended model: {}", crate::stems::choose(hw).name));
+            let ram = if hw.ram_gb > 0.0 { format!("{:.1} GB system RAM", hw.ram_gb) } else { "System RAM unknown".into() };
+            kit::line(ui, &format!("{} · {} logical CPU threads · {ram}", hw.arch, hw.cores));
+            let fma = if hw.fma { " · FMA" } else { "" };
+            let cpu = if hw.cpu.is_empty() { String::new() } else { format!("{} · ", hw.cpu) };
+            note(ui, &format!("{cpu}{}{fma}", hw.simd));
+            note(ui, &format!("Automatic model · {}", app.automatic_stem_model(hw).name));
         } else {
-            note(ui, "Checking this computer…");
+            note(ui, "Reading CPU and system memory information…");
         }
         for m in crate::stems::CATALOG.iter() {
-            let ready = crate::stems::model_ready(m);
-            note(ui, &format!("{}{}{}: {}", m.name, if cur == m.id { " (in use)" } else { "" }, if ready { ", downloaded" } else { "" }, m.about));
+            let files = match app.stem_weights_present(m.id) {
+                Some(true) => "weights present",
+                Some(false) => "weights missing",
+                None => "checking weights",
+            };
+            note(ui, &format!("{}{} · {files}. {}", m.name, if cur == m.id { " (active model)" } else { "" }, m.about));
         }
         toggle(ui, &mut app.prefs.stems_auto_download, "Download the model automatically at launch");
         if !app.stem.model_ready && app.stem.downloading.is_none() && kit::block(ui, |ui| ui.add(btn("Download now")).clicked()) {
@@ -1491,28 +1538,26 @@ pub(crate) fn stem_model_card(app: &mut App, ui: &mut Ui) {
         if let Some((d, t)) = app.stem.downloading {
             kit::line(ui, &if t > 0 { format!("Downloading… {:.0}%", d as f64 / t as f64 * 100.0) } else { "Downloading…".into() });
         }
-        let model = crate::stems::spec(&cur);
-        let preview_supported = app.stem.hw.as_ref().zip(model).is_some_and(|(hw, model)|
-            crate::stems::Live::supported(hw, model, app.manual_stem_device())
-        );
-        if preview_supported {
-            toggle(ui, &mut app.prefs.stems_progressive_preview, "Preview finished sections during new separations");
-            note(ui, "Mute and solo work in finished sections, up to the first 6 min 20 s. Later sections play the original until separation completes. With enough free GPU memory, fine-tuned parts become available from the first section. With less headroom, previews begin during the fourth pass.");
+        let preview_reason = match (app.stem.hw.as_ref(), crate::stems::spec(&cur)) {
+            (Some(hw), Some(model)) => crate::stems::Live::preference_unavailable(hw, model, app.manual_stem_device()),
+            _ => Some("Waiting for hardware and model information."),
+        };
+        capability_toggle(ui, &mut app.prefs.stems_progressive_preview, "Preview finished sections during new separations", preview_reason);
+        if preview_reason.is_none() {
+            note(ui, "Mute and solo work in finished sections, up to 6 min 20 s. Each job checks available memory. The original track plays until a section is ready.");
         }
-        let automatic_available = !crate::app::MANUAL_STEMS_PREVIEW && crate::stems::backend_hold().is_none();
-        ui.add_enabled_ui(automatic_available, |ui| {
-            toggle(ui, &mut app.prefs.stems_auto_separate, "Separate tracks when they are loaded");
-            ui.add_enabled_ui(app.prefs.stems_auto_separate, |ui| {
-                toggle(ui, &mut app.prefs.stems_auto_cpu, "Allow automatic separation on CPU");
-            });
-        });
-        if automatic_available {
-            note(ui, "CPU separation can use several cores for minutes. Cached parts load immediately.");
-        } else if crate::app::MANUAL_STEMS_PREVIEW && crate::stems::backend_hold().is_none() {
-            note(ui, "In the Vulkan preview, load a track and choose Separate to start a job. Cached parts load automatically.");
+        let automatic_reason = crate::stems::backend_hold().or(if crate::app::MANUAL_STEMS_PREVIEW {
+            Some("The experimental Vulkan build starts separation manually. Load a track and choose Separate on the deck.")
+        } else { None });
+        capability_toggle(ui, &mut app.prefs.stems_auto_separate, "Separate tracks when they are loaded", automatic_reason);
+        let cpu_reason = (!app.prefs.stems_auto_separate).then_some("Enable separation on track load to allow automatic CPU jobs.");
+        // The load switch already displays the shared safety reason.
+        if automatic_reason.is_some() {
+            ui.add_enabled_ui(false, |ui| { toggle(ui, &mut false, "Allow automatic separation on CPU"); });
         } else {
-            note(ui, "Automatic separation is paused. Cached parts still load. You can separate one loaded track on the CPU.");
+            capability_toggle(ui, &mut app.prefs.stems_auto_cpu, "Allow automatic separation on CPU", cpu_reason);
         }
+        note(ui, "Saved parts load automatically. New manual CPU separations can occupy several cores for minutes.");
         if let Some(status) = app.stem.separation_status() {
             kit::line(ui, &status);
             if app.stem.separating.map(|(id, _)| id) == app.deck.track

@@ -1034,12 +1034,12 @@ fn main() -> eframe::Result<()> {
     if timeline == audio::Mp3Timeline::Rekordbox {
         eprintln!("MP3 timeline: rekordbox. Separate collection: {}", db::data_dir_for_inspection().join("library.db").display());
     }
+    if args.iter().any(|a| a == "--stems-cpu") {
+        stems::force_cpu();
+    }
     if args.iter().any(|a| a == "--stems-status") {
         println!("{}", stems::status_report());
         return Ok(());
-    }
-    if args.iter().any(|a| a == "--stems-cpu") {
-        stems::force_cpu();
     }
     if let Some(i) = args.iter().position(|a| a == "--compare-stems") {
         let result = args.get(i + 1).ok_or_else(|| anyhow::anyhow!("Supply a local audio file after --compare-stems"))

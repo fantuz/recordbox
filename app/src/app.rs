@@ -13,6 +13,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Instant;
 
+mod hardware_setup;
 #[cfg(test)]
 mod stem_cache_tests;
 #[cfg(test)]
@@ -1172,7 +1173,7 @@ impl StemError {
 }
 
 pub enum StemMsg {
-    Hardware(crate::stems::Hardware, String),
+    Hardware(crate::stems::Hardware, hardware_setup::Extensions),
     Download(u64, u64),
     DownloadDone(Result<(), String>),
     Progress(i64, f32),
@@ -1708,6 +1709,7 @@ pub struct App {
     pub undo: Vec<Edit>,
     pub redo: Vec<Edit>,
     pub pool: AnalysisPool,
+    hardware_setup: hardware_setup::Setup,
     /// Hot slots the user cleared while this track's library analysis was outstanding.
     cleared_analysis_hot_slots: HashMap<i64, HashSet<i32>>,
     /// Keep saved track status intact while the UI shows "queued".
@@ -1876,6 +1878,7 @@ impl App {
             load_target: 0,
             deck: Deck::default(),
             pool,
+            hardware_setup: Default::default(),
             cleared_analysis_hot_slots: HashMap::new(),
             analysis_previous_status: HashMap::new(),
             analysis_failures: None,
@@ -3182,11 +3185,10 @@ impl App {
     pub fn stems_init(&mut self) {
         let tx = self.stem.tx.clone();
         let ctx = self.ctx.clone();
-        let wanted = std::env::var("PREPDECK_STEM_MODEL").ok().or_else(|| self.prefs.stem_model.clone());
         std::thread::spawn(move || {
             let hw = crate::stems::assess();
-            let m = wanted.as_deref().and_then(crate::stems::spec).unwrap_or_else(|| crate::stems::choose(&hw));
-            let _ = tx.send(StemMsg::Hardware(hw, m.id.to_string()));
+            let files = hardware_setup::Extensions::inspect();
+            let _ = tx.send(StemMsg::Hardware(hw, files));
             ctx.request_repaint();
         });
     }
@@ -3234,7 +3236,9 @@ impl App {
         if self.load_cached_stems(&key, None) { return; }
         let quiet = self.screenshot.is_some() && std::env::var("PREPDECK_SHOT_STEMS").is_err();
         let ready = crate::stems::spec(key.model).is_some_and(crate::stems::model_ready);
-        if self.prefs.auto_stems_on_load(self.stem.gpu_available()) && ready && !quiet && self.deck.track == Some(id) {
+        let automatic_model = self.stem.hw.as_ref().zip(crate::stems::spec(key.model))
+            .is_some_and(|(hw, model)| crate::stems::runs_on(model, hw));
+        if automatic_model && self.prefs.auto_stems_on_load(self.stem.gpu_available()) && ready && !quiet && self.deck.track == Some(id) {
             let execution = if self.prefs.stems_auto_cpu { crate::stems::SeparationDevice::Selected } else { crate::stems::SeparationDevice::GpuOnly };
             self.start_stem_separation(key, execution);
         }
@@ -3274,7 +3278,20 @@ impl App {
     // A model change can complete while reads or inference for the previous model are in flight.
     pub(crate) fn select_stem_model(&mut self, model: &'static crate::stems::ModelSpec) {
         self.prefs.stem_model = Some(model.id.to_owned());
-        self.stem.model = self.prefs.stem_model.clone();
+        self.activate_stem_model(model);
+    }
+
+    pub(crate) fn select_automatic_stem_model(&mut self) {
+        self.prefs.stem_model = None;
+        if let Some(hw) = self.stem.hw.as_ref() {
+            self.activate_stem_model(self.automatic_stem_model(hw));
+        } else {
+            self.stem.model = None;
+        }
+    }
+
+    fn activate_stem_model(&mut self, model: &'static crate::stems::ModelSpec) {
+        self.stem.model = Some(model.id.to_owned());
         self.stem.model_ready = crate::stems::model_ready(model);
         for n in 0..4 {
             self.with_deck(n, |app| {
@@ -3327,7 +3344,7 @@ impl App {
     }
 
     pub fn manual_stem_device(&self) -> crate::stems::SeparationDevice {
-        self.stem.manual_device(self.deck.track, crate::stems::backend_hold().is_some())
+        self.stem.manual_device(self.deck.track, crate::stems::backend_hold().is_some() || crate::stems::forced_cpu())
     }
 
     /// Separate the loaded track (downloading the model first if it is missing).
@@ -3356,6 +3373,11 @@ impl App {
         }
         let id = key.track;
         let Some(m) = crate::stems::spec(key.model) else { return };
+        if let Some(reason) = self.stem.hw.as_ref().and_then(|hw|
+            hardware_setup::separation_limit(hw, m, crate::stems::gpu_capability().state, execution)) {
+            self.stem.errors.insert(Some(id), StemError { detail: reason.into(), retry_model: None });
+            return;
+        }
         if !crate::stems::model_ready(m) {
             self.stem.pending = Some((key, execution));
             self.stems_download_for(m);
@@ -3449,17 +3471,17 @@ impl App {
     pub fn poll_stems(&mut self) {
         while let Ok(m) = self.stem.rx.try_recv() {
             match m {
-                StemMsg::Hardware(hw, model) => {
-                    // Preferences can select a model while device detection is still running.
-                    let model = self.stem.model.clone().unwrap_or(model);
-                    self.stem.model_ready = crate::stems::spec(&model).map(crate::stems::model_ready).unwrap_or(false);
-                    if self.prefs.stem_model.is_none() {
-                        self.prefs.stem_model = Some(model.clone());
-                        self.save_prefs();
-                    }
-                    self.stem.model = Some(model);
+                StemMsg::Hardware(hw, files) => {
+                    self.apply_hardware_setup(&hw, files);
+                    // Resolve current intent only after detection. A temporary override or
+                    // an Automatic choice must never become a user's saved manual model.
+                    let session = std::env::var("PREPDECK_STEM_MODEL").ok();
+                    let model = hardware_setup::startup_model(self.automatic_stem_model(&hw), self.stem.model.as_deref(), session.as_deref(), self.prefs.stem_model.as_deref());
+                    let auto_download = self.prefs.stems_auto_download && crate::stems::runs_on(model, &hw);
+                    self.stem.model_ready = crate::stems::model_ready(model);
+                    self.stem.model = Some(model.id.to_owned());
                     self.stem.hw = Some(hw);
-                    if !self.stem.model_ready && self.prefs.stems_auto_download {
+                    if !self.stem.model_ready && auto_download {
                         self.stems_download();
                     }
                     for n in 0..4 {
@@ -3471,6 +3493,7 @@ impl App {
                 StemMsg::Download(d, t) => self.stem.downloading = Some((d, t)),
                 StemMsg::DownloadDone(r) => {
                     self.stem.downloading = None;
+                    if let Some(files) = &mut self.hardware_setup.extensions { files.refresh_checkpoints(); }
                     match r {
                         Ok(()) => {
                             self.stem.model_ready = self.stem.model.as_deref().and_then(crate::stems::spec).is_some_and(crate::stems::model_ready);
@@ -3819,6 +3842,7 @@ impl App {
     }
 
     pub fn poll_analysis(&mut self) {
+        self.pool.apply_thread_change();
         if self.analysis_total == 0 { return; }
         // Leave time for input and rendering when a large batch finishes or is stopped.
         let start = Instant::now();

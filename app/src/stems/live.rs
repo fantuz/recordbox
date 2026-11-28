@@ -23,19 +23,30 @@ pub struct Live {
 }
 
 impl Live {
-    /// Static eligibility for the Preferences screen. Query the current device budget
-    /// separately when starting the job; the driver can change its budget at any time.
-    pub fn supported(hw: &Hardware, model: &ModelSpec, execution: SeparationDevice) -> bool {
-        if !hw.ram_gb.is_finite()
-            || !hw.gpu
-            || execution == SeparationDevice::Cpu
-            || super::backend_hold().is_some()
-            || !matches!(model.id, "htdemucs" | "htdemucs_ft")
-        {
-            return false;
+    /// A cheap preference check. An eligible setting still needs sufficient
+    /// live GPU memory when the worker begins the actual separation.
+    pub fn preference_unavailable(hw: &Hardware, model: &ModelSpec, execution: SeparationDevice) -> Option<&'static str> {
+        let gpu = super::gpu_capability();
+        if matches!(gpu.state, super::GpuState::Paused | super::GpuState::Unavailable | super::GpuState::CpuOnly) {
+            return Some(gpu.detail);
         }
-        static CAPABLE: OnceLock<bool> = OnceLock::new();
-        *CAPABLE.get_or_init(|| device_budget(hw).is_some())
+        if execution == SeparationDevice::Cpu { return Some("This job is set to CPU separation."); }
+        if !matches!(model.id, "htdemucs" | "htdemucs_ft") { return Some("This model does not provide a progressive preview."); }
+        let required = if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
+            32
+        } else if cfg!(all(feature = "cuda12", not(any(target_os = "macos", all(windows, feature = "directml"), all(target_os = "linux", feature = "vulkan"))))) {
+            24
+        } else {
+            return Some("Progressive preview requires Apple silicon Metal or a CUDA 12 build.");
+        };
+        if !hw.ram_gb.is_finite() || hw.ram_gb * 1e9 < (required * GIB) as f64 {
+            return Some(if required == 32 { "Apple silicon preview needs at least 32 GiB of system memory." } else { "CUDA preview needs at least 24 GiB of system memory." });
+        }
+        super::backend::preview_device_limit()
+    }
+
+    pub fn supported(hw: &Hardware, model: &ModelSpec, execution: SeparationDevice) -> bool {
+        Self::preference_unavailable(hw, model, execution).is_none()
     }
 
     /// Both the completed output and the input already belong to the normal job.

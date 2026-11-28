@@ -117,11 +117,14 @@ animation**. Export mode releases idle audio output after two seconds and
 reopens it on demand. Performance mode and an initialized sampler keep their
 output clock ready; library preview releases its own output on Stop or completion.
 
+## Hardware setup
+
+On the first GUI launch of a new recordbox version or acceleration build, recordbox reads the CPU architecture and available instructions, usable logical CPUs, system memory and the GPU information available to that build. It checks for local beat-model and STEMS files. The setup record belongs to the active recordbox library. Changing the adapter or its reported driver can refresh the recommendation. On a later launch with the same hardware and version, recordbox reuses the saved setup and checks current eligibility. Running an actual separation exercises the selected backend.
+
 ## Track analysis workers
 
-In **Preferences → Analysis → Track Analysis → Analysis workers**, Automatic
-uses one fewer worker than the available logical CPUs, with a minimum of one
-and a maximum of twelve. On a four-core machine this gives three workers.
+In **Preferences → Analysis → Track Analysis**, **Automatic** reserves one logical CPU where possible, caps the pool at twelve workers and reduces the count when RAM is limited. A four-core machine can use up to three automatic workers. **Preferences → Extensions → STEMS** shows which backend the package supports and why a control is unavailable. An eligible adapter still needs to pass its first-use device check. A saved manual worker count or STEMS model selection carries across upgrades, subject to runtime safety checks.
+
 Pick one worker to limit CPU usage during a set. A single track can overlap
 waveform and loudness measurement with tempo and key detection. Key detection
 follows the beat grid. Several tracks share the same worker limit.

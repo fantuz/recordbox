@@ -254,7 +254,7 @@ fn model(dynamic: bool) -> Option<&'static net::Net> {
 
 /// A cheap, process-local file check during admission. Reading weights happens
 /// later on the worker, only for an enabled model inside its working-set limit.
-pub(super) fn models_present(mode: u8) -> bool {
+pub(crate) fn models_present(mode: u8) -> bool {
     fn present(dynamic: bool) -> bool {
         static NORMAL: OnceLock<bool> = OnceLock::new();
         static DYNAMIC: OnceLock<bool> = OnceLock::new();

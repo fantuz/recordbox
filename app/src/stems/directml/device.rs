@@ -289,7 +289,7 @@ pub(in crate::stems) fn available() -> Result<String> {
     candidates()?
         .into_iter()
         .next()
-        .map(|device| device.name)
+        .map(|d| format!("{} · driver {}", d.name, driver_version(d.driver)))
         .context("no hardware AMD Radeon adapter")
 }
 

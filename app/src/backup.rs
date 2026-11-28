@@ -459,6 +459,7 @@ fn reload_after_restore(app: &mut crate::app::App) {
         app.prefs = p;
         app.prefs.audio_device = dev;
         app.prefs.devices_extra = extra;
+        app.restored_hardware_preferences();
         app.save_prefs();
     }
     app.textures.clear();
