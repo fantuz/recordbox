@@ -79,8 +79,13 @@ fn cpu_name() -> Option<String> {
 
 #[cfg(all(target_os = "macos", not(any(target_arch = "x86", target_arch = "x86_64"))))]
 fn cpu_name() -> Option<String> {
+    sysctl_string(c"machdep.cpu.brand_string")
+}
+
+#[cfg(target_os = "macos")]
+pub(super) fn sysctl_string(key: &std::ffi::CStr) -> Option<String> {
     let mut bytes = [0u8; 256];
-    let n = sysctl(c"machdep.cpu.brand_string", &mut bytes)?;
+    let n = sysctl(key, &mut bytes)?;
     let name = std::str::from_utf8(bytes.get(..n)?).ok()?.trim_matches([' ', '\0']);
     (!name.is_empty()).then(|| name.to_owned())
 }

@@ -114,7 +114,13 @@ fn inspect() -> Inventory {
     if names.is_empty() {
         Inventory::message(GpuState::Unavailable, "CPU · no Metal adapter detected")
     } else {
-        Inventory::detected(names.join(", "), "Metal device initialized on first use")
+        let mut identity = names.join(", ");
+        // Apple ships Metal drivers with macOS. Even a point update can change
+        // the driver without changing the adapter names.
+        if let Some(build) = crate::stems::hardware::sysctl_string(c"kern.osversion") {
+            identity.push_str(&format!(" · macOS build {build}"));
+        }
+        Inventory::detected(identity, "Metal device initialized on first use")
     }
 }
 
@@ -214,6 +220,11 @@ mod tests {
         if mode == "forced" { super::super::force_cpu(); }
         let hw = crate::stems::assess();
         let gpu = gpu_capability();
+        #[cfg(target_os = "macos")]
+        if gpu.state == GpuState::Detected {
+            let build = crate::stems::hardware::sysctl_string(c"kern.osversion").unwrap();
+            assert!(hw.gpu_identity.ends_with(&format!("macOS build {build}")));
+        }
         assert_eq!(hw.gpu, gpu.candidate());
         assert!(!gpu.detail.is_empty());
         let model = crate::stems::choose(&hw);
