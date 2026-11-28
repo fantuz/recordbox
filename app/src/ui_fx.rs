@@ -112,17 +112,42 @@ impl FxUi {
 
     /// What is kept between sessions.
     pub fn saved(&self) -> UnitSaved {
-        let by_id = |slot: usize, single: bool, n: usize| -> Vec<u8> { (0..n).map(|id| fx::from_id(id as i64, single).map(|k| self.beats[slot][pos(k)]).unwrap_or(0)).collect() };
-        UnitSaved {
-            single_shown: self.params.single,
-            single_fx: fx::info_of(self.params.one.kind).single_id,
-            single_beat: by_id(3, true, 34),
-            multi_fx: std::array::from_fn(|s| fx::info_of(self.params.slots[s].kind).multi_id),
-            multi_beat: std::array::from_fn(|s| by_id(s, false, 35)),
-            release_fx: self.release_kind,
-            release_beat: std::array::from_fn(|i| self.release_idx[i] as u8),
-            snapshots: (0..34).map(|id| fx::from_id(id, true).and_then(|k| self.snaps[pos(k)])).collect(),
+        let mut saved = UnitSaved {
+            single_shown: false, single_fx: 0, single_beat: Vec::new(),
+            multi_fx: [0; 3], multi_beat: Default::default(),
+            release_fx: 0, release_beat: [0; 3], snapshots: Vec::new(),
+        };
+        self.sync_saved(&mut saved);
+        saved
+    }
+
+    /// Compare in engine-ID order without allocating fresh preferences on each UI frame.
+    fn sync_saved(&self, saved: &mut UnitSaved) -> bool {
+        let mut single = [0; 34];
+        let mut snapshots = [None; 34];
+        let mut multi = [[0; 35]; 3];
+        for (i, info) in fx::INFO.iter().enumerate() {
+            if info.single_id >= 0 {
+                single[info.single_id as usize] = self.beats[3][i];
+                snapshots[info.single_id as usize] = self.snaps[i];
+            }
+            if info.multi_id >= 0 {
+                for (slot, values) in multi.iter_mut().enumerate() {
+                    values[info.multi_id as usize] = self.beats[slot][i];
+                }
+            }
         }
+        let mut changed = sync_list(&mut saved.single_beat, &single);
+        changed |= sync_list(&mut saved.snapshots, &snapshots);
+        for (values, current) in saved.multi_beat.iter_mut().zip(&multi) {
+            changed |= sync_list(values, current);
+        }
+        changed |= update_value(&mut saved.single_shown, self.params.single);
+        changed |= update_value(&mut saved.single_fx, fx::info_of(self.params.one.kind).single_id);
+        changed |= update_value(&mut saved.multi_fx, self.params.slots.map(|slot| fx::info_of(slot.kind).multi_id));
+        changed |= update_value(&mut saved.release_fx, self.release_kind);
+        changed |= update_value(&mut saved.release_beat, self.release_idx.map(|i| i as u8));
+        changed
     }
 
     pub fn load(&mut self, s: &UnitSaved) {
@@ -248,8 +273,25 @@ fn cfx_ok(k: u8) -> u8 {
 
 /// The kept choices as they stand now.
 pub fn snapshot(app: &App) -> FxSaved {
+    FxSaved { units: [app.px.fx[0].saved(), app.px.fx[1].saved()], cfx: saved_cfx(app), padfx: app.prefs.fx.padfx.clone(), mfx: app.prefs.fx.mfx.clone(), effect: app.prefs.fx.effect.clone() }
+}
+
+fn saved_cfx(app: &App) -> CfxSaved {
     let x = &app.px.fxx;
-    FxSaved { units: [app.px.fx[0].saved(), app.px.fx[1].saved()], cfx: CfxSaved { multi_shown: x.cfx_multi, user: app.px.cfx_user, user_fx: app.px.cfx_kind, params: x.cfx_params, multi_fx: x.cfx_multi_kind }, padfx: app.prefs.fx.padfx.clone(), mfx: app.prefs.fx.mfx.clone(), effect: app.prefs.fx.effect.clone() }
+    CfxSaved { multi_shown: x.cfx_multi, user: app.px.cfx_user, user_fx: app.px.cfx_kind, params: x.cfx_params, multi_fx: x.cfx_multi_kind }
+}
+
+fn update_value<T: PartialEq>(saved: &mut T, value: T) -> bool {
+    if *saved == value { return false; }
+    *saved = value;
+    true
+}
+
+fn sync_list<T: Copy + PartialEq>(saved: &mut Vec<T>, values: &[T]) -> bool {
+    if saved.as_slice() == values { return false; }
+    saved.clear();
+    saved.extend_from_slice(values);
+    true
 }
 
 /// Put kept choices in place.
@@ -309,9 +351,12 @@ pub fn sync(app: &mut App) {
         }
     }
     // Keep the choices: written within half a second of a change.
-    let now = snapshot(app);
-    if now != app.prefs.fx {
-        app.prefs.fx = now;
+    let cfx = saved_cfx(app);
+    let mut changed = update_value(&mut app.prefs.fx.cfx, cfx);
+    for (unit, saved) in app.px.fx.iter().zip(&mut app.prefs.fx.units) {
+        changed |= unit.sync_saved(saved);
+    }
+    if changed {
         // (Timed from the first change, so a run of changes cannot put the write off.)
         app.px.fxx.pending.get_or_insert_with(std::time::Instant::now);
     }
@@ -501,7 +546,7 @@ fn fx_knob_r(ui: &mut Ui, c: egui::Pos2, rad: f32, id: impl std::hash::Hash, val
     let ang = |x: f32| (-225.0 + 270.0 * x).to_radians();
     let arc = |a: f32, b: f32| -> Vec<egui::Pos2> { (0..=32).map(|i| { let t = ang(a + (b - a) * i as f32 / 32.0); c + vec2(t.cos(), t.sin()) * rad }).collect() };
     let active = resp.hovered() || resp.dragged();
-    p.add(egui::Shape::line(arc(0.0, 1.0), Stroke::new(2.4_f32, if active { gy(0x464646) } else { gy(0x323232) })));
+    p.add(egui::Shape::line(arc(0.0, 1.0), Stroke::new(2.4_f32, crate::ui_feel::hot_col(&resp, gy(0x323232), gy(0x464646)))));
     let from = if bipolar { 0.5 } else { 0.0 };
     if (v - from).abs() > 0.012 {
         p.add(egui::Shape::line(arc(from, v), Stroke::new(2.4_f32, BLUE)));
@@ -752,8 +797,9 @@ pub fn panel(app: &mut App, ui: &mut Ui, r: Rect) {
             let rresp = ui.interact(rel_r, ui.id().with(("fxrel", u)), Sense::click_and_drag());
             let held = rresp.is_pointer_button_down_on();
             p.rect_filled(rel_r, 2.0, gy(0x1E1E1E));
-            p.rect_stroke(rel_r, 2.0, Stroke::new(1.0_f32, if held { BLUE.c() } else { OUTLINE }), egui::StrokeKind::Inside);
-            p.text(rel_r.center(), Align2::CENTER_CENTER, fx::RELEASE[rk].0, caps(8.75), if held { hex(0x3C8CFF) } else { WHITE.c() });
+            let press = crate::ui_feel::press(&rresp);
+            p.rect_stroke(rel_r, 2.0, Stroke::new(1.0_f32, crate::motion::mix(OUTLINE.into(), BLUE.c(), press)), egui::StrokeKind::Inside);
+            p.text(rel_r.center(), Align2::CENTER_CENTER, fx::RELEASE[rk].0, caps(8.75), crate::motion::mix(WHITE.c(), hex(0x3C8CFF), press));
             let ridx = app.px.fx[u].release_idx[rk].min(fx::RELEASE_BEATS.len() - 1);
             app.px.fx[u].params.release = if held { Some((rk as u8, fx::RELEASE_BEATS[ridx])) } else { None };
             if held {
@@ -1286,6 +1332,32 @@ pub fn selftest_state(app: &App) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn updating_fx_preferences_preserves_engine_ids_and_reuses_saved_buffers() {
+        let mut unit = FxUi::new();
+        let mut saved = unit.saved();
+        let initial_ptr = saved.single_beat.as_ptr();
+        for (i, info) in fx::INFO.iter().enumerate() {
+            for (slot, values) in unit.beats.iter_mut().enumerate() { values[i] = (i + slot) as u8; }
+            unit.snaps[i] = Some((i as f32 / 64.0, 0.5, true, false));
+            if info.multi_id >= 0 { unit.set_kind(0, info.kind); }
+        }
+        saved.multi_beat[2].push(255); // Extra entries from an older or edited preferences file.
+        assert!(unit.sync_saved(&mut saved));
+        assert_eq!(saved.multi_beat[2].len(), 35);
+        for id in 0..35 {
+            let index = pos(fx::from_id(id, false).unwrap());
+            for slot in 0..3 { assert_eq!(saved.multi_beat[slot][id as usize], unit.beats[slot][index]); }
+        }
+        for id in 0..34 {
+            let index = pos(fx::from_id(id, true).unwrap());
+            assert_eq!(saved.single_beat[id as usize], unit.beats[3][index]);
+            assert_eq!(saved.snapshots[id as usize], unit.snaps[index]);
+        }
+        assert!(!unit.sync_saved(&mut saved));
+        assert_eq!(saved.single_beat.as_ptr(), initial_ptr);
+    }
 
     #[test]
     fn the_panels_choices_survive_a_round_trip() {

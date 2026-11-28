@@ -72,11 +72,24 @@ fn a_parked_deck_keeps_receiving_stems_as_modes_and_library_windows_change() -> 
         }
         assert!(child_frames.get() >= 5);
         gui.app.set_app_mode(0);
-        for row in [0, 1, 2, 3, 4] {
+        for row in [0, 1, 2, 3] {
             gui.app.set_player_layout(row);
             next(&mut gui, &mut p)?;
             assert_eq!(gui.app.player_layout(), row);
         }
+        // A detached Full Browser shows the previous player in the root. Closing
+        // the child restores the Full Browser preference and hides that player.
+        gui.app.set_player_layout(4);
+        next(&mut gui, &mut p)?;
+        assert!(gui.app.prefs.browser_only);
+        assert_eq!(gui.app.player_layout(), 3);
+        close.set(true);
+        next(&mut gui, &mut p)?;
+        assert!(gui.app.library_window.is_none());
+        assert_eq!(gui.app.player_layout(), 4);
+        next(&mut gui, &mut p)?;
+        close.set(false);
+        gui.app.toggle_library_window = true;
         gui.app.set_app_mode(crate::ui_edit::MODE_EDIT);
         next(&mut gui, &mut p)?;
         assert!(crate::ui_edit::is_edit(&gui.app));

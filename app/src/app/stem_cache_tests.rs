@@ -119,13 +119,7 @@ fn failed_hardware_check_reports_a_terminal_state_and_allows_retry() -> Result<(
     isolated("failed_hardware_check_reports_a_terminal_state_and_allows_retry", |_| {
         let mut app = open_app();
         app.prefs.stems_auto_download = false;
-        let deadline = Instant::now() + Duration::from_secs(10);
-        while app.stem.hw.is_none() {
-            app.poll_stems();
-            ensure!(Instant::now() < deadline, "initial passive hardware check did not finish");
-            std::thread::sleep(Duration::from_millis(2));
-        }
-        app.stem.hw = None;
+        // The fixture opens a library without launching the GUI's startup workers.
         app.stem.tx.send(StemMsg::Hardware(Err(anyhow::anyhow!("fixture device error"))))?;
         app.poll_stems();
         ensure!(app.stem_hardware_error().is_some_and(|e| e.contains("fixture device error")));
@@ -164,6 +158,9 @@ fn export_finds_completed_parts_on_the_other_deck_and_shows_queue_status_per_tra
         stem_export::request(&mut app, &[id, queued], Part::Vocals, false);
         assert!(stem_export::status_for(&app, id).unwrap().contains("Encoding"));
         assert_eq!(stem_export::status_for(&app, queued).as_deref(), Some("Queued for export · Vocals"));
+        stem_export::stop_for(&mut app, queued);
+        assert!(stem_export::status_for(&app, queued).is_none());
+        assert!(stem_export::status_for(&app, id).unwrap().contains("Encoding"));
         let until = Instant::now() + Duration::from_secs(10);
         while stem_export::busy_for(&app, Some(id)) {
             stem_export::poll(&mut app);

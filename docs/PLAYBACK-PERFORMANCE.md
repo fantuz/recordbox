@@ -270,6 +270,14 @@ controls. Category savings depend on the expanded groups and library contents;
 
 ### Diagnosing interruptions when enabling effects
 
+In Performance mode, hover the small audio-load bar beside the master meters. It shows the latest callback load, the peak since the audio output opened, and how many callbacks took longer than their buffer period. Compare the counter over the same passage with STEMS idle and then separating. The counter measures time spent inside recordbox's output callback. A driver can also deliver a callback late, so its underrun counter provides a second observation.
+
+At 48 kHz a 128-frame buffer gives the mixer 2.67 ms. A 256-frame buffer gives it 5.33 ms and a 512-frame buffer 10.67 ms. If the counter climbs during separation, try the next supported buffer size in **Preferences → Audio** and compare the count again. A larger buffer adds latency. Separating a track before the set lets playback use the four cached parts.
+
+Live FX run on the CPU. Delays, filters and feedback use samples from the preceding frames, and the mixer needs the result in the current audio buffer. Sending each short block to the GPU would add a submission and a wait, competing with STEMS on a shared adapter. A long convolution rendered ahead of playback would have a different latency budget.
+
+In a device-free comparison on one Linux Xeon core, Echo's median processing time at 48 kHz and 128 frames went from 22.82 to 20.43 µs. Reverse Delay went from 17.14 to 15.74 µs. At 512 frames the corresponding times were 87.47 to 80.24 µs and 60.10 to 56.27 µs. Reverb Up stayed about the same. The comparison interleaved the same input across the revisions and verified the output samples. These rack timings exclude the driver and OS scheduling.
+
 When you first assign Beat FX to a channel, enable PAD FX, master RELEASE FX,
 or MERGE FX, the interface prepares the requested audio buffers with the
 effects rack mutex released. The audio callback can keep using the previous

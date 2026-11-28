@@ -186,6 +186,8 @@ fn header_output(app: &mut App, ui: &mut Ui, r: Rect) {
             if let Some(percent) = load {
                 ui.label(format!("Audio buffer load · {percent:.1}%"));
                 ui.label("100% means the output callback used its entire buffer period.");
+                let (peak, over) = app.player.buffer_load_history();
+                ui.label(format!("Since audio output opened · Peak {peak:.1}% · {over} callbacks exceeded their time budget"));
                 let contended = crate::audio::AUDIO_CONTENDED.load(std::sync::atomic::Ordering::Relaxed);
                 let dropped = crate::audio::AUDIO_DROPPED.load(std::sync::atomic::Ordering::Relaxed);
                 ui.label(format!("Since launch: {contended} contended blocks, {dropped} dropped."));

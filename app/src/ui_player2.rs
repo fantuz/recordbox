@@ -701,7 +701,7 @@ fn deck_stems(app: &mut App, ui: &mut Ui, rect: Rect) {
     };
     let enabled = loaded && !ready && !loading && !stopping;
     let action = Rect::from_min_size(rect.min, vec2(116.0, rect.height()));
-    let response = row_button(ui, action, "stems_job", &label, ready || queued || active, enabled);
+    let response = row_button(ui, action, "stems_job", &label, ready || queued || active, loaded);
     let help = if active {
         app.stem.separation_status().unwrap_or_default()
     } else if queued {

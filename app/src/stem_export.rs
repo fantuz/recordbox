@@ -611,17 +611,33 @@ impl Drop for Active {
     }
 }
 
-pub fn stop(app: &mut App) {
-    app.stemx.queue.clear();
-    if let Some(a) = &app.stemx.active {
-        a.cancel.store(true, Ordering::Relaxed);
-        // The token is unique to the worker. A pre-existing deck job or a subsequent
-        // job for another track is never stopped by this queue.
-        if let Some(token) = &a.owned_separation {
+impl Active {
+    fn stop(&self) {
+        self.cancel.store(true, Ordering::Relaxed);
+        // Only a separation started by this export belongs to the queue.
+        if let Some(token) = &self.owned_separation {
             token.store(true, Ordering::Relaxed);
         }
-        app.ctx.request_repaint_of(egui::ViewportId::ROOT);
     }
+}
+
+pub fn stop(app: &mut App) {
+    app.stemx.total -= app.stemx.queue.len();
+    app.stemx.queue.clear();
+    if let Some(a) = &app.stemx.active {
+        a.stop();
+    }
+    app.ctx.request_repaint_of(egui::ViewportId::ROOT);
+}
+
+pub fn stop_for(app: &mut App, track: i64) {
+    let queued = app.stemx.queue.len();
+    app.stemx.queue.retain(|r| r.track != track);
+    app.stemx.total -= queued - app.stemx.queue.len();
+    if let Some(a) = app.stemx.active.as_ref().filter(|a| a.req.track == track) {
+        a.stop();
+    }
+    app.ctx.request_repaint_of(egui::ViewportId::ROOT);
 }
 
 pub fn busy(app: &App) -> bool {

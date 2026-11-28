@@ -2932,16 +2932,22 @@ impl App {
         let (tx, rx) = crossbeam_channel::bounded(1);
         let ctx = self.ctx.clone();
         let cancel = self.deck.cancel_work.clone();
-        std::thread::spawn(move || {
-            let r = if rb && !cancel.load(std::sync::atomic::Ordering::Relaxed) {
-                crate::vocal_rb::analyse_file(&path, Some(&a))
-            } else if !cancel.load(std::sync::atomic::Ordering::Relaxed) && crate::stems::gpu_active() {
-                crate::stems::separate_vocals(&a.samples, a.sr, &mut |_| !cancel.load(std::sync::atomic::Ordering::Relaxed)).ok().map(|v| crate::stems::vocal_levels(&v, &crate::stems::mono_44k(&a.samples, a.sr)))
-            } else { None };
+        let worker = std::thread::Builder::new().name("rb-vocal-detection".into()).spawn(move || {
+            let r = guard_stem_work("Vocal detection", || {
+                let levels = if cancel.load(std::sync::atomic::Ordering::Relaxed) {
+                    None
+                } else if rb {
+                    crate::vocal_rb::analyse_file(&path, Some(&a))
+                } else if crate::stems::gpu_active() {
+                    crate::stems::separate_vocals(&a.samples, a.sr, &mut |_| !cancel.load(std::sync::atomic::Ordering::Relaxed))
+                        .ok().map(|v| crate::stems::vocal_levels(&v, &crate::stems::mono_44k(&a.samples, a.sr)))
+                } else { None };
+                Ok(levels)
+            }).unwrap_or_default();
             let _ = tx.send((id, r));
             ctx.request_repaint_of(egui::ViewportId::ROOT);
         });
-        self.deck.vocal_rx = Some(rx);
+        if worker.is_ok() { self.deck.vocal_rx = Some(rx); }
     }
 
 /// Track > Analyze Key. With a downloaded separation model and a GPU the key is found on the
@@ -2965,27 +2971,33 @@ impl App {
         let (tx, rx) = crossbeam_channel::unbounded();
         let ctx = self.ctx.clone();
         let n = jobs.len();
-        std::thread::spawn(move || {
-            for (id, path) in jobs {
-                let key = (|| {
-                    let d = crate::audio::decode_file(&path).ok()?;
-                    let mono = crate::stems::mono_44k(&d.samples, d.sr);
-                    if !crate::stems::gpu_active() { return Some(crate::key::detect_key(&mono, 44100.0)); }
-                    let drums = match crate::stems::separate_one(0, &d.samples, d.sr, &mut |_| true) {
-                        Ok(drums) => drums,
-                        Err(_) if crate::stems::backend_hold().is_some() => return Some(crate::key::detect_key(&mono, 44100.0)),
-                        Err(_) => return None,
-                    };
-                    let harm: Vec<f32> = mono.iter().zip(&drums).map(|(m, dr)| m - dr).collect();
-                    Some(crate::key::detect_key(&harm, 44100.0))
-                })()
-                .unwrap_or(-1);
-                if tx.send((id, key)).is_err() {
-                    return;
+        let worker = std::thread::Builder::new().name("rb-stem-key-analysis".into()).spawn(move || {
+            let _ = guard_stem_work("Key analysis", || {
+                for (id, path) in jobs {
+                    let key = (|| {
+                        let d = crate::audio::decode_file(&path).ok()?;
+                        let mono = crate::stems::mono_44k(&d.samples, d.sr);
+                        if !crate::stems::gpu_active() { return Some(crate::key::detect_key(&mono, 44100.0)); }
+                        let drums = match crate::stems::separate_one(0, &d.samples, d.sr, &mut |_| true) {
+                            Ok(drums) => drums,
+                            Err(_) if crate::stems::backend_hold().is_some() => return Some(crate::key::detect_key(&mono, 44100.0)),
+                            Err(_) => return None,
+                        };
+                        let harm: Vec<f32> = mono.iter().zip(&drums).map(|(m, dr)| m - dr).collect();
+                        Some(crate::key::detect_key(&harm, 44100.0))
+                    })()
+                    .unwrap_or(-1);
+                    if tx.send((id, key)).is_err() {
+                        break;
+                    }
+                    ctx.request_repaint_of(egui::ViewportId::ROOT);
                 }
-                ctx.request_repaint_of(egui::ViewportId::ROOT);
-            }
+                Ok(())
+            });
+            drop(tx);
+            ctx.request_repaint_of(egui::ViewportId::ROOT);
         });
+        if let Err(e) = worker { return self.toast_err(format!("Cannot start key analysis: {e}")); }
         self.key_job = Some((rx, n, 0));
         self.toast(format!("Analyzing the key of {n} track(s) with the stem model (about a minute each)…"));
     }
@@ -3019,8 +3031,6 @@ impl App {
             } else {
                 self.toast(format!("Key analysis finished for {total} track(s)."));
             }
-        } else {
-            self.ctx.request_repaint_after_for(std::time::Duration::from_secs(1), egui::ViewportId::ROOT);
         }
     }
 

@@ -1098,6 +1098,8 @@ pub(crate) struct Slot {
     kind: Kind,
     /// Stereo delay line (interleaved) and its write position (frames).
     delay: Vec<f32>,
+    /// An active callback has used this slot since its shared delay buffers were last cleared.
+    delay_buffers_used: bool,
     w: usize,
     /// Delay time in use (frames), moving toward the wanted time.
     time: f32,
@@ -1391,6 +1393,7 @@ impl Slot {
             mt: None,
             fxp: None,
             dpan: crate::fx_echo::DelayPan::new(48000.0),
+            delay_buffers_used: false,
         }
     }
 
@@ -1409,11 +1412,14 @@ impl Slot {
         self.stf.clear();
         self.stg.reset(1.0);
         self.st_cnt = -1.0;
-        self.delay.iter_mut().for_each(|v| *v = 0.0);
+        if self.delay_buffers_used {
+            self.delay.fill(0.0);
+            self.aux.fill(0.0);
+            self.delay_buffers_used = false;
+        }
         self.ps.reset();
         self.ej.reset();
         self.mob.reset(false);
-        self.aux.iter_mut().for_each(|v| *v = 0.0);
         self.pk = 0.0;
         self.taps = [0.0; 8];
         self.rob = [1.0, 0.177778, 0.0, 0.0];
@@ -1828,6 +1834,7 @@ impl Slot {
             self.was_on = false;
             return;
         }
+        self.delay_buffers_used = true;
         use Kind::*;
         let kind = self.kind;
         let r = rate as f32;
@@ -3297,10 +3304,13 @@ impl Ring {
     }
 
     pub(crate) fn write(&mut self, buf: &[f32]) {
-        for f in buf.chunks_exact(2) {
-            self.buf[self.w * 2] = f[0];
-            self.buf[self.w * 2 + 1] = f[1];
-            self.w = (self.w + 1) % RING_LEN;
+        let mut input = &buf[..buf.len() / 2 * 2];
+        while !input.is_empty() {
+            let destination = &mut self.buf[self.w * 2..];
+            let count = input.len().min(destination.len());
+            destination[..count].copy_from_slice(&input[..count]);
+            self.w = (self.w + count / 2) % RING_LEN;
+            input = &input[count..];
         }
     }
 }
@@ -3809,6 +3819,56 @@ impl Tap {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn idle_slot_changes_preserve_the_same_samples_and_tails_as_eager_delay_resets() {
+        let mut slot = Slot::new();
+        let mut eager = Slot::new();
+        let mut ring = Ring::new();
+        for (kind, on, frames) in [
+            (Kind::Roll, false, 128), (Kind::SpiralUp, false, 128),
+            (Kind::Flanger, true, 512), (Kind::Flanger, false, 32),
+            (Kind::SpiralUp, true, 1024), (Kind::SpiralUp, false, 512),
+            (Kind::Roll, false, 64), (Kind::Flanger, true, 512),
+        ] {
+            let mut controls = SlotParams::new(kind);
+            controls.on = on;
+            controls.level = 0.7;
+            let mut audio = tone(frames, 445.0);
+            let mut reference = audio.clone();
+            ring.write(&audio);
+            eager.delay_buffers_used = true;
+            eager.process(&controls, 123., &mut reference, 48_000, &ring, None, true);
+            slot.process(&controls, 123., &mut audio, 48_000, &ring, None, true);
+            assert!(audio.iter().zip(&reference).all(|(actual, want)| actual.to_bits() == want.to_bits()));
+            if !on && slot.gate <= 0.0 {
+                assert!(!slot.delay_buffers_used);
+                assert!(slot.delay.iter().chain(&slot.aux).all(|sample| sample.to_bits() == 0));
+            }
+        }
+    }
+
+    #[test]
+    fn dry_history_matches_stereo_frame_writes_across_callback_boundaries() {
+        let mut ring = Ring::new();
+        ring.w = RING_LEN - 3;
+        let mut expected = ring.buf.clone();
+        let mut cursor = ring.w;
+        for samples in [0, 1, 4, 2, 131, 2048, 2 * RING_LEN + 18, 256] {
+            let input: Vec<_> = (0..samples).map(|n| match n % 89 {
+                0 => -0.0,
+                1 => f32::from_bits(0x7fc0_0042),
+                _ => n as f32,
+            }).collect();
+            for frame in input.chunks_exact(2) {
+                expected[2 * cursor..2 * cursor + 2].copy_from_slice(frame);
+                cursor = (cursor + 1) % RING_LEN;
+            }
+            ring.write(&input);
+            assert_eq!(ring.w, cursor);
+            assert!(ring.buf.iter().zip(&expected).all(|(actual, want)| actual.to_bits() == want.to_bits()));
+        }
+    }
 
     /// The interface makes the cores without the rack's lock (`rev_needs`, `NewCores::make`,
     /// `rev_install`); `ensure_rev` makes them in place (tests, MERGE FX). Both must cover

@@ -1481,7 +1481,7 @@ fn stems_strip(app: &mut App, ui: &mut Ui, s: Rect, main: Rect) {
     if busy {
         if tip(bold_button(ui, at(1165.0, 54.0), "stem_stop", "STOP"), app, "Stop").clicked() {
             if exporting {
-                crate::stem_export::stop(app);
+                if let Some(track) = app.deck.track { crate::stem_export::stop_for(app, track); }
             } else if model_download {
                 app.stem.download_cancel.store(true, std::sync::atomic::Ordering::Relaxed);
             } else {

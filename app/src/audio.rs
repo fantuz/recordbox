@@ -633,11 +633,31 @@ pub struct Player {
     pub lost: Arc<std::sync::atomic::AtomicBool>,
     stream: Option<cpal::Stream>,
     output_enabled: bool,
-    buffer_load: Arc<std::sync::atomic::AtomicU32>,
+    buffer_load: Arc<CallbackTiming>,
     idle_since: Option<std::time::Instant>,
     parked: bool,
     pub device_rate: u32,
     pub error: Option<String>,
+}
+
+#[derive(Default)]
+struct CallbackTiming {
+    latest: std::sync::atomic::AtomicU32,
+    peak: std::sync::atomic::AtomicU32,
+    over_budget: std::sync::atomic::AtomicU64,
+}
+
+impl CallbackTiming {
+    fn record(&self, elapsed: std::time::Duration, frames: usize, rate: u32) {
+        use std::sync::atomic::Ordering::Relaxed;
+        if frames == 0 { return; }
+        let load = elapsed.as_secs_f64() * f64::from(rate) / frames as f64;
+        // Nonnegative float bits sort in the same order as their numeric values.
+        let percent = ((100.0 * load) as f32).to_bits();
+        self.latest.store(percent, Relaxed);
+        if percent > self.peak.load(Relaxed) { self.peak.fetch_max(percent, Relaxed); }
+        if load > 1.0 { self.over_budget.fetch_add(1, Relaxed); }
+    }
 }
 
 impl Player {
@@ -732,10 +752,15 @@ impl Player {
     /// Elapsed time in the most recent output callback as a percentage of its buffer period.
     pub fn buffer_load_percent(&self) -> Option<f32> {
         self.stream.as_ref()?;
-        Some(f32::from_bits(self.buffer_load.load(std::sync::atomic::Ordering::Relaxed)))
+        Some(f32::from_bits(self.buffer_load.latest.load(std::sync::atomic::Ordering::Relaxed)))
     }
 
-    fn open_stream(state: [Arc<Mutex<PlayState>>; 4], device: Option<&str>, lost: Arc<std::sync::atomic::AtomicBool>, buffer_load: Arc<std::sync::atomic::AtomicU32>) -> Result<(cpal::Stream, u32)> {
+    pub fn buffer_load_history(&self) -> (f32, u64) {
+        use std::sync::atomic::Ordering::Relaxed;
+        (f32::from_bits(self.buffer_load.peak.load(Relaxed)), self.buffer_load.over_budget.load(Relaxed))
+    }
+
+    fn open_stream(state: [Arc<Mutex<PlayState>>; 4], device: Option<&str>, lost: Arc<std::sync::atomic::AtomicBool>, buffer_load: Arc<CallbackTiming>) -> Result<(cpal::Stream, u32)> {
         use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
         let host = cpal::default_host();
         let named = device.and_then(|want| Self::find_device(want, std::time::Duration::from_secs(3)));
@@ -749,84 +774,95 @@ impl Player {
         let rate = cfg.sample_rate().0;
         let channels = cfg.channels() as usize;
         let record_time = move |start: std::time::Instant, samples: usize| {
-            let frames = samples / channels;
-            if frames > 0 {
-                let percent = start.elapsed().as_secs_f64() * f64::from(rate) * 100.0 / frames as f64;
-                buffer_load.store((percent as f32).to_bits(), std::sync::atomic::Ordering::Relaxed);
+            buffer_load.record(start.elapsed(), samples / channels, rate);
+        };
+        let phones = usize::try_from(HP_CHANNEL.load(std::sync::atomic::Ordering::Relaxed)).ok()
+            .filter(|h| h + 1 < channels && h.abs_diff(first_ch) >= 2);
+        let mut pair = Vec::with_capacity(8192);
+        let mut cue = Vec::with_capacity(8192);
+        let mut fill = move |out: &mut [f32]| {
+            route_stereo_output(out, channels, first_ch, phones, &mut pair, &mut cue, |master, headphones| {
+                if headphones.is_empty() {
+                    render(&state, master, 2, rate);
+                } else {
+                    render_cue(&state, master, headphones, 2, rate);
+                }
+            });
+        };
+        let on_error = move |e| {
+            eprintln!("audio error: {e}");
+            if matches!(e, cpal::StreamError::DeviceNotAvailable) {
+                lost.store(true, std::sync::atomic::Ordering::Relaxed);
             }
         };
-        let st = state.clone();
         let stream = match cfg.sample_format() {
-            cpal::SampleFormat::F32 => {
-                let lost = lost.clone();
-                let mut pair: Vec<f32> = Vec::with_capacity(8192);
-                let mut phones: Vec<f32> = Vec::with_capacity(8192);
-                // Headphones on their own channel pair of the same device, when it has one
-                // besides the master's (an interface or controller with four outputs).
-                let hp = usize::try_from(HP_CHANNEL.load(std::sync::atomic::Ordering::Relaxed)).ok().filter(|h| h + 1 < channels && *h != first_ch && h + 1 != first_ch && *h != first_ch + 1);
-                HP_ACTIVE.store(hp.is_some(), std::sync::atomic::Ordering::Relaxed);
-                dev.build_output_stream(
-                &config,
-                move |data: &mut [f32], _| {
-                    let start = std::time::Instant::now();
-                    match hp {
-                        Some(h) => {
-                            let frames = data.len() / channels.max(1);
-                            pair.clear();
-                            pair.resize(frames * 2, 0.0);
-                            phones.clear();
-                            phones.resize(frames * 2, 0.0);
-                            render_cue(&st, &mut pair, &mut phones, 2, rate);
-                            data.fill(0.0);
-                            for ((f, m), c) in data.chunks_mut(channels).zip(pair.chunks(2)).zip(phones.chunks(2)) {
-                                f[first_ch] = m[0];
-                                f[first_ch + 1] = m[1];
-                                f[h] = c[0].clamp(-1.0, 1.0);
-                                f[h + 1] = c[1].clamp(-1.0, 1.0);
-                            }
-                        }
-                        None if first_ch == 0 => render(&st, data, channels, rate),
-                        None => crate::prefs_ext::render_pair(data, channels, first_ch, &mut pair, |b| render(&st, b, 2, rate)),
-                    }
-                    record_time(start, data.len());
-                },
-                move |e| {
-                    eprintln!("audio error: {e}");
-                    if matches!(e, cpal::StreamError::DeviceNotAvailable) {
-                        lost.store(true, std::sync::atomic::Ordering::Relaxed);
-                    }
-                },
-                None,
-            )?
-            }
-            _ => {
-                let st2 = st.clone();
-                // Scratch buffer reused across callbacks (no allocation on the audio thread once
-                // it has reached the device's buffer size).
-                let mut tmp: Vec<f32> = Vec::with_capacity(8192);
-                dev.build_output_stream(
-                    &config,
-                    move |data: &mut [i16], _| {
-                        let start = std::time::Instant::now();
-                        tmp.resize(data.len(), 0.0);
-                        render(&st2, &mut tmp, channels, rate);
-                        for (d, s) in data.iter_mut().zip(tmp.iter().copied()) {
-                            *d = (s.clamp(-1.0, 1.0) * 32767.0) as i16;
-                        }
-                        record_time(start, data.len());
-                    },
-                    move |e| {
-                        eprintln!("audio error: {e}");
-                        if matches!(e, cpal::StreamError::DeviceNotAvailable) {
-                            lost.store(true, std::sync::atomic::Ordering::Relaxed);
-                        }
-                    },
-                    None,
-                )?
-            }
+            cpal::SampleFormat::F32 => dev.build_output_stream(&config, move |data: &mut [f32], _| {
+                let start = std::time::Instant::now();
+                fill(data);
+                record_time(start, data.len());
+            }, on_error, None)?,
+            cpal::SampleFormat::I8 => converted_output::<i8>(&dev, &config, fill, record_time, on_error)?,
+            cpal::SampleFormat::U8 => converted_output::<u8>(&dev, &config, fill, record_time, on_error)?,
+            cpal::SampleFormat::I16 => converted_output::<i16>(&dev, &config, fill, record_time, on_error)?,
+            cpal::SampleFormat::U16 => converted_output::<u16>(&dev, &config, fill, record_time, on_error)?,
+            cpal::SampleFormat::I32 => converted_output::<i32>(&dev, &config, fill, record_time, on_error)?,
+            cpal::SampleFormat::U32 => converted_output::<u32>(&dev, &config, fill, record_time, on_error)?,
+            cpal::SampleFormat::I64 => converted_output::<i64>(&dev, &config, fill, record_time, on_error)?,
+            cpal::SampleFormat::U64 => converted_output::<u64>(&dev, &config, fill, record_time, on_error)?,
+            cpal::SampleFormat::F64 => converted_output::<f64>(&dev, &config, fill, record_time, on_error)?,
+            other => anyhow::bail!("Unsupported output sample format: {other}"),
         };
         stream.play()?;
+        HP_ACTIVE.store(phones.is_some(), std::sync::atomic::Ordering::Relaxed);
         Ok((stream, rate))
+    }
+}
+
+/// The deck, effect, sampler and recorder buses are stereo on every physical interface.
+fn route_stereo_output(out: &mut [f32], channels: usize, first: usize, phones: Option<usize>,
+    pair: &mut Vec<f32>, cue: &mut Vec<f32>, mut mix: impl FnMut(&mut [f32], &mut [f32])) {
+    if channels == 2 {
+        mix(out, &mut []);
+    } else if phones.is_none() && channels > 2 {
+        crate::prefs_ext::render_pair(out, channels, first, pair, |master| mix(master, &mut []));
+    } else if channels == 1 {
+        pair.resize(out.len() * 2, 0.0);
+        mix(pair, &mut []);
+        for (sample, lr) in out.iter_mut().zip(pair.chunks_exact(2)) { *sample = 0.5 * (lr[0] + lr[1]); }
+    } else if let Some(hp) = phones {
+        let stereo = 2 * (out.len() / channels);
+        pair.resize(stereo, 0.0);
+        cue.resize(stereo, 0.0);
+        mix(pair, cue);
+        out.fill(0.0);
+        for ((frame, master), hp_mix) in out.chunks_exact_mut(channels).zip(pair.chunks_exact(2)).zip(cue.chunks_exact(2)) {
+            frame[first..first + 2].copy_from_slice(master);
+            frame[hp] = hp_mix[0].clamp(-1.0, 1.0);
+            frame[hp + 1] = hp_mix[1].clamp(-1.0, 1.0);
+        }
+    }
+}
+
+fn converted_output<T: cpal::SizedSample + cpal::FromSample<f32>>(
+    device: &cpal::Device, config: &cpal::StreamConfig, mut fill: impl FnMut(&mut [f32]) + Send + 'static,
+    record_time: impl Fn(std::time::Instant, usize) + Send + 'static,
+    on_error: impl FnMut(cpal::StreamError) + Send + 'static,
+) -> Result<cpal::Stream> {
+    use cpal::traits::DeviceTrait;
+    let mut scratch = Vec::with_capacity(8192);
+    Ok(device.build_output_stream(config, move |data: &mut [T], _| {
+        let start = std::time::Instant::now();
+        scratch.resize(data.len(), 0.0);
+        fill(&mut scratch);
+        convert_output(data, &scratch);
+        record_time(start, data.len());
+    }, on_error, None)?)
+}
+
+fn convert_output<T: cpal::SizedSample + cpal::FromSample<f32>>(out: &mut [T], input: &[f32]) {
+    for (dst, &sample) in out.iter_mut().zip(input) {
+        let value = if T::FORMAT.is_float() { sample } else { sample.clamp(-1.0, 1.0) };
+        *dst = T::from_sample(value);
     }
 }
 
@@ -1133,11 +1169,11 @@ impl ClipReader {
 /// The sampler deck joins the mix after the decks (before the master's effects and limiter).
 /// With `rack`, and the sampler assigned to a Beat FX unit or CFX set to act on it, its mix
 /// goes through them first (after its GAIN, before its fader: the decks' order).
-fn mix_sampler(out: &mut [f32], cue: &mut [f32], channels: usize, rate: u32, rack: Option<&mut crate::fx::Rack>) {
+fn mix_sampler(out: &mut [f32], cue: &mut [f32], channels: usize, rate: u32, rack: Option<&mut crate::fx::Rack>, wait: &mut std::time::Duration) {
     if channels != 2 {
         return;
     }
-    if let Some(mut g) = lock_for_audio(&crate::sampler::SAMPLER, &SAMPLER_LOCK_TIMEOUTS) {
+    if let Some(mut g) = lock_for_audio(&crate::sampler::SAMPLER, &SAMPLER_LOCK_TIMEOUTS, wait) {
         if let Some(e) = g.as_deref_mut() {
             let fx = rack.filter(|r| r.sampler_in_use());
             e.direct = fx.is_none();
@@ -1354,28 +1390,29 @@ pub static SAMPLER_LOCK_TIMEOUTS: AtomicU64 = AtomicU64::new(0);
 pub static DECK_LOCK_TIMEOUTS: AtomicU64 = AtomicU64::new(0);
 pub static RACK_LOCK_TIMEOUTS: AtomicU64 = AtomicU64::new(0);
 
-/// Most UI holds are brief. Give the sampler, deck or effects rack a quarter
-/// of a millisecond to become available before skipping it in this callback.
-fn lock_for_audio<'a, T>(m: &'a Mutex<T>, site_timeouts: &AtomicU64) -> Option<parking_lot::MutexGuard<'a, T>> {
+// Retain short retries on brief UI holds. Multiple contended deck/rack/sampler locks
+// share at most half of this output period; each successful immediate lock is free.
+fn audio_wait_budget(frames: usize, rate: u32) -> std::time::Duration {
+    std::time::Duration::from_nanos((frames as u64).saturating_mul(500_000_000) / u64::from(rate.max(1)))
+}
+
+fn lock_for_audio<'a, T>(m: &'a Mutex<T>, site_timeouts: &AtomicU64, remaining: &mut std::time::Duration) -> Option<parking_lot::MutexGuard<'a, T>> {
     use std::sync::atomic::Ordering::Relaxed;
-    if let Some(g) = m.try_lock() {
-        return Some(g);
-    }
+    if let Some(g) = m.try_lock() { return Some(g); }
     AUDIO_CONTENDED.fetch_add(1, Relaxed);
-    let t = std::time::Instant::now();
-    loop {
-        for _ in 0..64 {
-            std::hint::spin_loop();
-        }
+    let limit = (*remaining).min(std::time::Duration::from_micros(250));
+    let start = std::time::Instant::now();
+    while start.elapsed() < limit {
+        for _ in 0..64 { std::hint::spin_loop(); }
         if let Some(g) = m.try_lock() {
+            *remaining = remaining.saturating_sub(start.elapsed());
             return Some(g);
         }
-        if t.elapsed() > std::time::Duration::from_micros(250) {
-            AUDIO_DROPPED.fetch_add(1, Relaxed);
-            site_timeouts.fetch_add(1, Relaxed);
-            return None;
-        }
     }
+    *remaining = remaining.saturating_sub(start.elapsed());
+    AUDIO_DROPPED.fetch_add(1, Relaxed);
+    site_timeouts.fetch_add(1, Relaxed);
+    None
 }
 
 /// The audio callback: both decks mixed into `out`.
@@ -1437,8 +1474,9 @@ fn render_cue(states: &[Arc<Mutex<PlayState>>], out: &mut [f32], cue: &mut [f32]
     // Up to four decks. BEAT SYNC: every follower is held on the master deck's beat phase,
     // read here where all positions belong to the same instant.
     let mut guards: [Option<parking_lot::MutexGuard<'_, PlayState>>; 4] = [None, None, None, None];
+    let mut wait = audio_wait_budget(out.len() / channels.max(1), rate);
     for (g, st) in guards.iter_mut().zip(states.iter()) {
-        *g = lock_for_audio(st, &DECK_LOCK_TIMEOUTS);
+        *g = lock_for_audio(st, &DECK_LOCK_TIMEOUTS, &mut wait);
     }
     // Lift the common master control before Mix Point Link applies its per-deck
     // SILENT region. The muted part of a linked deck must also be silent on REC.
@@ -1491,7 +1529,7 @@ fn render_cue(states: &[Arc<Mutex<PlayState>>], out: &mut [f32], cue: &mut [f32]
     // assigned to it (after its faders, as in rekordbox), then mixed; the master's effects
     // take the mix. Otherwise the decks go straight into the output.
     // (Waited for like the decks' state: the interface holds it only to copy the settings.)
-    let mut rack = lock_for_audio(&crate::fx::RACK, &RACK_LOCK_TIMEOUTS);
+    let mut rack = lock_for_audio(&crate::fx::RACK, &RACK_LOCK_TIMEOUTS, &mut wait);
     match rack.as_deref_mut().and_then(|r| r.as_deref_mut()).filter(|r| r.active() && channels == 2) {
         Some(rack) => {
             rack.beat = [None; crate::fx::CHANNELS];
@@ -1517,14 +1555,14 @@ fn render_cue(states: &[Arc<Mutex<PlayState>>], out: &mut [f32], cue: &mut [f32]
                 }
                 rack.scratch[i] = buf;
             }
-            mix_sampler(out, cue, channels, rate, Some(&mut *rack));
+            mix_sampler(out, cue, channels, rate, Some(&mut *rack), &mut wait);
             rack.process(crate::fx::MASTER, out, rate);
         }
         None => {
             for s in guards.iter_mut().filter_map(|g| g.as_deref_mut()) {
                 render_deck_cue(s, out, cue, channels, rate);
             }
-            mix_sampler(out, cue, channels, rate, None);
+            mix_sampler(out, cue, channels, rate, None, &mut wait);
         }
     }
     drop(rack);
@@ -2178,8 +2216,24 @@ mod interp_tests {
 }
 
 #[cfg(test)]
+#[path = "audio/fx_latency_bench.rs"]
+mod fx_latency_bench;
+
+#[cfg(test)]
 mod deck_mix_tests {
     use super::*;
+
+    #[test]
+    fn callback_meter_keeps_peak_and_over_budget_count_after_a_fast_block() {
+        use std::sync::atomic::Ordering::Relaxed;
+        use std::time::Duration;
+        let t = CallbackTiming::default();
+        for ms in [4, 10, 12, 3] { t.record(Duration::from_millis(ms), 480, 48_000); }
+        t.record(Duration::from_secs(2), 0, 48_000);
+        assert_eq!(f32::from_bits(t.latest.load(Relaxed)), 30.0);
+        assert_eq!(f32::from_bits(t.peak.load(Relaxed)), 120.0);
+        assert_eq!(t.over_budget.load(Relaxed), 1);
+    }
 
     #[test]
     fn audio_lock_counts_only_timed_out_acquisitions_at_the_selected_site() {
@@ -2187,12 +2241,53 @@ mod deck_mix_tests {
         let state = Mutex::new(());
         let first_site = AtomicU64::new(0);
         let second_site = AtomicU64::new(0);
-        let held = lock_for_audio(&state, &first_site).unwrap();
-        assert!(lock_for_audio(&state, &second_site).is_none());
+        let mut wait = audio_wait_budget(16, 48_000);
+        assert_eq!(wait.as_nanos(), 166_666);
+        let held = lock_for_audio(&state, &first_site, &mut wait).unwrap();
+        assert!(lock_for_audio(&state, &second_site, &mut wait).is_none());
+        assert!(wait.is_zero());
+        let uncontended = Mutex::new(());
+        assert!(lock_for_audio(&uncontended, &first_site, &mut wait).is_some());
         drop(held);
-        assert!(lock_for_audio(&state, &second_site).is_some());
+        assert!(lock_for_audio(&state, &second_site, &mut wait).is_some());
         assert_eq!(first_site.load(Relaxed), 0);
         assert_eq!(second_site.load(Relaxed), 1);
+    }
+
+    #[test]
+    fn stereo_fx_bus_routes_default_alternate_and_headphone_pairs_and_mono() {
+        let mut pair = Vec::new();
+        let mut cue = Vec::new();
+        for (channels, first, phones, frame) in [
+            (2, 0, None, vec![0.25, 0.75]),
+            (4, 0, None, vec![0.25, 0.75, 0.0, 0.0]),
+            (4, 2, None, vec![0.0, 0.0, 0.25, 0.75]),
+            (6, 2, Some(0), vec![-0.25, 1.0, 0.25, 0.75, 0.0, 0.0]),
+            (1, 0, None, vec![0.5]),
+        ] {
+            let mut output = vec![9.0; channels * 5];
+            route_stereo_output(&mut output, channels, first, phones, &mut pair, &mut cue, |master, hp| {
+                assert_eq!(master.len(), 10, "the mix, sampler and FX must always render stereo");
+                for frame in master.chunks_exact_mut(2) { frame.copy_from_slice(&[0.25, 0.75]); }
+                assert_eq!(hp.len(), if phones.is_some() { 10 } else { 0 });
+                for frame in hp.chunks_exact_mut(2) { frame.copy_from_slice(&[-0.25, 1.5]); }
+            });
+            for actual in output.chunks_exact(channels) { assert_eq!(actual, frame); }
+        }
+    }
+
+    #[test]
+    fn native_device_conversion_clips_integers_and_centers_unsigned_silence() {
+        let input = [-2.0, -1.0, 0.0, 0.5, 1.0, 2.0];
+        let mut signed = [0i16; 6];
+        let mut unsigned = [0u16; 6];
+        let mut float = [0f64; 6];
+        convert_output(&mut signed, &input);
+        convert_output(&mut unsigned, &input);
+        convert_output(&mut float, &input);
+        assert_eq!(signed, [i16::MIN, i16::MIN, 0, 16_384, i16::MAX, i16::MAX]);
+        assert_eq!(unsigned, [0, 0, 32_768, 49_152, u16::MAX, u16::MAX]);
+        assert_eq!(float, input.map(f64::from));
     }
 
     fn dc(level: f32, frames: usize) -> Arc<Decoded> {

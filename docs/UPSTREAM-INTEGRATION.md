@@ -2,6 +2,12 @@
 
 The integration brings Adam Sardo’s EDIT timeline, additional Performance layouts, MIDI and keyboard mappings, recorder, sampler and effects into the fork. New beat analysis also uses his port of the AlphaTheta Rekordbox 7.2.19 Normal and Dynamic detector. The fork’s library and device-export tools continue to use its existing database and ANLZ checks. [Upstream beat detector](https://github.com/adamsardo/recordbox/blob/74ba5e9/app/src/analysis/rb_beat1.rs) · [Integration PR](https://github.com/fantuz/recordbox/pull/28)
 
+## Performance FX and the November 28 upstream changes
+
+Six upstream commits followed the optional beat-grid update through `fcffc8d`. They add virtual controller tests and an opt-in MIDI event log, refine jog distance and tempo-slider takeover, add waveform scratching and update pointer and keyboard feedback. The FX panel adopts upstream's hover and release feedback here. The release effect still responds directly to the physical or mouse press. These six commits contain no change to the effect DSP kernels. The fork keeps its existing controller routing while the new upstream controller behavior awaits separate comparison. [Upstream comparison](https://github.com/adamsardo/recordbox/compare/4b4756e6a015da6c155063667279f995d3435482...fcffc8d)
+
+The fork also fixes the stereo FX path when sending Master to the first pair of a multi-output device. It reuses unchanged FX preferences during drawing and reduces work in delay history and effect resets. The audio-load tooltip records over-budget callbacks for the current stream. [Measuring FX during analysis](PLAYBACK-PERFORMANCE.md#diagnosing-interruptions-when-enabling-effects)
+
 ## Optional beat model from 4b4756e
 
 This follow-up to 0.9.1 updates the **Use installed beat grid model** option. It adds another pass over irregular beat intervals, including half-beat errors and sections that could otherwise be interpreted at half, double, two-thirds or one-and-a-half times the reference tempo. It also follows the reference CPU network’s rounding more closely. The chosen ordinary estimator still supplies a grid when the optional model is missing or cannot produce a supported result. [Upstream revision](https://github.com/adamsardo/recordbox/commit/4b4756e6a015da6c155063667279f995d3435482) · [Beat analysis settings](PLAYBACK-PERFORMANCE.md#high-precision-beat-grids)

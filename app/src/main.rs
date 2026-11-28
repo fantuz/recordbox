@@ -553,6 +553,10 @@ impl eframe::App for Gui {
                     use std::sync::atomic::Ordering::Relaxed;
                     eprintln!("bench: stems ready {}, separating {:?}, stem error {:?}", app.player.state.lock().stems.is_some(), app.stem.separating, app.stem.error_for(app.deck.track));
                     eprintln!("bench: mixer meters deck 1 {:.1} dB, master {:.1} dB, limiter on {}", app.px.mix[0].shown_db[0], app.px.master_db[0], audio::LIMITER_ON.load(Relaxed));
+                    if app.player.buffer_load_percent().is_some() {
+                        let (peak, over) = app.player.buffer_load_history();
+                        eprintln!("bench: audio callback peak {peak:.1}% of buffer period, {over} over-budget callbacks since output opened");
+                    }
                     eprintln!("bench: audio callback lock contentions {}, lock timeouts {} (sampler {}, decks {}, effects rack {})",
                         audio::AUDIO_CONTENDED.load(Relaxed), audio::AUDIO_DROPPED.load(Relaxed),
                         audio::SAMPLER_LOCK_TIMEOUTS.load(Relaxed), audio::DECK_LOCK_TIMEOUTS.load(Relaxed), audio::RACK_LOCK_TIMEOUTS.load(Relaxed));
