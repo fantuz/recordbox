@@ -551,6 +551,17 @@ fn match_lookup_item(app: &mut App, ui: &mut Ui, sel: &[i64]) {
         crate::ui_dialogs::open_match_lookup(app, sel);
         ui.close_menu();
     }
+    let [id] = sel else { return };
+    let sources: Vec<_> = app.match_tags(*id).iter().filter_map(|tags| tags.source_url().map(|url| (tags, url))).collect();
+    if !sources.is_empty() {
+        ui.menu_button("Related track metadata sources", |ui| {
+            for (tags, url) in sources {
+                if ui.hyperlink_to(tags.provider.as_str(), url).clicked() {
+                    ui.close_menu();
+                }
+            }
+        });
+    }
 }
 
 /// The track context menu, in the order rekordbox 7.2.19 builds it for collection and
