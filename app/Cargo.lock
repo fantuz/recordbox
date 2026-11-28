@@ -3955,7 +3955,7 @@ checksum = "03251193000f4bd3b042892be858ee50e8b3719f2b08e5833ac4353724632430"
 
 [[package]]
 name = "recordbox"
-version = "0.9.1"
+version = "0.9.2"
 dependencies = [
  "alsa",
  "anyhow",
