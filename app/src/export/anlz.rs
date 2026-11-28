@@ -1,6 +1,8 @@
 //! Writer for the players' analysis files (ANLZ0000.DAT / .EXT / .2EX), big-endian tagged
 //! sections inside a PMAI container. Section layouts are listed in MECHANICS.md.
 
+pub(crate) mod grid_pair;
+
 use crate::model::{Beat, Cue, CueKind, Waveform};
 
 fn section(tag: &[u8; 4], header_extra: &[u8], body: &[u8]) -> Vec<u8> {

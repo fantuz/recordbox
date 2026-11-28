@@ -2860,7 +2860,7 @@ impl App {
         std::thread::spawn(move || {
             let from_rb = base.and_then(|b| {
                 let dat = b.with_extension("DAT");
-                let same = crate::rbimport::read_pqtz_grid(&dat).map(|r| grids_match(&r, &grid)).unwrap_or(false);
+                let same = crate::export::anlz::grid_pair::matches_source(&dat, &grid);
                 if !same || !crate::rbimport::pqtz_beat_indices_match(&dat, &beats) {
                     return None;
                 }
