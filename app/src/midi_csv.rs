@@ -524,7 +524,7 @@ pub fn local_file(dir: &Path, port: &str) -> PathBuf {
     }
 }
 
-fn alsa_endpoint(name: &str) -> Option<(&str, &str, u16, u16)> {
+pub(crate) fn alsa_endpoint(name: &str) -> Option<(&str, &str, u16, u16)> {
     // midir ALSA: "client:port client_id:port_id". Remove an address only after
     // recognizing the whole form; numbers inside device names are significant.
     let (labels, address) = name.rsplit_once(' ')?;

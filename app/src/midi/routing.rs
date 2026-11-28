@@ -96,9 +96,17 @@ pub(super) struct Routing {
     pub(super) performance: bool,
     held: Vec<Held>,
     jog_owner: [Option<Arc<Device>>; 4],
+    // Received entry on the physical connection that last moved each deck's tempo.
+    pub(super) tempo_sources: [Option<(std::sync::Weak<Device>, usize)>; 4],
+    /// Earliest queued non-Fast fader packet still owned by this source and software target.
+    pub(super) tempo_since: [u64; 4],
 }
 
 impl Routing {
+    pub(super) fn jog_held(&self, deck: u8) -> bool {
+        self.held.iter().any(|h| h.event.deck == deck && registry().get(h.event.tag).is_some_and(|f| f.act == Act::JogTouch))
+    }
+
     pub(super) fn search_held(&self, deck: u8) -> bool {
         self.held.iter().any(|held| {
             Some(held.event.deck) == deck.checked_add(1)
@@ -166,12 +174,21 @@ fn same_release(a: u32, b: u32) -> bool {
     )
 }
 
+#[derive(Clone, Copy)]
+pub(super) enum JogInput {
+    Touch,
+    /// Signed track milliseconds from the controller's counts and platter calibration.
+    Rotation(f64),
+    Idle,
+    Cancel,
+}
+
 impl Hub {
     pub(super) fn idle_jogs(&self, dev: &Arc<Device>, now: Instant) {
         let mut route = self.routing.lock();
         for n in 0..4 {
             let out = dev.jog.lock()[n].idle(now);
-            self.routed_jog(&mut route, dev, n, out, true);
+            self.routed_jog(&mut route, dev, n, out, JogInput::Idle);
         }
     }
 
@@ -181,7 +198,7 @@ impl Hub {
         dev: &Arc<Device>,
         n: usize,
         out: JogOut,
-        idle: bool,
+        input: JogInput,
     ) {
         if !self.playback_enabled || out == JogOut::Nothing {
             return;
@@ -189,7 +206,7 @@ impl Hub {
         let owner = &mut route.jog_owner[n];
         let mine = owner.as_ref().is_some_and(|d| Arc::ptr_eq(d, dev));
         let ending = matches!(out, JogOut::Release | JogOut::Spin(_) | JogOut::Bend(0.0));
-        if (idle || ending) && !mine {
+        if (matches!(input, JogInput::Idle) || ending) && !mine {
             return;
         }
         if ending {
@@ -201,12 +218,12 @@ impl Hub {
             }
             *owner = Some(dev.clone());
         }
-        self.jog_out(n, out);
+        self.jog_out(n, out, input);
     }
 
     fn reset_jog(&self, n: usize) {
-        self.jog_out(n, JogOut::Release);
-        self.jog_out(n, JogOut::Bend(0.0));
+        self.jog_out(n, JogOut::Release, JogInput::Cancel);
+        self.jog_out(n, JogOut::Bend(0.0), JogInput::Cancel);
     }
 
     // A final release uses the same fast/UI delivery as a physical release.
@@ -276,7 +293,7 @@ impl Hub {
         let mut map = dev.map.lock();
         let mut offs = Vec::new();
         if let Some(previous) = original.take() {
-            if dev.has_output {
+            if dev.has_output() {
                 // A pending OFF for one of the trial's lamps
                 // may still be queued when the old map is restored.
                 offs.extend(map.outputs.iter().map(|e| (map.led_message(e, 0), e.opts.priority)));
@@ -311,6 +328,13 @@ impl Hub {
     fn release_holds(&self, route: &mut Routing, device: Option<&Arc<Device>>) {
         let matches = |d: &Arc<Device>| device.is_none_or(|who| Arc::ptr_eq(who, d));
         self.release_matching(route, |h| matches(&h.dev));
+        for (n, source) in route.tempo_sources.iter_mut().enumerate() {
+            if source.as_ref().is_some_and(|(port, _)| port.upgrade().is_none_or(|d| matches(&d))) {
+                *source = None;
+                route.tempo_since[n] = self.seq.load(Relaxed);
+                self.takeover.lock()[n] = TempoTakeover::default();
+            }
+        }
         for (n, owner) in route.jog_owner.iter_mut().enumerate() {
             if owner.as_ref().is_some_and(&matches) {
                 *owner = None;
@@ -425,6 +449,28 @@ mod tests {
     }
 
     #[test]
+    fn a_learn_packet_queued_for_an_old_row_or_closed_session_cannot_bind_a_new_row() {
+        let (hub, rx) = hub();
+        let dev = controller("A");
+        hub.set_learning(&dev, true);
+        let epoch = dev.input_epoch.load(Relaxed);
+        let press = [0x90, 11, 127];
+        hub.input_message(&dev, press, 0.0, 0, epoch);
+        let UiEvent::Learn { input_epoch, .. } = rx.try_recv().unwrap() else { panic!("expected Learn") };
+        assert!(dev.learning_at(input_epoch));
+        dev.change_learn_target();
+        assert!(!dev.learning_at(input_epoch));
+        hub.input_message(&dev, press, 1.0, 0, epoch);
+        assert!(rx.try_recv().is_err());
+        let current = dev.input_epoch.load(Relaxed);
+        hub.input_message(&dev, press, 2.0, 0, current);
+        assert!(matches!(rx.try_recv(), Ok(UiEvent::Learn { input_epoch, .. }) if dev.learning_at(input_epoch)));
+        hub.set_learning(&dev, false);
+        hub.set_learning(&dev, true);
+        assert!(!dev.learning_at(current));
+    }
+
+    #[test]
     fn fast_play_requires_performance_and_learn_does_not_dispatch_its_old_binding() {
         let (hub, rx) = hub();
         let dev = controller("A");
@@ -502,8 +548,8 @@ mod tests {
     fn rx3_trial_releases_a_held_cue_drops_old_input_and_resets_only_its_lamps() {
         let (hub, _) = hub();
         hub.routing.lock().performance = true;
-        let mut rx3 = controller("XDJ-RX3");
-        Arc::get_mut(&mut rx3).unwrap().has_output = true;
+        let rx3 = controller("XDJ-RX3");
+        rx3.output_ready.store(true, std::sync::atomic::Ordering::Relaxed);
         let peer = controller("Other controller");
         hub.set_profile_trial(&peer, true);
         assert!(!peer.profile_trial_active());
@@ -540,8 +586,8 @@ mod tests {
         hub.snap.lock().count = 4;
         let audio = hub.decks[0].lock().audio.clone();
         hub.decks[3].lock().audio = audio;
-        let mut opus = controller("MIDIIN (OPUS-QUAD)");
-        Arc::get_mut(&mut opus).unwrap().has_output = true;
+        let opus = controller("MIDIIN (OPUS-QUAD)");
+        opus.output_ready.store(true, std::sync::atomic::Ordering::Relaxed);
         hub.set_profile_trial(&opus, true);
         assert!(opus.profile_trial_active());
         assert_eq!(opus.map.lock().live_inputs().count(), 162);
@@ -745,14 +791,116 @@ mod tests {
         let (a, b) = (controller("A"), controller("B"));
         {
             let mut route = hub.routing.lock();
-            hub.routed_jog(&mut route, &a, 0, JogOut::Scratch(1.0), false);
-            hub.routed_jog(&mut route, &b, 0, JogOut::Scratch(-1.0), false);
-            hub.routed_jog(&mut route, &a, 0, JogOut::Scratch(0.0), true);
+            hub.routed_jog(&mut route, &a, 0, JogOut::Scratch(1.0), JogInput::Rotation(10.0));
+            hub.routed_jog(&mut route, &b, 0, JogOut::Scratch(-1.0), JogInput::Rotation(-10.0));
+            hub.routed_jog(&mut route, &a, 0, JogOut::Scratch(0.0), JogInput::Idle);
         }
         hub.release_device(&a);
         assert_eq!(hub.decks[0].lock().dk.jog, crate::deck::Jog::Speed(-1.0));
         hub.release_device(&b);
         assert_eq!(hub.decks[0].lock().dk.jog, crate::deck::Jog::None);
+    }
+
+    fn platter_and_needle() -> Arc<Device> {
+        let csv = b"@file,1,DDJ-FLX4
+JogTouch,,JogTouch,,9036,,,,,,,,,RO;,
+JogScratch,,JogRotate,,B022,,,,,,,,,RO;,
+NeedleSearch,,Value,,B003,,,,,,,,,Max=16383;,
+";
+        let map = MidiMap::load("DDJ-FLX4", None, Some(csv)).unwrap();
+        Device::mapped("DDJ-FLX4", "platter".into(), map, false, None)
+    }
+
+    #[test]
+    fn counted_scratch_stops_at_the_wire_distance_even_if_idle_beats_the_audio() {
+        let (hub, _) = hub();
+        hub.routing.lock().performance = true;
+        let dev = platter_and_needle();
+        let send = |bytes, time| hub.input_message(&dev, bytes, time, 0, 0);
+        let deck = &hub.decks[0];
+        {
+            let mut s = deck.lock();
+            s.audio = Some(Arc::new(crate::audio::Decoded {
+                sr: 44100, samples: vec![0.25; 32000], raw_frames: 16000, damaged: 0, truncated: false,
+            }));
+            s.pos = 5000.0;
+        }
+        send([0x90, 0x36, 127], 0.0);
+        // Four clockwise counts followed by one counterclockwise before a callback.
+        send([0xb0, 0x22, 68], 10.0);
+        send([0xb0, 0x22, 63], 20.0);
+        let end = dev.jog.lock()[0].deadline().unwrap();
+        hub.idle_jogs(&dev, end);
+        let mut s = deck.lock();
+        let frames = 3.0 * 2.5 * 44.1; // FLX4: 2.5 track ms/count.
+        assert!((s.dk.jog_left.unwrap() - frames).abs() < 1e-8);
+        let mut out = vec![0.0; 8192];
+        crate::audio::render_deck(&mut s, &mut out, 2, 48000);
+        assert!(out.iter().any(|sample| *sample > 0.01));
+        assert!(out[8000..].iter().all(|sample| *sample == 0.0));
+        assert!((s.pos - (5000.0 + frames)).abs() < 1e-7);
+        assert_eq!(s.dk.jog_left, Some(0.0));
+        drop(s);
+        send([0x80, 0x36, 0], 100.0);
+        assert_eq!(deck.lock().dk.jog, crate::deck::Jog::None);
+    }
+
+    #[test]
+    fn release_between_audio_callbacks_keeps_the_counted_loop_position() {
+        let (hub, _) = hub();
+        hub.routing.lock().performance = true;
+        let dev = platter_and_needle();
+        let deck = &hub.decks[0];
+        {
+            let mut s = deck.lock();
+            s.pos = 48.0;
+            s.loop_range = Some((10.0 / 44100.0, 50.0 / 44100.0));
+        }
+        hub.input_message(&dev, [0x90, 0x36, 127], 0.0, 0, 0);
+        hub.input_message(&dev, [0xb0, 0x22, 65], 10.0, 0, 0);
+        hub.input_message(&dev, [0x80, 0x36, 0], 12.0, 0, 0);
+        let s = deck.lock();
+        // One FLX4 count is 110.25 source frames, wrapping the 40-frame loop three times.
+        assert!((s.pos - 38.25).abs() < 1e-8);
+        assert_eq!(s.dk.jog, crate::deck::Jog::None);
+        assert_eq!(s.dk.jog_left, None);
+    }
+
+    #[test]
+    fn controller_release_and_timeout_preserve_a_pointer_takeover() {
+        let (hub, _) = hub();
+        hub.routing.lock().performance = true;
+        let dev = platter_and_needle();
+        let send = |bytes, time| hub.input_message(&dev, bytes, time, 0, 0);
+        send([0x90, 0x36, 127], 0.0);
+        send([0xb0, 0x22, 68], 10.0);
+        assert!(hub.decks[0].lock().dk.jog_left.unwrap() > 0.0);
+        {
+            let mut s = hub.decks[0].lock();
+            s.dk.jog = crate::deck::Jog::Touch;
+            s.dk.jog_left = None;
+        }
+        send([0xb0, 0x22, 67], 20.0);
+        let end = dev.jog.lock()[0].deadline().unwrap();
+        hub.idle_jogs(&dev, end);
+        send([0x80, 0x36, 0], 100.0);
+        assert_eq!(hub.decks[0].lock().dk.jog, crate::deck::Jog::Touch);
+        assert_eq!(hub.decks[0].lock().dk.jog_left, None);
+    }
+
+    #[test]
+    fn needle_strip_captures_the_touch_before_the_ui_receives_its_release() {
+        let (hub, rx) = hub();
+        hub.routing.lock().performance = true;
+        let dev = platter_and_needle();
+        for (i, bytes) in [[0x90, 0x36, 127], [0xb0, 3, 127], [0x80, 0x36, 0], [0xb0, 3, 0]].into_iter().enumerate() {
+            hub.input_message(&dev, bytes, i as f64, 0, 0);
+        }
+        let positions: Vec<_> = rx.try_iter().filter_map(|msg| match msg {
+            UiEvent::Control { deck, val: Val::Needle { step, held }, .. } => Some((deck, step, held)),
+            _ => None,
+        }).collect();
+        assert_eq!(positions, [(1, 400, true), (1, 0, false)]);
     }
 
     #[test]
@@ -798,7 +946,7 @@ mod tests {
         let dev = controller("wheel");
         let now = Instant::now();
         let out = dev.jog.lock()[0].rotate(400, 123_000.0, false, now);
-        hub.routed_jog(&mut hub.routing.lock(), &dev, 0, out, false);
+        hub.routed_jog(&mut hub.routing.lock(), &dev, 0, out, JogInput::Rotation(100.0));
         assert_ne!(hub.decks[0].lock().bend, 0.0);
         for time in (510..=580).step_by(10) {
             hub.input_message(&dev, [0xb0, 0x10, 80], time as f64, 0, 0);
@@ -824,7 +972,7 @@ mod tests {
         let dev = fader_controller("wheel");
         let last_turn = Instant::now() - Duration::from_millis(100);
         let out = dev.jog.lock()[0].rotate(400, 123_000.0, false, last_turn);
-        hub.routed_jog(&mut hub.routing.lock(), &dev, 0, out, false);
+        hub.routed_jog(&mut hub.routing.lock(), &dev, 0, out, JogInput::Rotation(100.0));
         assert_ne!(hub.decks[0].lock().bend, 0.0);
 
         let (tx, input) = crossbeam_channel::unbounded();

@@ -11,6 +11,45 @@ use std::collections::{HashMap, HashSet};
 
 pub const CUE_PLAYLIST_NAME: &str = "CUE Analysis Playlist";
 
+/// Playlist rows shared by the tree, column view and keyboard/controller navigation.
+pub(crate) struct PlaylistTreeFilter {
+    show_cue: bool,
+    matched: Option<HashSet<i64>>,
+}
+
+impl PlaylistTreeFilter {
+    pub(crate) fn new(app: &App) -> Self {
+        let query = if app.ext.tree_search_open { crate::smart::fold(app.ext.tree_search.trim()) } else { String::new() };
+        let mut filter = Self { show_cue: app.prefs.tree_item("CUE Analysis Playlist"), matched: None };
+        if !query.is_empty() {
+            let parents: HashMap<_, _> = app.nodes.iter().map(|n| (n.id, n.parent)).collect();
+            let mut matched = HashSet::new();
+            for n in app.nodes.iter().filter(|n| filter.includes(n) && crate::smart::fold(&n.name).contains(&query)) {
+                let mut id = n.id;
+                // A matching playlist reveals the path to it. Stop at an already visited
+                // ancestor, including cycles from malformed imported playlists.
+                while id != 0 && matched.insert(id) {
+                    let Some(parent) = parents.get(&id) else { break };
+                    id = *parent;
+                }
+            }
+            filter.matched = Some(matched);
+        }
+        filter
+    }
+
+    pub(crate) fn searching(&self) -> bool { self.matched.is_some() }
+
+    pub(crate) fn includes(&self, node: &PlaylistNode) -> bool {
+        (self.show_cue || node.kind != NodeKind::Playlist || node.name != CUE_PLAYLIST_NAME)
+            && self.matched.as_ref().is_none_or(|ids| ids.contains(&node.id))
+    }
+
+    pub(crate) fn first_child(&self, nodes: &[PlaylistNode], parent: i64) -> Option<i64> {
+        nodes.iter().filter(|n| n.parent == parent && self.includes(n)).min_by_key(|n| n.seq).map(|n| n.id)
+    }
+}
+
 /// Browser layout and panel settings kept with the preferences.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]

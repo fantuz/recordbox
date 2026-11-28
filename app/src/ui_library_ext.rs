@@ -1001,18 +1001,6 @@ pub fn root_menu_extra(app: &mut App, ui: &mut Ui) {
 }
 
 // ------------------------------------------------------------------------------------ tree bits
-/// Does this node, or anything inside it, match the tree search?
-pub fn node_matches(app: &App, id: i64, q: &str, depth: usize) -> bool {
-    if q.is_empty() {
-        return true;
-    }
-    let Some(n) = app.node(id) else { return false };
-    if crate::smart::fold(&n.name).contains(q) {
-        return true;
-    }
-    depth < 32 && app.nodes.iter().filter(|c| c.parent == id).any(|c| node_matches(app, c.id, q, depth + 1))
-}
-
 /// The tree search field (under the Tree View row while the magnifier tile is on).
 pub fn tree_search_field(app: &mut App, ui: &mut Ui) {
     let (row, _) = ui.allocate_exact_size(vec2(ui.available_width(), 21.0), Sense::hover());

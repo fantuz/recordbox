@@ -544,9 +544,9 @@ pub fn browser(app: &mut App, panel: &mut Ui) {
     // Which side was clicked last decides how bright the lit source tile is.
     if let Some(pp) = ui.input(|i| if i.pointer.primary_pressed() { i.pointer.interact_pos() } else { None }) {
         if strip.contains(pp) || tree.contains(pp) {
-            app.ext.tree_focus = true;
+            crate::prefs_ext::focus_browser_tree(app, true);
         } else if full.contains(pp) && !right_strip.contains(pp) {
-            app.ext.tree_focus = false;
+            crate::prefs_ext::focus_browser_tree(app, false);
         }
     }
     // One window at a time left of the right strip (references 10-14): My Tag 223 pt, Related
@@ -1126,7 +1126,8 @@ pub(crate) fn tree_pane(app: &mut App, ui: &mut Ui, drop: &mut Vec<(Rect, i64)>)
                     }
                     crate::ui_library_ext::root_menu_extra(app, ui);
                 });
-                node_rows(app, ui, 0, 1, drop);
+                let filter = crate::browser_ext::PlaylistTreeFilter::new(app);
+                node_rows(app, ui, 0, 1, drop, &filter);
                 crate::export::hotcue_bank::hot_cue_bank_tree(app, ui);
             });
         }
@@ -1148,20 +1149,14 @@ pub(crate) fn tree_pane(app: &mut App, ui: &mut Ui, drop: &mut Vec<(Rect, i64)>)
     }
 }
 
-fn node_rows(app: &mut App, ui: &mut Ui, parent: i64, depth: usize, drop: &mut Vec<(Rect, i64)>) {
+fn node_rows(app: &mut App, ui: &mut Ui, parent: i64, depth: usize, drop: &mut Vec<(Rect, i64)>, filter: &crate::browser_ext::PlaylistTreeFilter) {
     if depth == 1 && app.node_drag.is_some() && ui.input(|i| i.key_pressed(egui::Key::Escape)) {
         app.node_drag = None;
     }
-    let show_cue_pl = app.prefs.tree_item("CUE Analysis Playlist");
-    let kids: Vec<PlaylistNode> = app.nodes.iter().filter(|n| n.parent == parent && (show_cue_pl || !(n.kind == NodeKind::Playlist && n.name == crate::browser_ext::CUE_PLAYLIST_NAME))).cloned().collect();
-    // Tree search: only names that match (and the folders leading to them) are listed.
-    let query = if app.ext.tree_search_open { crate::smart::fold(app.ext.tree_search.trim()) } else { String::new() };
+    let kids: Vec<PlaylistNode> = app.nodes.iter().filter(|n| n.parent == parent && filter.includes(n)).cloned().collect();
     for n in kids {
-        if !query.is_empty() && !crate::ui_library_ext::node_matches(app, n.id, &query, 0) {
-            continue;
-        }
         let sel = app.view == View::Playlist(n.id);
-        let open = app.expanded.contains(&n.id) || !query.is_empty();
+        let open = app.expanded.contains(&n.id) || filter.searching();
         let (icon, count) = match n.kind {
             NodeKind::Folder => (if open { TreeIcon::FolderOpen } else { TreeIcon::FolderClosed }, None),
             NodeKind::Smart => (TreeIcon::Smart, n.smart.as_ref().map(|r| app.smart_tracks(r).len())),
@@ -1247,7 +1242,7 @@ fn node_rows(app: &mut App, ui: &mut Ui, parent: i64, depth: usize, drop: &mut V
         let nn = n.clone();
         resp.context_menu(|ui| crate::ui_library_ext::node_menu(app, ui, &nn));
         if n.kind == NodeKind::Folder && open {
-            node_rows(app, ui, n.id, depth + 1, drop);
+            node_rows(app, ui, n.id, depth + 1, drop, filter);
         }
     }
 }

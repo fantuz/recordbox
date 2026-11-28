@@ -397,7 +397,7 @@ pub fn run_action(app: &mut App, act: Act) {
         Act::GridDownbeat => app.grid_set_downbeat(),
         Act::GridTap => app.grid_tap(),
         Act::Focus => {
-            app.dialogs.ext.focus_tree = !app.dialogs.ext.focus_tree;
+            focus_browser_tree(app, !app.dialogs.ext.focus_tree);
             app.toast(if app.dialogs.ext.focus_tree { "Keyboard focus: Tree View" } else { "Keyboard focus: track list" });
         }
         Act::Filter => crate::menus::handle(app, "filter"),
@@ -407,34 +407,41 @@ pub fn run_action(app: &mut App, act: Act) {
 }
 
 /// Playlists and folders as the tree shows them (folders that are open show their children).
-pub fn visible_nodes(nodes: &[PlaylistNode], expanded: &std::collections::HashSet<i64>) -> Vec<i64> {
-    fn walk(nodes: &[PlaylistNode], expanded: &std::collections::HashSet<i64>, parent: i64, out: &mut Vec<i64>, depth: u8) {
-        if depth > 32 {
-            return;
-        }
-        let mut kids: Vec<&PlaylistNode> = nodes.iter().filter(|n| n.parent == parent).collect();
-        kids.sort_by_key(|n| n.seq);
-        for k in kids {
-            out.push(k.id);
-            if k.kind == NodeKind::Folder && expanded.contains(&k.id) {
-                walk(nodes, expanded, k.id, out, depth + 1);
-            }
+fn visible_nodes(nodes: &[PlaylistNode], expanded: &std::collections::HashSet<i64>, searching: bool, includes: impl Fn(&PlaylistNode) -> bool) -> Vec<i64> {
+    use std::collections::HashMap;
+    let mut children: HashMap<i64, Vec<&PlaylistNode>> = HashMap::new();
+    for node in nodes.iter().filter(|n| (n.parent == 0 || searching || expanded.contains(&n.parent)) && includes(n)) {
+        children.entry(node.parent).or_default().push(node);
+    }
+    let mut out = Vec::new();
+    let mut stack = vec![(0, true)];
+    while let Some((parent, folder)) = stack.pop() {
+        if parent != 0 { out.push(parent); }
+        if !folder { continue; }
+        if let Some(mut kids) = children.remove(&parent) {
+            kids.sort_by_key(|n| n.seq);
+            stack.extend(kids.iter().rev().map(|n| (n.id, n.kind == NodeKind::Folder)));
         }
     }
-    let mut out = vec![];
-    walk(nodes, expanded, 0, &mut out, 0);
     out
+}
+
+pub(crate) fn focus_browser_tree(app: &mut App, tree: bool) {
+    app.ext.tree_focus = tree;
+    app.dialogs.ext.focus_tree = tree;
 }
 
 /// Up/Down while the keyboard focus is on the Tree View: the previous/next playlist or
 /// folder (Collection sits above the first one).
 pub fn tree_step(app: &mut App, dir: i32) {
-    let vis = visible_nodes(&app.nodes, &app.expanded);
+    let filter = crate::browser_ext::PlaylistTreeFilter::new(app);
+    let vis = visible_nodes(&app.nodes, &app.expanded, filter.searching(), |n| filter.includes(n));
     let cur = match &app.view {
         View::Playlist(id) => vis.iter().position(|x| x == id).map(|i| i as i64),
         _ => None,
     };
-    let next = cur.unwrap_or(-1) + dir as i64;
+    if vis.is_empty() && dir > 0 { return; }
+    let next = (cur.unwrap_or(-1) + i64::from(dir)).min(vis.len() as i64 - 1);
     if next < 0 {
         app.side = SideMode::Collection;
         app.set_view(View::Collection);
@@ -969,8 +976,8 @@ mod tests {
         let n = |id, parent, seq, kind| PlaylistNode { id, parent, name: format!("n{id}"), kind, seq, smart: None };
         let nodes = vec![n(1, 0, 1, NodeKind::Folder), n(2, 1, 0, NodeKind::Playlist), n(3, 0, 0, NodeKind::Playlist), n(4, 1, 1, NodeKind::Playlist)];
         let mut open = std::collections::HashSet::new();
-        assert_eq!(visible_nodes(&nodes, &open), vec![3, 1]);
+        assert_eq!(visible_nodes(&nodes, &open, false, |_| true), vec![3, 1]);
         open.insert(1);
-        assert_eq!(visible_nodes(&nodes, &open), vec![3, 1, 2, 4]);
+        assert_eq!(visible_nodes(&nodes, &open, false, |_| true), vec![3, 1, 2, 4]);
     }
 }

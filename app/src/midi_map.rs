@@ -20,6 +20,9 @@ pub enum Val {
     Velocity(u8),
     /// Absolute position `v` between `lo` and `hi`, with `mid` the value of the centre.
     Abs { v: i32, lo: i32, mid: i32, hi: i32 },
+    /// Needle strip after dispatch: one of 401 positions and the physical touch
+    /// state when the message arrived, even if the jog is released before the UI runs.
+    Needle { step: u16, held: bool },
     /// The byte as sent (RawValue).
     Raw(u8),
     /// Relative steps (Rotary after acceleration, Difference).
@@ -29,6 +32,32 @@ pub enum Val {
 }
 
 impl Val {
+    /// Normalize an absolute MIDI control into the native 14-bit range, with 8192
+    /// steps below centre and 8191 above. Native positions pass through exactly.
+    pub fn position14(self) -> Option<i32> {
+        let Val::Abs { v, lo, mid, hi } = self else { return None };
+        if hi <= lo { return None; }
+        let v = v.clamp(lo, hi);
+        if (lo, mid, hi) == (0, 8192, 16383) { return Some(v); }
+        let scale = |a: i32, b: i32, steps: i64| {
+            let span = i64::from(b) - i64::from(a);
+            (((i64::from(v) - i64::from(a)) * steps + span / 2) / span) as i32
+        };
+        Some(if mid <= lo || mid >= hi { scale(lo, hi, 16383) }
+            else if v <= mid { scale(lo, mid, 8192) }
+            else { 8192 + scale(mid, hi, 8191) })
+    }
+
+    /// The hardware needle strip has 401 positions. Preserve the traced scale factor
+    /// through the conversion: a one-step difference can be seconds on a long track.
+    pub fn needle_step(self) -> Option<u16> {
+        let raw = self.position14().or_else(|| match self {
+            Val::Raw(v) => Some((i32::from(v) * 16383 + 63) / 127),
+            _ => None,
+        })?;
+        Some(((raw as f32 * 0.024416) as u16).min(400))
+    }
+
     /// An absolute value as 0..1, the centre at exactly 0.5.
     pub fn unit(&self) -> Option<f32> {
         match *self {
@@ -820,12 +849,12 @@ impl LearnFilter {
         self.prev = [0; 3];
     }
     pub fn feed(&mut self, msg: &[u8]) -> Option<u16> {
-        if msg.len() != 3 || msg[0] >= 0xF0 {
-            return None;
-        }
-        let (cur, prev) = (msg[0] & 0xF0, self.prev[0] & 0xF0);
-        let lsb = cur == 0xB0 && prev == 0xB0 && self.prev[1] as u16 + 32 == msg[1] as u16;
-        let release = prev == 0x90 && self.prev[2] != 0 && self.prev[1] == msg[1] && (cur == 0x80 || (cur == 0x90 && msg[2] == 0));
+        let &[status @ (0x80..=0xBF | 0xE0..=0xEF), data @ 0..=127, value @ 0..=127] = msg else { return None };
+        let prev = self.prev;
+        let same_channel = status & 0x0F == prev[0] & 0x0F;
+        let lsb = status & 0xF0 == 0xB0 && status == prev[0] && prev[1] < 32 && prev[1] + 32 == data;
+        let release = same_channel && prev[0] & 0xF0 == 0x90 && prev[2] != 0 && prev[1] == data
+            && (status & 0xF0 == 0x80 || (status & 0xF0 == 0x90 && value == 0));
         self.prev = [msg[0], msg[1], msg[2]];
         if lsb || release {
             None
@@ -928,6 +957,9 @@ pub struct TempoTakeover {
     pub state: u8,
     /// Where the hardware slider stands (percent), for the on-screen ghost marker.
     pub slider: Option<f64>,
+    /// Position on the physical fader, independent of the deck's current range.
+    pub raw: Option<i32>,
+    notice: bool,
 }
 
 impl TempoTakeover {
@@ -935,6 +967,25 @@ impl TempoTakeover {
     /// on screen.
     pub fn arm(&mut self) {
         self.state = 0;
+        self.notice = false;
+    }
+
+    /// Judge the last physical position immediately when software changes the target.
+    /// This updates the arrows and ghost marker without applying a tempo change.
+    pub fn rearm(&mut self, deck: f64, loaded: bool, follower: bool, range_pct: f64) {
+        self.arm();
+        if let Some(raw) = self.raw {
+            self.position(raw, deck, loaded, follower, range_pct);
+        }
+    }
+
+    pub fn position(&mut self, raw: i32, deck: f64, loaded: bool, follower: bool, range_pct: f64) -> Option<f64> {
+        self.raw = Some(raw);
+        self.feed(tempo_slider_percent(raw, range_pct), deck, loaded, follower)
+    }
+
+    pub fn take_notice(&mut self) -> bool {
+        std::mem::take(&mut self.notice)
     }
 
     /// The slider moved to `slider` percent while the deck is at `deck` percent. Returns the
@@ -956,6 +1007,7 @@ impl TempoTakeover {
             } else {
                 3
             };
+            self.notice = matches!(self.state, 1 | 3);
         }
         match self.state {
             1 | 2 if !follower && slider >= deck - NEAR => self.state = 5,
@@ -964,12 +1016,13 @@ impl TempoTakeover {
             3 | 4 => self.state = if follower { 4 } else { 3 },
             _ => {}
         }
+        if self.state == 5 || follower { self.notice = false; }
         (self.state == 5 && !follower).then_some(slider)
     }
 
     /// The direction LEDs: (TempoDown, TempoUp) - which way to move the slider.
     pub fn leds(&self) -> (bool, bool) {
-        (matches!(self.state, 3 | 4), matches!(self.state, 1 | 2))
+        (self.state == 3, self.state == 1)
     }
 }
 
@@ -1054,7 +1107,7 @@ pub struct Jog {
     pub rpm: f64,
     pub vinyl: bool,
     pub spin_over: u32,
-    /// 0 idle, 1 scratch, 2 spin, 4 bend.
+    /// 0 idle, 1 scratch, 4 bend.
     pub state: u8,
     touched: bool,
     last_t: Option<f64>,
@@ -1150,12 +1203,12 @@ impl Jog {
                 if slow {
                     self.slow_releases += 1;
                 }
+                // The engine resumes normal transport on either type of release.
+                self.state = 0;
                 if slow || self.slow_releases >= self.spin_over {
                     self.slow_releases = 0;
-                    self.state = 0;
                     JogOut::Release
                 } else {
-                    self.state = 2;
                     JogOut::Spin(self.last_speed)
                 }
             }
@@ -1629,6 +1682,14 @@ mod tests {
     }
 
     #[test]
+    fn needle_steps_keep_native_boundary_values_and_custom_map_endpoints() {
+        let native = |v| Val::Abs { v, lo: 0, mid: 8192, hi: 16383 }.needle_step();
+        assert_eq!([native(0), native(982), native(983), native(16383)], [Some(0), Some(23), Some(24), Some(400)]);
+        assert_eq!(Val::Raw(127).needle_step(), Some(400));
+        assert_eq!(Val::Abs { v: 64, lo: 0, mid: 64, hi: 127 }.needle_step(), Some(200));
+    }
+
+    #[test]
     fn jog_rows() {
         let mut m = map(&["JogScratch,JogScratch,JogRotate,B022,0,1,,,,,,,,RO,", "JogSearch,JogSearch,Difference,B029,0,1,,,,,,,,RO,", "JogTouch,JogTouch,JogTouch,9036,0,1,,,,,,,,RO,"]);
         let e = m.handle(&[0xB0, 0x22, 0x41], 12.5).unwrap();
@@ -1715,6 +1776,23 @@ mod tests {
         // Two-byte messages and SysEx are not shown to Learn.
         assert_eq!(f.feed(&[0xC0, 0x05]), None);
         assert_eq!(f.feed(&[0xF0, 0x7E, 0xF7]), None);
+    }
+
+    #[test]
+    fn different_channels_and_independent_ccs_remain_learnable() {
+        let mut f = LearnFilter::default();
+        assert_eq!(f.feed(&[0xB0, 2, 35]), Some(0xB002));
+        assert_eq!(f.feed(&[0xB1, 34, 4]), Some(0xB122));
+        // CC 34 is an LSB on its own channel; CC 66 is a separate control.
+        assert_eq!(f.feed(&[0xB1, 66, 127]), Some(0xB142));
+        assert_eq!(f.feed(&[0x90, 11, 127]), Some(0x900B));
+        assert_eq!(f.feed(&[0x91, 11, 0]), Some(0x910B));
+        assert_eq!(f.feed(&[0xB7, 31, 64]), Some(0xB71F));
+        assert_eq!(f.feed(&[0xB7, 63, 74]), None);
+        assert_eq!(f.feed(&[0x01, 12, 0]), None);
+        assert_eq!(f.feed(&[0xC0, 12, 0]), None);
+        assert_eq!(f.feed(&[0xB0, 200, 0]), None);
+        assert_eq!(f.feed(&[0xB0, 4, 255]), None);
     }
 
     #[test]
@@ -1851,6 +1929,36 @@ mod tests {
     }
 
     #[test]
+    fn physical_tempo_positions_keep_the_center_and_each_native_step() {
+        for v in 0..=16383 {
+            assert_eq!(Val::Abs { v, lo: 0, mid: 8192, hi: 16383 }.position14(), Some(v));
+        }
+        let coarse = |v| Val::Abs { v, lo: 10, mid: 72, hi: 120 }.position14();
+        assert_eq!([coarse(0), coarse(41), coarse(72), coarse(96), coarse(127)],
+            [Some(0), Some(4096), Some(8192), Some(12288), Some(16383)]);
+        assert_eq!(Val::Abs { v: 9, lo: 9, mid: 9, hi: 9 }.position14(), None);
+        assert_eq!(Val::Raw(64).position14(), None);
+    }
+
+    #[test]
+    fn tempo_pickup_rearms_at_the_same_raw_position_under_another_range() {
+        let mut t = TempoTakeover::default();
+        t.rearm(4.0, true, false, 10.0);
+        assert_eq!(t.state, 0); // a controller that has never moved
+        assert_eq!(t.position(4096, -5.0, true, false, 10.0), Some(-5.0));
+        t.rearm(-4.0, true, true, 16.0);
+        assert_eq!((t.slider, t.state, t.leds(), t.take_notice()), (Some(-8.0), 2, (false, false), false));
+        t.rearm(-4.0, true, false, 16.0);
+        assert_eq!((t.state, t.leds(), t.take_notice()), (1, (false, true), true));
+        assert!(!t.take_notice());
+        assert_eq!(t.position(5120, -4.0, true, false, 16.0), None);
+        assert!(t.position(6656, -4.0, true, false, 16.0).is_some()); // crossed target
+        t.rearm(0.0, true, false, 16.0);
+        t.position(8192, 0.0, true, false, 16.0);
+        assert!(!t.take_notice()); // matched before the UI dispatched the pending hint
+    }
+
+    #[test]
     fn tempo_slider_percent_and_soft_takeover() {
         // The two halves: 8191 steps up, 8192 down.
         assert_eq!(tempo_slider_percent(8192, 10.0), 0.0);
@@ -1939,7 +2047,7 @@ mod tests {
         j.rotate(-40, 2000.0, true);
         j.rotate(-40, 2010.0, true);
         assert_eq!(j.touch(false, true), JogOut::Spin(-8.0));
-        assert_eq!(j.state, 2);
+        assert_eq!(j.state, 0);
         // Vinyl off on a playing deck: the platter top bends; on a stopped deck it scratches.
         let mut j = Jog::new(720.0);
         j.vinyl = false;

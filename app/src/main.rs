@@ -599,6 +599,7 @@ impl eframe::App for Gui {
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        midi::trace::finish();
         prefs_bridge::on_exit(&mut self.app);
         self.app.save_prefs();
         let _ = self.app.db.conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);");
@@ -1030,6 +1031,17 @@ fn main() -> eframe::Result<()> {
         println!("Usage: recordbox [--disable-load] [--disable-play] [--mp3-timeline legacy|rekordbox] [--screenshot FILE] [--stems-cpu] [--stems-status | --stems-device | --compare-stems FILE]\n\n  --disable-load  Disable loading tracks into decks for this session.\n  --disable-play  Disable audio playback and previews for this session.\n  --mp3-timeline legacy|rekordbox\n                  Select the MP3 sample clock for this session. Legacy opens your usual library.\n                  Rekordbox uses a separate collection and a different MP3 time origin.\n                  Audition imported cues and grids before export or write-back.\n  --screenshot    Save a picture of the window to FILE and exit.\n  --stems-cpu     Use CPU separation for this session.\n  --stems-status  Show build, system memory and local model status without starting inference.\n  --stems-device  Check the selected separation device and exit.\n  --compare-stems FILE  Compare GPU and CPU separation of one local track and exit.");
         println!("USB inspection: recordbox --inspect-onelibrary USB_ROOT [--playlist ID [--classic-playlist ID]]");
         println!("  --midi-coverage FILE  Report software support for MIDI inputs and outputs in one mapping CSV and exit.");
+        println!("  --midi-ports          List the available input and output port names.");
+        println!("  --midi-probe PORT [SECONDS]    Listen to one named controller input (default 10 s).");
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
+        println!("  --midi-virtual NAME [SECONDS]  Create a temporary virtual controller that sends a test note.");
+        return Ok(());
+    }
+    if let Some(result) = midi::diagnostics::cli(&args[1..]) {
+        if let Err(error) = result {
+            eprintln!("MIDI diagnostic failed: {error:#}");
+            std::process::exit(2);
+        }
         return Ok(());
     }
     let timeline = audio::Mp3Timeline::from_args(&args[1..]).unwrap_or_else(|error| {
