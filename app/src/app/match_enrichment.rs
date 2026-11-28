@@ -330,6 +330,11 @@ fn run_batch<T>(
     send(Event::End(Report { stats, attempted_tracks: attempted.len(), blocked_tracks: blocked }));
 }
 
+fn counted(count: usize, singular: &str, plural: &str) -> String {
+    let noun = if count == 1 { singular } else { plural };
+    format!("{count} {noun}")
+}
+
 impl App {
     pub(crate) fn match_tags(&self, id: i64) -> &[MatchTags] {
         self.match_enrichment.evidence.get(&id).filter(|(key, _)| self.track(id).is_some_and(|t| key.matches(t)))
@@ -427,7 +432,7 @@ impl App {
             Ok(thread) => {
                 let e = &mut self.match_enrichment;
                 e.worker = Some(Worker { rx, cancel, thread, discarded: false });
-                e.status = format!("OneTagger lookup queued for {total} track(s).");
+                e.status = format!("OneTagger lookup queued for {}.", counted(total, "track", "tracks"));
                 e.total = total;
                 e.saved = 0;
                 e.checked = 0;
@@ -524,17 +529,22 @@ impl App {
                 let toast = format!("OneTagger · {outcome} · {} saved", e.saved);
                 let reason = e.error.take().unwrap_or_else(|| outcome.to_owned());
                 e.worker.take();
-                e.status = format!("OneTagger · {reason}. Saved {} source records. Skipped {} ineligible or fully cached tracks.", e.saved, e.eligible_skips);
+                e.status = format!("OneTagger · {reason}. Saved {}. Skipped {}.",
+                    counted(e.saved, "source record", "source records"),
+                    counted(e.eligible_skips, "ineligible or fully cached track", "ineligible or fully cached tracks"));
                 if let Some(report) = report {
                     use std::fmt::Write;
-                    let _ = write!(e.status, " Attempted {} of {} eligible tracks. {} blocked by provider pauses.", report.attempted_tracks, e.total, report.blocked_tracks);
-                    if e.stale > 0 { let _ = write!(e.status, " Discarded {} results for changed or removed tracks.", e.stale); }
+                    let _ = write!(e.status, " Attempted {} of {}. {} blocked by provider pauses.", report.attempted_tracks,
+                        counted(e.total, "eligible track", "eligible tracks"), report.blocked_tracks);
+                    if e.stale > 0 { let _ = write!(e.status, " Discarded {} for changed or removed tracks.", counted(e.stale, "result", "results")); }
                     for &provider in &e.sources {
                         let idx = provider_index(provider);
                         let stat = &report.stats[idx];
-                        let _ = write!(e.status, " {} · {} hits, {} misses, {} cached tracks", provider.name(), stat.hits, stat.misses, e.cached[idx]);
+                        let _ = write!(e.status, " {} · {}, {}, {}", provider.name(),
+                            counted(stat.hits, "hit", "hits"), counted(stat.misses, "miss", "misses"),
+                            counted(e.cached[idx], "cached track", "cached tracks"));
                         if let Some(reason) = &stat.paused {
-                            let _ = write!(e.status, ", paused ({reason}), {} later queries skipped", stat.skipped);
+                            let _ = write!(e.status, ", paused ({reason}), {} skipped", counted(stat.skipped, "later query", "later queries"));
                         }
                         e.status.push('.');
                     }
@@ -640,6 +650,7 @@ mod tests {
         assert!(!app.match_enrichment_running(), "canceled replies held the report behind one UI frame per hit");
         assert!(app.match_enrichment_status().contains("library stayed busy"));
         assert!(app.match_enrichment_status().contains("Deezer · 0 hits"));
+        assert!(app.match_enrichment_status().contains("Saved 1 source record."));
         assert_eq!(app.toasts.last().unwrap().text, "OneTagger · Stopped · 1 saved");
 
         let (old_catalog, worker) = test_worker();
