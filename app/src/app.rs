@@ -4205,6 +4205,8 @@ impl App {
             let keep = (s.pos, s.gain);
             s.playing = false;
             s.audio = None;
+            s.dk.jog = crate::deck::Jog::None;
+            s.dk.jog_left = None;
             s.pos = 0.0;
             s.loop_range = None;
             s.metronome = None;

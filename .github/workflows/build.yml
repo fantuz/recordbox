@@ -324,6 +324,14 @@ jobs:
             export::usb_fix_test::a1_aligned_rows_paginate_at_row_group_boundaries_without_overlap; do
             cargo test --manifest-path app/Cargo.toml --release --locked "$test_filter" -- --test-threads=1
           done
+      - name: Check portable MIDI input, feedback and diagnostics
+        shell: bash
+        run: |
+          for suite in midi::universal_tests:: midi::browser_transport_tests:: midi::tempo_tests:: midi::ports:: \
+            midi_map::tests:: ui_midi::tests:: midi::trace::tests:: midi::diagnostics::tests::; do
+            cargo test --manifest-path app/Cargo.toml --release --locked --bin recordbox "$suite" -- --test-threads=1 | tee "$RUNNER_TEMP/midi-tests.log"
+            grep -Eq '^test result: ok\. [1-9][0-9]* passed;' "$RUNNER_TEMP/midi-tests.log"
+          done
       - name: Check hardware setup, STEMS deck and cache behavior, and track matching
         shell: bash
         run: |
@@ -340,7 +348,7 @@ jobs:
         if: runner.os == 'Linux'
         shell: bash
         run: |
-          for test_filter in opus_quad midi_map::tests:: midi::grv6_groove_tests:: midi::performance::tests:: \
+          for test_filter in opus_quad midi::grv6_groove_tests:: midi::performance::tests:: \
             midi::tests::hires_feedback midi::tests::channel_meter_segments analysis::rb_hp::tempo::tests:: \
             artwork_thumbs::tests:: motion::tests:: ui_feel::tests:: \
             ui_browser::collection_render_tests:: fx_echo_plus::tests:: fx::tests::prepared_rack \

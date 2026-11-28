@@ -29,8 +29,8 @@ impl Replay {
         let (map, factory) = hub.load_map(DEVICE);
         assert!(!factory);
         assert_eq!(map.rejected, 0);
-        let mut device = Device::mapped(DEVICE, DEVICE.to_owned(), map, factory, None);
-        Arc::get_mut(&mut device).unwrap().has_output = true;
+        let device = Device::mapped(DEVICE, DEVICE.to_owned(), map, factory, None);
+        device.output_ready.store(true, std::sync::atomic::Ordering::Relaxed);
         hub.routing.lock().performance = true;
         hub.snap.lock().count = 4;
         Self {

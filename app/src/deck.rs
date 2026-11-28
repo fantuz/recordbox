@@ -87,6 +87,8 @@ pub struct Engine {
     pub slip_reverse: bool,
     pub(crate) slip_return: bool,
     pub jog: Jog,
+    /// Unrendered controller movement in source frames. Pointer scratches are continuous.
+    pub jog_left: Option<f64>,
     /// Vinyl Speed Adjust in ms: Release/Start and Touch/Brake.
     pub start_ms: f32,
     pub stop_ms: f32,
@@ -116,9 +118,15 @@ pub struct Engine {
     pub nxs: NxsSteps,
 }
 
+impl Engine {
+    pub fn scratch_active(&self) -> bool {
+        matches!(self.jog, Jog::Speed(_)) && self.jog_left != Some(0.0)
+    }
+}
+
 impl Default for Engine {
     fn default() -> Self {
-        Engine { reverse: false, slip_reverse: false, slip_return: false, jog: Jog::None, start_ms: 1.0, stop_ms: 1.0, bend_slope: 0.0, bend_acc: 0.0, warp: None, scan_grain: 0.0, sync_rate: 1.0, route: 255, xf: [1.0; 2], vel: 0.0, arm_loop: None, eqsw: EqSwitch::default(), nxs: NxsSteps::default() }
+        Engine { reverse: false, slip_reverse: false, slip_return: false, jog: Jog::None, jog_left: None, start_ms: 1.0, stop_ms: 1.0, bend_slope: 0.0, bend_acc: 0.0, warp: None, scan_grain: 0.0, sync_rate: 1.0, route: 255, xf: [1.0; 2], vel: 0.0, arm_loop: None, eqsw: EqSwitch::default(), nxs: NxsSteps::default() }
     }
 }
 
@@ -842,7 +850,13 @@ impl App {
         if on {
             self.sync_lost();
         }
-        self.player.state.lock().dk.jog = self.deck.x.dk.jog;
+        {
+            let mut s = self.player.state.lock();
+            if on || s.dk.jog_left.is_none() {
+                s.dk.jog = self.deck.x.dk.jog;
+                s.dk.jog_left = None;
+            }
+        }
         // (Controller > Deck > JOG: "After turning on the cue button and spinning the jog, the
         // track returns to the cue point and pause." Off, the deck plays on from the jog.)
         if !on && self.deck.cue_preview && self.prefs.rb.jog_sampler_mode {
@@ -869,7 +883,9 @@ impl App {
         }
         self.sync_lost();
         self.deck.x.dk.jog = Jog::Speed(speed);
-        self.player.state.lock().dk.jog = Jog::Speed(speed);
+        let mut s = self.player.state.lock();
+        s.dk.jog_left = None;
+        s.dk.jog = Jog::Speed(speed);
         true
     }
 
@@ -1271,24 +1287,29 @@ impl App {
         if !self.performance() {
             return false;
         }
+        let step = (frac.clamp(0.0, 1.0) * 400.0) as u16;
+        self.needle_at_step(step, self.prefs.deck.needle_lock, self.deck.x.dk.jog != Jog::None);
+        true
+    }
+
+    /// The overview and controller strip share the 401 seek positions and loop exit rule.
+    pub(crate) fn needle_at_step(&mut self, step: u16, lock: bool, platter_held: bool) {
         if self.deck.audio.is_none() {
-            return true;
+            return;
         }
-        if self.prefs.deck.needle_lock && self.playing() && self.deck.x.dk.jog == Jog::None {
+        if lock && self.playing() && !platter_held {
             if !self.toasts.iter().any(|t| t.text.starts_with("Needle Lock")) {
                 self.toast_err("Needle Lock. Not available during playback.");
             }
-            return true;
+            return;
         }
-        let step = (frac.clamp(0.0, 1.0) * 400.0).floor();
-        let t = step * 0.0025 * self.deck.duration;
+        let t = f64::from(step.min(400)) * 0.0025 * self.deck.duration;
         if let Some((a, b)) = self.loop_active() {
             if t < a || t > b {
                 self.loop_exit();
             }
         }
         self.seek(t);
-        true
     }
 
     /// Instant doubles from deck `src` onto the active deck (the platter dragged from one

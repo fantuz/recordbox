@@ -721,7 +721,7 @@ impl Player {
     pub fn transport_running(&self) -> bool {
         self.decks.iter().any(|deck| {
             let s = deck.lock();
-            s.playing || s.search != 0.0 || matches!(s.dk.jog, crate::deck::Jog::Speed(_)) || crate::groove::wants_render(&s)
+            s.playing || s.search != 0.0 || s.dk.scratch_active() || crate::groove::wants_render(&s)
         })
     }
 
@@ -1654,7 +1654,7 @@ pub fn render_deck_cue(s: &mut PlayState, out: &mut [f32], cue: &mut [f32], chan
     let jog = s.dk.jog;
     let top = (FADE_N - 1) as u8;
     // Nothing sounds and nothing moves: the deck rests where it is.
-    if !s.playing && !searching && !matches!(jog, Jog::Speed(_)) && (!smooth || (s.dsp.att == 0 && s.dsp.ramp == 0)) && !crate::groove::wants_render(s) {
+    if !s.playing && !searching && !s.dk.scratch_active() && (!smooth || (s.dsp.att == 0 && s.dsp.ramp == 0) || s.dk.jog_left == Some(0.0)) && !crate::groove::wants_render(s) {
         s.search_count = 0;
         s.dsp.st.active = false;
         s.dsp.expect = s.pos;
@@ -1844,8 +1844,10 @@ pub fn render_deck_cue(s: &mut PlayState, out: &mut [f32], cue: &mut [f32], chan
     let cue_gain = if cue.len() * channels.max(1) >= out.len() * 2 { s.cue_gain * s.gain } else { 0.0 };
     // Groove Circuit: this deck's DRUM SWAP slots (and its drums under DRUM RELEASE FX).
     let gc = crate::groove::deck_block(s, &audio, speed, &mut stem_target, out.len() / channels.max(1), rate);
+    let counted = !searching && matches!(jog, Jog::Speed(_)) && s.dk.jog_left.is_some();
     for (fi, f) in out.chunks_mut(channels).enumerate() {
         let d = &mut s.dsp;
+        let target = if counted && s.dk.jog_left == Some(0.0) { 0.0 } else { target };
         // ---- speed
         match d.ramp {
             1 => {
@@ -1993,7 +1995,12 @@ pub fn render_deck_cue(s: &mut PlayState, out: &mut [f32], cue: &mut [f32], chan
         let plain = !stretch || d.pending || d.ramp != 0 || jog != Jog::None || searching || d.vel != dir * speed;
         let (mut l, mut r) = if plain {
             d.st.active = false;
-            src.at(p)
+            if counted && target == 0.0 {
+                // Holding a nonzero PCM sample would produce a DC offset.
+                (0.0, 0.0)
+            } else {
+                src.at(p)
+            }
         } else {
             d.st.frame(&src, p, pitch * step * dir, hop)
         };
@@ -2099,7 +2106,18 @@ pub fn render_deck_cue(s: &mut PlayState, out: &mut [f32], cue: &mut [f32], chan
             f[0] += 0.5 * (l + r) * vol + click;
         }
         // ---- move on
-        d.snd += step * d.vel;
+        let mut advance = step * d.vel;
+        if counted {
+            // The final output frame may cover a fraction of a source frame.
+            let left = s.dk.jog_left.as_mut().unwrap();
+            advance = advance.clamp(left.min(0.0), left.max(0.0));
+            *left -= advance;
+            if left.abs() < 1e-9 {
+                *left = 0.0;
+                s.dk.jog = Jog::Speed(0.0);
+            }
+        }
+        d.snd += advance;
         if jog != Jog::None {
             d.snd = d.snd.clamp(0.0, last);
         }

@@ -397,7 +397,7 @@ pub fn run_action(app: &mut App, act: Act) {
         Act::GridDownbeat => app.grid_set_downbeat(),
         Act::GridTap => app.grid_tap(),
         Act::Focus => {
-            app.dialogs.ext.focus_tree = !app.dialogs.ext.focus_tree;
+            focus_browser_tree(app, !app.dialogs.ext.focus_tree);
             app.toast(if app.dialogs.ext.focus_tree { "Keyboard focus: Tree View" } else { "Keyboard focus: track list" });
         }
         Act::Filter => crate::menus::handle(app, "filter"),
@@ -426,6 +426,11 @@ pub fn visible_nodes(nodes: &[PlaylistNode], expanded: &std::collections::HashSe
     out
 }
 
+pub(crate) fn focus_browser_tree(app: &mut App, tree: bool) {
+    app.ext.tree_focus = tree;
+    app.dialogs.ext.focus_tree = tree;
+}
+
 /// Up/Down while the keyboard focus is on the Tree View: the previous/next playlist or
 /// folder (Collection sits above the first one).
 pub fn tree_step(app: &mut App, dir: i32) {
@@ -434,7 +439,8 @@ pub fn tree_step(app: &mut App, dir: i32) {
         View::Playlist(id) => vis.iter().position(|x| x == id).map(|i| i as i64),
         _ => None,
     };
-    let next = cur.unwrap_or(-1) + dir as i64;
+    if vis.is_empty() && dir > 0 { return; }
+    let next = (cur.unwrap_or(-1) + i64::from(dir)).min(vis.len() as i64 - 1);
     if next < 0 {
         app.side = SideMode::Collection;
         app.set_view(View::Collection);

@@ -114,11 +114,20 @@ pub struct Win {
     edit: Option<(usize, usize, String)>,
     /// What the last edit ran into: the input-side and the output-side entry.
     clash: (Option<crate::midi_csv::Entry>, Option<crate::midi_csv::Entry>),
-    sort: Option<(usize, bool)>,
+    sort: HashMap<usize, (usize, bool)>,
     /// Where things were drawn, by name (for the scripted check).
     pub at: HashMap<String, Pos2>,
     /// LEARN wrote a code (for the scripted check).
     pub learned: u32,
+}
+
+impl Win {
+    fn learn_target(&self) -> Option<(usize, usize)> {
+        if !self.open || !self.learn || self.ask.is_some() || self.alert.is_some() || self.edit.is_some() {
+            return None;
+        }
+        Some((self.tab, self.sel.get(self.tab).copied().flatten()?))
+    }
 }
 
 fn tab_of(i: usize) -> Tab {
@@ -151,9 +160,12 @@ pub fn header_button(app: &mut App, ui: &mut Ui, r: Rect) {
     ui.painter().text(r.center() + vec2(0.0, 0.5), Align2::CENTER_CENTER, "MIDI", caps(10.7), col);
     app.midi.win.at.insert("MIDI".into(), r.center());
     let base = "MIDI LEARN :\nSelect a function, enable LEARN, then move a control on the selected device. LEARN pauses its current mappings until you turn it off.";
-    let tip = if !app.midi.paused_inputs.is_empty() {
+    let mut tip = if !app.midi.paused_inputs.is_empty() {
         format!("{base}\nMIDI input is paused for {} because the names conflict. Disconnect one or give their inputs distinct names.", app.midi.paused_inputs.join(", "))
     } else if enabled { base.to_string() } else { format!("{base}\nThis can be used after a MIDI controller is connected.") };
+    if let Some(path) = crate::midi::trace::path() {
+        tip.push_str(&format!("\nRecording MIDI diagnostics to {}", path.display()));
+    }
     if resp.on_hover_text(tip).clicked() && enabled {
         if app.midi.win.open {
             close(&mut app.midi);
@@ -207,7 +219,9 @@ pub fn set_learn(midi: &mut MidiState, on: bool) {
 pub fn select_device(midi: &mut MidiState, name: &str) {
     set_learn(midi, false);
     midi.win.device = name.to_string();
-    midi.win.edit = None;
+    midi.win.ask = None;
+    midi.win.alert = None;
+    midi.win.clash = (None, None);
     rebuild_rows(midi);
 }
 
@@ -218,8 +232,9 @@ pub fn rebuild_rows(midi: &mut MidiState) {
     let rows = device(midi).map_or_else(|| vec![vec![]; TABS.len()], |dev| rows_of(&dev.map.lock()));
     let w = &mut midi.win;
     w.rows = rows;
+    w.edit = None;
     w.sel = vec![None; TABS.len()];
-    w.sort = None;
+    w.sort.clear();
 }
 
 fn rows_of(map: &crate::midi_map::MidiMap) -> Vec<Vec<LearnRow>> {
@@ -263,10 +278,7 @@ pub fn devices_changed(app: &mut App, removed: &[String]) {
     let name = app.midi.win.device.clone();
     if !name.is_empty() && (removed.contains(&name) || !app.midi.devices.contains(&name)) {
         // The selected controller was unplugged.
-        app.midi.win.learn = false;
-        app.midi.win.device.clear();
-        app.midi.win.edit = None;
-        rebuild_rows(&mut app.midi);
+        select_device(&mut app.midi, "");
     }
     if app.midi.devices.is_empty() && app.midi.win.open {
         close(&mut app.midi);
@@ -366,12 +378,9 @@ fn commit_row(app: &mut App, r: usize) {
 /// the selected row of the current tab as MIDI IN and as MIDI OUT.
 pub fn learn_message(app: &mut App, dev_name: &str, msg: [u8; 3]) {
     let w = &mut app.midi.win;
-    // Nothing is learned while another window asks something.
-    if !w.open || !w.learn || w.device != dev_name || w.alert.is_some() || w.ask.is_some() {
-        return;
-    }
+    if w.device != dev_name { return; }
+    let Some((_, r)) = w.learn_target() else { return };
     let Some(code) = w.filter.feed(&msg) else { return };
-    let Some(r) = w.sel.get(w.tab).copied().flatten() else { return };
     w.clash = (None, None);
     let a = commit_in(app, r, Some(code));
     let b = commit_out(app, r, Some(code));
@@ -392,6 +401,7 @@ pub fn add_row(app: &mut App, name: &str) {
     }
     w.rows[tab].push(LearnRow { name: f.name.clone(), display: f.display.clone(), deck: f.per_deck as u8, input: None, output: None, ty: f.ty, input_kind: kind_of_type(f.ty), output_kind: kind_of_type(f.ty), comment: String::new(), min: -1, max: -1 });
     w.sel[tab] = Some(w.rows[tab].len() - 1);
+    w.edit = None;
 }
 
 /// DUPLICATE: a copy of the selected row without its codes, right under it.
@@ -404,6 +414,7 @@ pub fn duplicate_row(app: &mut App) {
     row.output = None;
     w.rows[tab].insert(r + 1, row);
     w.sel[tab] = Some(r + 1);
+    w.edit = None;
 }
 
 /// DELETE (after the confirmation): the row goes, and its codes stay switched off.
@@ -415,6 +426,7 @@ pub fn delete_row(app: &mut App) {
     }
     let row = app.midi.win.rows[tab].remove(r);
     app.midi.win.sel[tab] = None;
+    app.midi.win.edit = None;
     if row.input.is_none() && row.output.is_none() { return; }
     if let Some((hub, dev)) = editable_device(&app.midi) {
         hub.edit_mapping(&dev, |map| map.delete(row.input, row.output));
@@ -475,12 +487,12 @@ pub fn reset_default(app: &mut App) {
 }
 
 fn sort_rows(w: &mut Win, col: usize) {
-    let asc = match w.sort {
-        Some((c, a)) if c == col => !a,
+    let tab = w.tab;
+    let asc = match w.sort.get(&tab) {
+        Some(&(c, a)) if c == col => !a,
         _ => true,
     };
-    w.sort = Some((col, asc));
-    let tab = w.tab;
+    w.sort.insert(tab, (col, asc));
     let Some(rows) = w.rows.get_mut(tab) else { return };
     let hexs = |c: Option<u16>| c.map(|c| format!("{c:04X}")).unwrap_or_default();
     let key = |r: &LearnRow| match col {
@@ -491,8 +503,18 @@ fn sort_rows(w: &mut Win, col: usize) {
         4 => hexs(r.output),
         _ => r.comment.clone(),
     };
-    rows.sort_by(|a, b| if asc { key(a).cmp(&key(b)) } else { key(b).cmp(&key(a)) });
-    w.sel[tab] = None;
+    // Original indices distinguish even two identical, unassigned copies. Keep Learn and
+    // an open cell editor attached to the same row after the table moves under them.
+    let mut indexed: Vec<_> = rows.drain(..).enumerate().collect();
+    if asc {
+        indexed.sort_by_cached_key(|(_, row)| key(row));
+    } else {
+        indexed.sort_by_cached_key(|(_, row)| std::cmp::Reverse(key(row)));
+    }
+    let new_index = |old| indexed.iter().position(|(i, _)| *i == old);
+    w.sel[tab] = w.sel[tab].and_then(new_index);
+    w.edit = w.edit.take().and_then(|(r, c, text)| Some((new_index(r)?, c, text)));
+    rows.extend(indexed.into_iter().map(|(_, row)| row));
 }
 
 // ---------------------------------------------------------------------- drawing
@@ -502,10 +524,9 @@ fn sort_rows(w: &mut Win, col: usize) {
 fn text_button(ui: &mut Ui, r: Rect, id: &str, label: &str, on: bool, enabled: bool, join: (bool, bool)) -> egui::Response {
     let resp = ui.interact(r, ui.id().with(id), if enabled { Sense::click() } else { Sense::hover() });
     let mut bg = if on { BTN_ON.c() } else { BTN_BG.c() };
-    if enabled && resp.is_pointer_button_down_on() {
-        bg = mix(bg, 0.2);
-    } else if enabled && resp.hovered() {
-        bg = mix(bg, 0.05);
+    let (hv, dn) = (crate::ui_feel::hover_if(&resp, enabled), crate::ui_feel::press_if(&resp, enabled));
+    if hv > 0.0 || dn > 0.0 {
+        bg = mix(bg, 0.05 * hv + (0.2 - 0.05 * hv) * dn);
     }
     let a = if enabled { 1.0 } else { 0.5 };
     let cr = |sq: bool| if sq { 0 } else { 6 };
@@ -573,8 +594,8 @@ fn menu_style(ui: &mut Ui) {
 
 fn menu_item(ui: &mut Ui, label: &str, sub: bool) -> egui::Response {
     let (r, resp) = ui.allocate_exact_size(vec2(ui.available_width().max(140.0), 22.0), Sense::click());
-    if resp.hovered() {
-        ui.painter().rect_filled(r, 0.0, MENU_HI);
+    if let Some(c) = crate::ui_feel::hover_fill(&resp, MENU_HI) {
+        ui.painter().rect_filled(r, 0.0, c);
     }
     ui.painter().text(pos2(r.min.x + 10.0, r.center().y), Align2::LEFT_CENTER, label, jf(15.0), TEXT.c());
     if sub {
@@ -595,6 +616,7 @@ pub fn window(app: &mut App, ctx: &egui::Context) {
     if app.midi.win.rows.len() != TABS.len() {
         rebuild_rows(&mut app.midi);
     }
+    let previous_target = app.midi.win.learn_target();
     let origin = *app.midi.win.pos.get_or_insert(pos2(100.0, 128.0));
     let outer = Rect::from_min_size(origin - vec2(0.0, TITLE_H), vec2(W, H + TITLE_H));
     let modal = app.midi.win.alert.is_some() || app.midi.win.ask.is_some();
@@ -618,10 +640,11 @@ pub fn window(app: &mut App, ctx: &egui::Context) {
         let cb = Rect::from_center_size(pos2(title.min.x + 14.0, title.center().y), vec2(12.0, 12.0));
         let cresp = ui.interact(cb.expand(3.0), ui.id().with("close"), Sense::click());
         p.circle_filled(cb.center(), 6.0, hex(0xFF5F57));
-        if cresp.hovered() {
+        let ch = crate::ui_feel::hover(&cresp);
+        if ch > 0.0 {
             let c = cb.center();
-            p.line_segment([c + vec2(-2.5, -2.5), c + vec2(2.5, 2.5)], Stroke::new(1.2_f32, hex(0x4D0000)));
-            p.line_segment([c + vec2(-2.5, 2.5), c + vec2(2.5, -2.5)], Stroke::new(1.2_f32, hex(0x4D0000)));
+            p.line_segment([c + vec2(-2.5, -2.5), c + vec2(2.5, 2.5)], Stroke::new(1.2_f32, crate::motion::fade(hex(0x4D0000), ch)));
+            p.line_segment([c + vec2(-2.5, 2.5), c + vec2(2.5, -2.5)], Stroke::new(1.2_f32, crate::motion::fade(hex(0x4D0000), ch)));
         }
         app.midi.win.at.insert("close".into(), cb.center());
         if cresp.clicked() && !modal {
@@ -641,6 +664,11 @@ pub fn window(app: &mut App, ctx: &egui::Context) {
         return;
     }
     dialogs(app, ctx);
+    if previous_target != app.midi.win.learn_target() && app.midi.win.learn {
+        if let Some(dev) = device(&app.midi) {
+            dev.change_learn_target();
+        }
+    }
 }
 
 fn content(app: &mut App, ui: &mut Ui, o: Pos2, live: bool) {
@@ -729,7 +757,7 @@ fn content(app: &mut App, ui: &mut Ui, o: Pos2, live: bool) {
             m.add_triangle(0, 2, 3);
             p.add(egui::Shape::mesh(m));
         }
-        p.text(r.center(), Align2::CENTER_CENTER, name, jf(15.0), WHITE.c().gamma_multiply(if resp.hovered() { 1.0 } else { 0.8 }));
+        p.text(r.center(), Align2::CENTER_CENTER, name, jf(15.0), WHITE.c().gamma_multiply(0.8 + 0.2 * crate::ui_feel::hover(&resp)));
         app.midi.win.at.insert(format!("tab:{name}"), r.center());
         if resp.clicked() {
             app.midi.win.tab = *ti;
@@ -751,7 +779,7 @@ fn content(app: &mut App, ui: &mut Ui, o: Pos2, live: bool) {
     let en = can_edit && live;
     let r = at(16.0, by, 150.0, 24.0);
     app.midi.win.at.insert("LEARN".into(), r.center());
-    if tip(text_button(ui, r, "learn", "LEARN", app.midi.win.learn, en, (false, false)), "Click to enter the MIDI LEARN standby mode. \nUsing a MIDI controller, you can operate selected feature.").clicked() {
+    if tip(text_button(ui, r, "learn", "LEARN", app.midi.win.learn, en && (has_sel || app.midi.win.learn), (false, false)), "Select a function, enable LEARN, then move a control on this device. Turn LEARN off to use the mapping.").clicked() {
         let on = !app.midi.win.learn;
         set_learn(&mut app.midi, on);
     }
@@ -861,7 +889,7 @@ fn table(app: &mut App, ui: &mut Ui, tr: Rect, live: bool) {
         let resp = ui.interact(hr, ui.id().with(("head", i)), if live { Sense::click() } else { Sense::hover() });
         p.rect_filled(Rect::from_min_size(pos2(x + w - 1.0, head.max.y - 18.0), vec2(1.0, 18.0)), 0.0, gy(0x404042));
         p.with_clip_rect(hr).text(pos2(x + 4.0, head.center().y), Align2::LEFT_CENTER, *name, jf(13.0), gy(0xC0C0C0));
-        if let Some((c, asc)) = app.midi.win.sort {
+        if let Some(&(c, asc)) = app.midi.win.sort.get(&app.midi.win.tab) {
             if c == i {
                 let c0 = pos2(x + w - 12.0, head.center().y);
                 let d = if asc { -1.0 } else { 1.0 };
@@ -1164,7 +1192,7 @@ struct TestCtl {
     leds: std::sync::Arc<parking_lot::Mutex<Vec<[u8; 3]>>>,
 }
 
-pub const TEST_NAME: &str = "recordbox test controller";
+pub const TEST_NAME: &str = "rbxtest-midi4 controller";
 
 static TEST: parking_lot::Mutex<Option<TestCtl>> = parking_lot::Mutex::new(None);
 
@@ -1298,7 +1326,7 @@ impl App {
         let steps: Vec<(&str, S)> = vec![
             ("the MIDI button opens the window", S::Click("MIDI")),
             ("the device list opens", S::Click("device")),
-            ("the test controller is picked", S::Click("item:recordbox test controller")),
+            ("the test controller is picked", S::Click("item:rbxtest-midi4 controller")),
             ("ADD opens its menu", S::Click("ADD")),
             ("PlayPause is added", S::Click("add:PlayPause")),
             ("LEARN is armed", S::Click("LEARN")),
@@ -1385,6 +1413,46 @@ mod tests {
 
     fn e(name: &str, code: u16, ro: bool) -> Entry {
         Entry { name: name.into(), function: name.into(), kind: Kind::Button, deck: 1, code, opts: Opts { ro, ..Default::default() }, comment: String::new(), user: false }
+    }
+
+    #[test]
+    fn sorting_keeps_the_selected_duplicate_and_cell_editor_on_their_original_row() {
+        let mut midi = MidiState::default();
+        let map = crate::midi_map::MidiMap::load("Test", None, Some(b"@file,1,Test\r\nPlayPause,PlayPause,Button,,900B,,,,,,,,,,\r\nCue,Cue,Button,,900C,,,,,,,,,,\r\n")).unwrap();
+        let w = &mut midi.win;
+        w.rows = rows_of(&map);
+        w.sel = vec![None; TABS.len()];
+        // Two otherwise identical unassigned copies must still be distinct targets.
+        let mut copy = w.rows[0][0].clone();
+        copy.input = None;
+        w.rows[0].extend([copy.clone(), copy]);
+        w.open = true;
+        w.learn = true;
+        w.sel[0] = Some(3);
+        w.edit = Some((3, 5, "unfinished comment".into()));
+        assert_eq!(w.learn_target(), None);
+        sort_rows(w, 0);
+        let selected = w.sel[0].unwrap();
+        assert_eq!(w.rows[0][selected].name, "PlayPause");
+        assert_eq!(w.edit, Some((selected, 5, "unfinished comment".into())));
+        assert_eq!(w.rows[0][selected - 1], w.rows[0][selected]);
+        sort_rows(w, 0);
+        let selected = w.sel[0].unwrap();
+        assert_eq!(w.edit.take(), Some((selected, 5, "unfinished comment".into())));
+        assert_eq!(w.learn_target(), Some((0, selected)));
+        let other_tab = 1;
+        w.tab = other_tab;
+        sort_rows(w, 2);
+        assert_eq!(w.sort.get(&other_tab), Some(&(2, true)));
+        assert_eq!(w.sort.get(&0), Some(&(0, false)));
+        w.tab = 0;
+        w.ask = Some(Ask::Delete);
+        assert_eq!(w.learn_target(), None);
+        w.alert = Some((String::new(), "old device".into()));
+        w.edit = Some((selected, 5, "old text".into()));
+        select_device(&mut midi, "new controller");
+        assert!(midi.win.ask.is_none() && midi.win.alert.is_none() && midi.win.edit.is_none());
+        assert!(midi.win.sel.iter().all(Option::is_none) && !midi.win.learn);
     }
 
     #[test]

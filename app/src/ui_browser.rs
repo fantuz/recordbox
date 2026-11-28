@@ -544,9 +544,9 @@ pub fn browser(app: &mut App, panel: &mut Ui) {
     // Which side was clicked last decides how bright the lit source tile is.
     if let Some(pp) = ui.input(|i| if i.pointer.primary_pressed() { i.pointer.interact_pos() } else { None }) {
         if strip.contains(pp) || tree.contains(pp) {
-            app.ext.tree_focus = true;
+            crate::prefs_ext::focus_browser_tree(app, true);
         } else if full.contains(pp) && !right_strip.contains(pp) {
-            app.ext.tree_focus = false;
+            crate::prefs_ext::focus_browser_tree(app, false);
         }
     }
     // One window at a time left of the right strip (references 10-14): My Tag 223 pt, Related
