@@ -316,7 +316,7 @@ pub fn color_picker(app: &mut App, ctx: &egui::Context) {
             for i in (1..=8u8).chain([0u8]) {
                 let (rr, resp) = ui.allocate_exact_size(vec2(118.0, 17.0), Sense::click());
                 if resp.hovered() || cur == i {
-                    ui.painter().rect_filled(rr, 2.0, if resp.hovered() { ROW_SEL } else { BTN });
+                    ui.painter().rect_filled(rr, 2.0, crate::ui_feel::hl(&resp, BTN, ROW_SEL));
                 }
                 let chip = Rect::from_center_size(pos2(rr.min.x + 12.0, rr.center().y), vec2(14.0, 9.0));
                 if i == 0 {
@@ -1021,7 +1021,7 @@ pub fn tree_search_field(app: &mut App, ui: &mut Ui) {
     }
     let xr = Rect::from_center_size(pos2(fr.max.x - 8.0, fr.center().y), vec2(12.0, 12.0));
     let x = ui.interact(xr, ui.id().with("tree_search_clear"), Sense::click());
-    crate::icons::cross(ui.painter(), xr.shrink(3.0), if x.hovered() { WHITE.c() } else { DIM2.c() }, 1.2);
+    crate::icons::cross(ui.painter(), xr.shrink(3.0), crate::ui_feel::hl(&x, DIM2.c(), WHITE.c()), 1.2);
     if x.clicked() {
         app.ext.tree_search.clear();
     }
@@ -1036,7 +1036,7 @@ pub fn tree_top_rows(app: &mut App, ui: &mut Ui, drop: &mut Vec<(Rect, i64)>) {
     {
         // The tag-list glyph over the note placeholder.
         let ir = Rect::from_min_size(pos2(r.rect.min.x + 4.0 + 15.0 - 1.0, r.rect.min.y), vec2(14.0, 15.0));
-        ui.painter().rect_filled(ir, 0.0, if app.view == View::TagList { ROW_SEL.c() } else if r.hovered() { gy(0x262626) } else { BG2.c() });
+        ui.painter().rect_filled(ir, 0.0, if app.view == View::TagList { ROW_SEL.c() } else { crate::ui_feel::hl(&r, BG2.c(), gy(0x262626)) });
         icon_tag_list(ui.painter(), ir.center() + vec2(0.0, 0.5), DIM2.c());
     }
     drop.push((r.rect, -1));
@@ -1101,7 +1101,7 @@ pub fn palette_bar(app: &mut App, ui: &mut Ui, r: Rect, drop: &mut Vec<(Rect, i6
         let node = app.node(pl).cloned();
         let resp = ui.interact(sr, ui.id().with(("palette", slot)), Sense::click());
         let showing = node.as_ref().map(|n| app.view == View::Playlist(n.id)).unwrap_or(false);
-        p.rect_filled(sr, 2.0, if showing { ROW_SEL.c() } else if resp.hovered() { gy(0x3A3A3A) } else { BTN.c() });
+        p.rect_filled(sr, 2.0, if showing { ROW_SEL.c() } else { crate::ui_feel::hl(&resp, BTN.c(), gy(0x3A3A3A)) });
         p.text(pos2(sr.min.x + 7.0, sr.center().y), Align2::LEFT_CENTER, (slot + 1).to_string(), bold(10.0), DIM2.c());
         let clip = p.with_clip_rect(Rect::from_min_max(pos2(sr.min.x + 20.0, sr.min.y), pos2(sr.max.x - 30.0, sr.max.y)));
         match &node {
@@ -1435,7 +1435,7 @@ pub fn source_tree(app: &mut App, ui: &mut Ui, kind: u8) {
     // Reload button at the right end of the heading.
     let rr = Rect::from_center_size(pos2(head.rect.max.x - 12.0, head.rect.center().y), vec2(16.0, 16.0));
     let rb = ui.interact(rr, ui.id().with(("src_reload", kind)), Sense::click());
-    crate::icons::sync(ui.painter(), rr.shrink(1.0), if rb.hovered() { WHITE.c() } else { DIM2.c() });
+    crate::icons::sync(ui.painter(), rr.shrink(1.0), crate::ui_feel::hl(&rb, DIM2.c(), WHITE.c()));
     let rb = if app.prefs.tooltips { rb.on_hover_text(if kind == SRC_ITUNES { "Reload:\nReload iTunes library." } else { "Reload" }) } else { rb };
     if rb.clicked() {
         app.source_reload(kind);
@@ -1696,8 +1696,13 @@ pub fn add_artwork(app: &mut App, ids: &[i64]) {
         if std::fs::copy(&f, &dest).is_ok() {
             let tag = format!("custom_{id}.");
             app.textures.retain(|k, _| !k.contains(&tag));
+            let new_path = dest.to_string_lossy().into_owned();
+            app.list_artwork.forget(&new_path);
             if let Some(t) = app.track_mut(*id) {
-                t.artwork = dest.to_string_lossy().to_string();
+                let old_path = std::mem::replace(&mut t.artwork, new_path);
+                if !old_path.is_empty() && old_path != t.artwork {
+                    app.list_artwork.forget(&old_path);
+                }
             }
             app.save_track(*id);
         } else {
@@ -1841,7 +1846,7 @@ pub fn info_panel(app: &mut App, ui: &mut Ui, r: Rect) {
         let on = app.ext.info_tab == i as u8;
         let rr = Rect::from_min_size(pos2(x0 + i as f32 * (w + gap), t + 8.5), vec2(w, 21.0));
         let resp = ui.interact(rr, ui.id().with(("info_tab", i)), Sense::click());
-        p.rect_filled(rr, 0.0, if on { BLUE.c() } else if resp.hovered() { gy(0x3A3A3A) } else { gy(0x323232) });
+        p.rect_filled(rr, 0.0, if on { BLUE.c() } else { crate::ui_feel::hl(&resp, gy(0x323232), gy(0x3A3A3A)) });
         p.text(rr.center(), Align2::CENTER_CENTER, *name, rb(INFO_TAB_FONT), if on { hex(0x00021E) } else { DIM.c() });
         if resp.clicked() {
             app.ext.info_tab = i as u8;
@@ -1851,7 +1856,7 @@ pub fn info_panel(app: &mut App, ui: &mut Ui, r: Rect) {
     // Reload Tags (skin brws_refresh).
     let rc = pos2(right - 17.0, t + 19.0);
     let rresp = ui.interact(Rect::from_center_size(rc, vec2(18.0, 20.0)), ui.id().with("info_reload"), Sense::click());
-    crate::icons_src::refresh(&p, rc, if rresp.hovered() { WHITE.c() } else { gy(0xDCDCDC) });
+    crate::icons_src::refresh(&p, rc, crate::ui_feel::hl(&rresp, gy(0xDCDCDC), WHITE.c()));
     let rresp = if app.prefs.tooltips { rresp.on_hover_text("Reload Tags") } else { rresp };
     if rresp.clicked() && !ids.is_empty() {
         app.reload_tags_from_files(&ids);
@@ -2219,8 +2224,8 @@ fn missing_file_manager(app: &mut App, ctx: &egui::Context) {
                     let _sel_dark = crate::theme::dark_scope(on);
                     if on {
                         ui.painter().rect_filled(Rect::from_min_max(pos2(rr.min.x, rr.min.y + 0.5), rr.max), 0.0, ROW_SEL);
-                    } else if resp.hovered() {
-                        ui.painter().rect_filled(rr, 0.0, BG1);
+                    } else if let Some(c) = crate::ui_feel::hover_fill(&resp, BG1) {
+                        ui.painter().rect_filled(rr, 0.0, c);
                     }
                     let mut x = rr.min.x;
                     for (k, (v, (_, cw))) in [t.display_title(), t.artist.clone(), t.album.clone(), t.path.clone()].into_iter().zip(cols.iter()).enumerate() {

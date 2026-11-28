@@ -118,7 +118,7 @@ pub fn strip_tile(app: &mut App, ui: &mut Ui, r: Rect, y0: f32) {
         ui.painter().rect_stroke(rr, 1.5, Stroke::new(1.0, WHITE), egui::StrokeKind::Inside);
     } else {
         ui.painter().rect_filled(rr, 1.5, gy(0x212121));
-        ui.painter().rect_stroke(rr, 1.5, Stroke::new(1.0, if resp.hovered() { gy(0x8C8C8C) } else { gy(0x565656) }), egui::StrokeKind::Inside);
+        ui.painter().rect_stroke(rr, 1.5, Stroke::new(1.0, crate::ui_feel::hl(&resp, gy(0x565656), gy(0x8C8C8C))), egui::StrokeKind::Inside);
     }
     tile_icon(ui.painter(), rr, WHITE.c());
     let resp = if app.prefs.tooltips { resp.on_hover_text(TIP_TILE) } else { resp };
@@ -186,7 +186,7 @@ pub fn pane(app: &mut App, ui: &mut Ui, list: Rect) -> Rect {
     }
     let small = |dx: f32| Rect::from_min_size(pos2(x0 + dx, bar.min.y + 3.0), vec2(20.0, 20.0));
     let (cr, sr, gr) = (small(60.0), small(100.0), small(140.0));
-    let grey = |resp: &egui::Response| if resp.hovered() { WHITE.c() } else { gy(0x969696) };
+    let grey = |resp: &egui::Response| crate::ui_feel::hl(resp, gy(0x969696), WHITE.c());
     let resp = icon_button(ui, cr, "amx_clear", TIP_CLEAR, tips);
     clear_icon(&p, cr, grey(&resp), BG2.c());
     if resp.clicked() {
@@ -219,7 +219,7 @@ pub fn pane(app: &mut App, ui: &mut Ui, list: Rect) -> Rect {
     let ptr = ui.ctx().pointer_latest_pos();
     let released = ui.input(|i| i.pointer.any_released());
     let over = ptr.is_some_and(|pp| r.contains(pp));
-    if over && (app.drag.is_some() || dragged_node.is_some() || app.node_drag.is_some()) {
+    if (app.drag.is_some() || dragged_node.is_some() || app.node_drag.is_some()) && crate::ui_feel::drop_glow(ui, ui.id().with("automix_drop"), r, over, 2.0) {
         ui.painter().rect_stroke(r, 2.0, Stroke::new(1.5, BLUE), egui::StrokeKind::Inside);
     }
     if released && over {
@@ -535,7 +535,7 @@ fn settings_dialog(app: &mut App, ctx: &egui::Context) {
             let ok = Rect::from_min_size(o + vec2(w / 2.0 - 50.0, 228.0), vec2(100.0, 30.0));
             map[4] = Some(ok);
             let resp = ui.interact(ok, ui.id().with("amx_set_ok"), Sense::click());
-            kit::paint_button(&p, ok, resp.hovered(), resp.is_pointer_button_down_on());
+            crate::ui_feel::button_face(&p, ok, &resp);
             p.text(ok.center(), Align2::CENTER_CENTER, "OK", kit::inter(13.0), WHITE.c());
             if resp.clicked() || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
                 close = true;

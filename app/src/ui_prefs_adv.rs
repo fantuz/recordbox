@@ -443,6 +443,7 @@ fn own(app: &mut App, ui: &mut Ui, dirty: &mut bool) {
             *dirty = true;
         }
     });
+    crate::ui_feel::prefs_item(app, ui);
     let n = crate::prefs_ext::TREE_ITEMS_OWN.len() as f32;
     item(ui, "RecordboxBrowser", 56.0 + 26.0 * (n + 3.0) + 16.0 + 10.0, |it| {
         it.title("Browser");

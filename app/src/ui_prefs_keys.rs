@@ -527,7 +527,7 @@ pub fn page(app: &mut App, ui: &mut Ui, mode: Mode) {
                 let key = if waiting == Some(row.id) { "Press a key…".to_string() } else { key_of(&app.prefs, mode, &cur, row) };
                 let br = egui::Rect::from_min_size(egui::pos2(r.max.x - 186.0, r.min.y + 2.0), egui::vec2(170.0, 20.0));
                 let resp = ui.interact(br, ui.id().with(("keybtn", row.id)), if preset { egui::Sense::hover() } else { egui::Sense::click() });
-                ui.painter().rect_filled(br, 3.0, if waiting == Some(row.id) { crate::ui_kit::PBLUE } else if resp.hovered() && !preset { gy(0x3C3C3C) } else { gy(0x323232) });
+                ui.painter().rect_filled(br, 3.0, if waiting == Some(row.id) { crate::ui_kit::PBLUE } else { crate::ui_feel::hl_if(&resp, !preset, gy(0x323232), gy(0x3C3C3C)) });
                 crate::prefs_font::draw(ui, br, &key, 14.0, false, if preset { DIM2.c() } else { WHITE.c() }, crate::ui_kit::Just::Centre);
                 let why;
                 let hint = if preset {

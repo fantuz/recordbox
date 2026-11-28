@@ -60,10 +60,10 @@ fn row(ui: &mut Ui, depth: usize, text: &str, count: Option<usize>, selected: bo
     use crate::icons_src as src;
     let (rr, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 15.0), Sense::click());
     let p = ui.painter();
-    let bg = if selected { ROW_SEL.c() } else if resp.hovered() { gy(0x262626) } else { BG2.c() };
+    let bg = if selected { ROW_SEL.c() } else { crate::ui_feel::hl(&resp, BG2.c(), gy(0x262626)) };
     // (A selected row keeps rekordbox's fixed blue and white text in Light: `ListViewer::findTextColour`.)
     let _sel_dark = crate::theme::dark_scope(selected);
-    if selected || resp.hovered() {
+    if selected || bg != BG2.c() {
         p.rect_filled(rr, 0.0, bg);
     }
     let d = depth as f32 * 20.0;
@@ -213,8 +213,10 @@ fn list_rows(app: &mut App, ui: &mut Ui, parent: i64, depth: usize, map: &mut Ve
             app.mixx.lib.rename = Some((l.id, l.name.clone()));
         }
         // Tracks dragged from a list and let go on a sampler list are added to it.
-        if !folder && app.drag.is_some() && ptr.is_some_and(|pp| r.rect.contains(pp)) {
+        if !folder && app.drag.is_some() && crate::ui_feel::drop_glow(ui, ui.id().with(("sampler_list_drop", l.id)), r.rect, ptr.is_some_and(|pp| r.rect.contains(pp)), 2.0) {
             ui.painter().rect_stroke(r.rect, 2.0, Stroke::new(1.5, BLUE), egui::StrokeKind::Inside);
+        }
+        if !folder && app.drag.is_some() && ptr.is_some_and(|pp| r.rect.contains(pp)) {
             if released {
                 let ids = app.drag.clone().unwrap_or_default();
                 let samples = app.smplib_samples_for_tracks(&ids);

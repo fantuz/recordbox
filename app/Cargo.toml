@@ -69,7 +69,7 @@ bytemuck = { version = "1", optional = true }
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.58", features = ["Win32_Graphics_Dxgi_Common", "Win32_Graphics_Direct3D", "Win32_Graphics_Direct3D12", "Win32_AI_MachineLearning_DirectML"], optional = true }
-windows-sys = { version = "0.61", features = ["Win32_System_Registry", "Win32_System_SystemInformation", "Win32_Storage_FileSystem"] }
+windows-sys = { version = "0.61", features = ["Win32_System_Registry", "Win32_System_SystemInformation", "Win32_Storage_FileSystem", "Win32_UI_WindowsAndMessaging"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 candle-core = { version = "0.11.1", features = ["metal"] }
@@ -78,6 +78,7 @@ candle-nn = { version = "0.11.1", features = ["metal"] }
 # wrappers Candle uses; both crates are already in the tree through candle-core.
 candle-metal-kernels = "0.11.1"
 objc2-metal = "0.3"
+objc2 = "0.6"
 
 [profile.dev]
 opt-level = 2

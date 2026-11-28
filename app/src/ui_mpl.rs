@@ -207,7 +207,7 @@ pub fn strip(app: &mut App, ui: &mut Ui, r: Rect) {
         let br = at(x, 6.0, w, 16.0);
         let on = app.mixx.mpl.mode == mode;
         let resp = ui.interact(br, ui.id().with(("mpl_mode", i)), Sense::click());
-        p.rect_filled(br, 1.0, if on { BLUE.c() } else if resp.hovered() { gy(0x343434) } else { BTN.c() });
+        p.rect_filled(br, 1.0, if on { BLUE.c() } else { crate::ui_feel::hl(&resp, BTN.c(), gy(0x343434)) });
         p.text(br.center() + vec2(1.0, 0.5), Align2::CENTER_CENTER, label, rb(10.5), if on { Color32::BLACK } else { WHITE.c() });
         map.push((if mode == MODE_IN { "mix_in" } else { "mix_out" }.into(), br));
         if tip(resp, app, tipt).clicked() {
@@ -217,7 +217,7 @@ pub fn strip(app: &mut App, ui: &mut Ui, r: Rect) {
     for (i, (x, dir)) in [(164.0f32, -1i32), (199.0, 1)].into_iter().enumerate() {
         let br = at(x, 6.0, 25.0, 16.0);
         let resp = ui.interact(br, ui.id().with(("mpl_sel", i)), Sense::click());
-        p.rect_filled(br, 2.0, if resp.hovered() { gy(0x343434) } else { BTN.c() });
+        p.rect_filled(br, 2.0, crate::ui_feel::hl(&resp, BTN.c(), gy(0x343434)));
         let c = br.center();
         let s = dir as f32;
         p.add(Shape::line(vec![c + vec2(-1.6 * s - 0.5, -3.1), c + vec2(1.6 * s - 0.5, 0.0), c + vec2(-1.6 * s - 0.5, 3.1)], Stroke::new(1.4, gy(0x969696))));
@@ -493,7 +493,7 @@ pub fn strip(app: &mut App, ui: &mut Ui, r: Rect) {
             p.text(pos2(vx, ry), Align2::LEFT_CENTER, format!("DECK{}  {}", d + 1, mmss(t)), rb(11.6), WHITE.c());
             let cr = Rect::from_min_size(pos2(vx + 84.0, ry - 10.0), vec2(20.0, 20.0));
             let resp = ui.interact(cr, ui.id().with(("mpl_del", which)), Sense::click());
-            close_icon(&p, cr, if resp.hovered() { WHITE.c() } else { grey });
+            close_icon(&p, cr, crate::ui_feel::hl(&resp, grey, WHITE.c()));
             map.push((if which == MODE_IN { "del_in" } else { "del_out" }.into(), cr));
             let resp = if app.prefs.tooltips { resp.on_hover_text(format!("Clear the MIX POINT on the MIX {} deck.", if which == MODE_IN { "IN" } else { "OUT" })) } else { resp };
             if resp.clicked() {

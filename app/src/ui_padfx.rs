@@ -615,7 +615,7 @@ pub fn pads(app: &mut App, ui: &mut Ui, n: u8, pad: &dyn Fn(usize, usize) -> Rec
         }
         let lit = app.px.fxx.pad.decks[d].lit(idx);
         let resp = ui.interact(pr, ui.id().with(("padfx", n, i)), Sense::click_and_drag());
-        p.rect_filled(pr, 0.0, if lit { gy(0x2C2C2C) } else if resp.hovered() { gy(0x1E1E1E) } else { gy(0x161616) });
+        p.rect_filled(pr, 0.0, if lit { gy(0x2C2C2C) } else { crate::ui_feel::hl(&resp, gy(0x161616), gy(0x1E1E1E)) });
         if lit {
             p.rect_stroke(pr, 0.0, Stroke::new(1.0_f32, BLUE), egui::StrokeKind::Inside);
         }
@@ -668,7 +668,7 @@ pub fn pads(app: &mut App, ui: &mut Ui, n: u8, pad: &dyn Fn(usize, usize) -> Rec
         let r = cell(30.0);
         app.px.fxx.pad.rects[d][8 + b] = r;
         let resp = ui.interact(r, ui.id().with(("padfxbank", n, b)), Sense::click());
-        p.rect_filled(r, 2.0, if bank == b { BLUE.c() } else if resp.hovered() { lighten(BTN.c()) } else { PANEL });
+        p.rect_filled(r, 2.0, if bank == b { BLUE.c() } else { crate::ui_feel::hl(&resp, PANEL, lighten(BTN.c())) });
         p.text(r.center(), Align2::CENTER_CENTER, format!("{}", b + 1), bold(9.5), WHITE.c());
         if resp.on_hover_text(format!("PAD FX{}", b + 1)).clicked() && bank != b {
             stop_deck(app, d);
@@ -679,7 +679,7 @@ pub fn pads(app: &mut App, ui: &mut Ui, n: u8, pad: &dyn Fn(usize, usize) -> Rec
     let r = cell(20.0);
     app.px.fxx.pad.rects[d][10] = r;
     let resp = ui.interact(r, ui.id().with(("padfxedit", n)), Sense::click());
-    p.rect_filled(r, 2.0, if edit { BLUE.c() } else if resp.hovered() { lighten(BTN.c()) } else { PANEL });
+    p.rect_filled(r, 2.0, if edit { BLUE.c() } else { crate::ui_feel::hl(&resp, PANEL, lighten(BTN.c())) });
     // (A small gear: a ring with six teeth.)
     let c = r.center();
     p.circle_stroke(c, 3.2, Stroke::new(1.6_f32, WHITE));
@@ -694,7 +694,7 @@ pub fn pads(app: &mut App, ui: &mut Ui, n: u8, pad: &dyn Fn(usize, usize) -> Rec
     let r = cell(40.0);
     app.px.fxx.pad.rects[d][11] = r;
     let resp = ui.interact(r, ui.id().with(("padfxpage", n)), Sense::click());
-    p.rect_filled(r, 2.0, if resp.hovered() { lighten(BTN.c()) } else { PANEL });
+    p.rect_filled(r, 2.0, crate::ui_feel::hl(&resp, PANEL, lighten(BTN.c())));
     p.text(r.center(), Align2::CENTER_CENTER, if page == 0 { "1 - 8" } else { "9 - 16" }, FontId::proportional(9.0), DIM2.c());
     if resp.on_hover_text("Page").clicked() {
         app.deck.x.pad_page = 1 - page as u8;

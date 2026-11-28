@@ -285,24 +285,40 @@ fn faded(c: Color32, enabled: bool, opacity: f32) -> Color32 {
 /// The pill switch at `min`, in a row `h` pt tall: a track 2t x t (t = 0.85 h) with fully
 /// round ends, and a white knob 0.8 t across, 0.1 t in from the left end or 1.1 t when on.
 pub fn paint_pill(p: &egui::Painter, min: egui::Pos2, h: f32, on: bool, enabled: bool, hovered: bool) {
+    paint_pill_t(p, min, h, on as u8 as f32, enabled, hovered as u8 as f32);
+}
+
+/// `paint_pill` with the on state and the hover as amounts (0..1, from `ui_feel`): the knob
+/// slides and the track's colour and hover light fade. At 0 and 1 it draws exactly what
+/// `paint_pill` draws.
+pub fn paint_pill_t(p: &egui::Painter, min: egui::Pos2, h: f32, on: f32, enabled: bool, hovered: f32) {
     let t = 0.85 * h;
     let track = Rect::from_min_size(min, vec2(2.0 * t, t));
-    p.rect_filled(track, t / 2.0, faded(if on { PBLUE } else { GREY.c() }, enabled, 0.3));
-    let kx = if on { 1.1 * t } else { 0.1 * t };
+    let col = if on >= 1.0 { PBLUE } else if on <= 0.0 { GREY.c() } else { crate::motion::mix(GREY.c(), PBLUE, on) };
+    p.rect_filled(track, t / 2.0, faded(col, enabled, 0.3));
+    let kx = if on >= 1.0 { 1.1 * t } else if on <= 0.0 { 0.1 * t } else { (0.1 + on) * t };
     p.circle_filled(pos2(min.x + kx + 0.4 * t, min.y + 0.5 * t), 0.4 * t, faded(ON_ACCENT.c(), enabled, 0.3));
-    if enabled && hovered {
-        p.rect_filled(track, t / 2.0, Color32::from_white_alpha(26));
+    if enabled && hovered > 0.0 {
+        p.rect_filled(track, t / 2.0, Color32::from_white_alpha(if hovered >= 1.0 { 26 } else { (26.0 * hovered).round() as u8 }));
     }
 }
 
 /// The radio button at `min`: a disc t across (t = 0.85 h), blue with a white dot 0.425 h
 /// across when chosen.
 pub fn paint_radio_at(p: &egui::Painter, min: egui::Pos2, h: f32, on: bool, enabled: bool) {
+    paint_radio_t(p, min, h, on as u8 as f32, enabled);
+}
+
+/// `paint_radio_at` with the choice as an amount (0..1): the disc's blue fades in and the dot
+/// grows. Exactly `paint_radio_at` at 0 and 1.
+pub fn paint_radio_t(p: &egui::Painter, min: egui::Pos2, h: f32, on: f32, enabled: bool) {
     let t = 0.85 * h;
     let c = pos2(min.x + t / 2.0, min.y + t / 2.0);
-    p.circle_filled(c, t / 2.0, faded(if on { PBLUE } else { GREY.c() }, enabled, 0.5));
-    if on {
-        p.circle_filled(pos2(min.x + 0.425 * h, min.y + 0.425 * h), 0.2125 * h, faded(ON_ACCENT.c(), enabled, 0.5));
+    let col = if on >= 1.0 { PBLUE } else if on <= 0.0 { GREY.c() } else { crate::motion::mix(GREY.c(), PBLUE, on) };
+    p.circle_filled(c, t / 2.0, faded(col, enabled, 0.5));
+    if on > 0.0 {
+        let r = if on >= 1.0 { 0.2125 * h } else { 0.2125 * h * (0.4 + 0.6 * on) };
+        p.circle_filled(pos2(min.x + 0.425 * h, min.y + 0.425 * h), r, faded(ON_ACCENT.c(), enabled, 0.5));
     }
 }
 
@@ -335,7 +351,13 @@ pub fn toggle_raw(ui: &mut Ui, on: &mut bool, label: &str) -> bool {
     let g = label_galley(ui, label, 14.0, faded(WHITE.c(), en, 0.3), -0.21);
     let gh = caption_h(&g);
     let (r, resp) = ui.allocate_exact_size(vec2(37.0 + g.size().x, gh.max(16.0)), Sense::click());
-    paint_pill(ui.painter(), pos2(r.min.x, r.center().y - CTL / 2.0), ROW_H, *on, en, resp.hovered());
+    if crate::motion::on() {
+        // (The new state, so the knob starts sliding on the click's own frame.)
+        let to = *on != resp.clicked();
+        paint_pill_t(ui.painter(), pos2(r.min.x, r.center().y - CTL / 2.0), ROW_H, crate::ui_feel::on_amt(resp.id, to), en, crate::ui_feel::hover(&resp));
+    } else {
+        paint_pill(ui.painter(), pos2(r.min.x, r.center().y - CTL / 2.0), ROW_H, *on, en, resp.hovered());
+    }
     if en {
         crate::ui_prefs_item::kit_control("switch", label, r);
     }
@@ -426,7 +448,8 @@ pub fn slider(ui: &mut Ui, t: &mut f32) -> Response {
             }
         }
         let en = ui.is_enabled();
-        paint_slider(ui.painter(), r, r.min.x + t.clamp(0.0, 1.0) * (w - handle_w), en, resp.hovered() || resp.dragged());
+        crate::ui_feel::grab_cursor(&resp);
+        paint_slider_t(ui.painter(), r, r.min.x + t.clamp(0.0, 1.0) * (w - handle_w), en, crate::ui_feel::hot(&resp));
         resp
     })
 }
@@ -435,9 +458,14 @@ pub fn slider(ui: &mut Ui, t: &mut f32) -> Response {
 /// height (#0F0F0F), the handle a 5 pt wide bar from `x`, white at 0.9 (full when the pointer
 /// is on it).
 pub fn paint_slider(p: &egui::Painter, track: Rect, x: f32, enabled: bool, hot: bool) {
+    paint_slider_t(p, track, x, enabled, hot as u8 as f32);
+}
+
+/// `paint_slider` with the handle's light as an amount (0..1, eased by `ui_feel::hot`).
+pub fn paint_slider_t(p: &egui::Painter, track: Rect, x: f32, enabled: bool, hot: f32) {
     let h = track.height();
     p.rect_filled(Rect::from_min_size(pos2(track.min.x, track.min.y + (0.4 * h).round()), vec2(track.width(), (0.2 * h).round())), 0.0, faded(gy(0x0F0F0F), enabled, 0.3));
-    let a = if !enabled { 0.35 } else if hot { 1.0 } else { 0.9 };
+    let a = if !enabled { 0.35 } else if hot >= 1.0 { 1.0 } else if hot <= 0.0 { 0.9 } else { 0.9 + 0.1 * hot };
     p.rect_filled(Rect::from_min_size(pos2(x, track.min.y), vec2(5.0, h)), 0.0, WHITE.gamma_multiply(a));
 }
 
@@ -451,7 +479,8 @@ pub fn radio_raw(ui: &mut Ui, on: bool, label: &str) -> Response {
     let g = label_galley(ui, label, 14.0, faded(WHITE.c(), en, 0.5), -0.05);
     let gh = caption_h(&g);
     let (r, resp) = ui.allocate_exact_size(vec2(21.0 + g.size().x, gh.max(16.0)), Sense::click());
-    paint_radio_at(ui.painter(), pos2(r.min.x, r.center().y - CTL / 2.0), ROW_H, on, en);
+    let to = if crate::motion::on() { on || (en && resp.clicked()) } else { on };
+    paint_radio_t(ui.painter(), pos2(r.min.x, r.center().y - CTL / 2.0), ROW_H, crate::ui_feel::on_amt(resp.id, to), en);
     if en {
         crate::ui_prefs_item::kit_control("radio", label, r);
     }
@@ -461,6 +490,21 @@ pub fn radio_raw(ui: &mut Ui, on: bool, label: &str) -> Response {
 
 pub fn radio(ui: &mut Ui, on: bool, label: &str) -> bool {
     row(ui, 16.0, |ui| radio_raw(ui, on, label).clicked())
+}
+
+/// `paint_check_at` with the tick as an amount (0..1): the blue and the tick fade in.
+/// Exactly `paint_check_at` at 0 and 1.
+pub fn paint_check_t(p: &egui::Painter, min: egui::Pos2, t: f32, on: f32, enabled: bool) {
+    if on <= 0.0 || on >= 1.0 {
+        return paint_check_at(p, min, t, on >= 1.0, enabled);
+    }
+    let r = Rect::from_min_size(min, vec2(t, t));
+    p.rect_filled(r, 0.0, crate::motion::fade(faded(PBLUE, enabled, 0.5), on));
+    p.rect_stroke(r, 0.0, Stroke::new(1.0, faded(GREY.c(), enabled, 0.5)), StrokeKind::Middle);
+    let at = |x: f32, y: f32| pos2(min.x + x * t / 32.0, min.y + y * t / 32.0);
+    let c = crate::motion::fade(faded(WHITE.c(), enabled, 0.5), on);
+    p.add(egui::Shape::convex_polygon(vec![at(3.0, 12.5), at(7.5, 9.5), at(13.5, 17.0), at(14.5, 24.5)], c, Stroke::NONE));
+    p.add(egui::Shape::convex_polygon(vec![at(13.5, 17.0), at(26.0, -0.5), at(32.0, 1.5), at(14.5, 24.5)], c, Stroke::NONE));
 }
 
 pub fn paint_checkbox(p: &egui::Painter, r: Rect, on: bool, enabled: bool) {
@@ -478,7 +522,7 @@ pub fn checkbox_raw(ui: &mut Ui, on: &mut bool, label: &str) -> Response {
         *on = !*on;
         resp.mark_changed();
     }
-    paint_check_at(ui.painter(), pos2(r.min.x, r.center().y - CTL / 2.0), CTL, *on, en);
+    paint_check_t(ui.painter(), pos2(r.min.x, r.center().y - CTL / 2.0), CTL, crate::ui_feel::on_amt(resp.id, *on), en);
     if en {
         crate::ui_prefs_item::kit_control("check", label, r);
     }
@@ -578,7 +622,10 @@ pub fn step_slider(ui: &mut Ui, v: &mut u32, max: u32, lo: &str, hi: &str) -> bo
             }
         }
         let x = r.min.x + (*v).min(max) as f32 / max.max(1) as f32 * (w - handle_w);
-        paint_slider(ui.painter(), r, x, true, resp.hovered() || resp.dragged());
+        // (Each step is a jump: the handle glides to it.)
+        let x = crate::ui_feel::shown(resp.id, x, true);
+        crate::ui_feel::grab_cursor(&resp);
+        paint_slider_t(ui.painter(), r, x, true, crate::ui_feel::hot(&resp));
     });
     ui.add_space(12.0);
     let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), 12.0), Sense::hover());
@@ -607,12 +654,21 @@ fn gradient(p: &egui::Painter, r: Rect, top: Color32, bot: Color32) {
 
 /// The dark push button: black outline, light hairline on top, #242427 to #1A1A1C.
 pub fn paint_button(p: &egui::Painter, r: Rect, hovered: bool, down: bool) {
+    paint_button_t(p, r, hovered as u8 as f32, down as u8 as f32);
+}
+
+/// `paint_button` with hover and press as amounts (0..1, from `ui_feel`); exactly
+/// `paint_button` at 0 and 1.
+pub fn paint_button_t(p: &egui::Painter, r: Rect, hovered: f32, down: f32) {
     p.rect_filled(r, 2.5, gy(0x000000));
     let i = r.shrink(0.75);
-    let (top, bot) = if down { (gy(0x161618), gy(0x1C1C1E)) } else if hovered { (gy(0x2E2E32), gy(0x232326)) } else { (gy(0x242427), gy(0x1A1A1C)) };
+    let m = crate::motion::mix;
+    let (top, bot) = (m(gy(0x242427), gy(0x2E2E32), hovered), m(gy(0x1A1A1C), gy(0x232326), hovered));
+    let (top, bot) = (m(top, gy(0x161618), down), m(bot, gy(0x1C1C1E), down));
     gradient(p, i, top, bot);
-    if !down {
-        p.rect_filled(Rect::from_min_max(pos2(i.min.x + 0.5, i.min.y), pos2(i.max.x - 0.5, i.min.y + 0.5)), 0.0, gy(0x323335));
+    if down < 1.0 {
+        let c = gy(0x323335);
+        p.rect_filled(Rect::from_min_max(pos2(i.min.x + 0.5, i.min.y), pos2(i.max.x - 0.5, i.min.y + 0.5)), 0.0, if down <= 0.0 { c } else { crate::motion::fade(c, 1.0 - down) });
     }
 }
 
@@ -656,7 +712,11 @@ impl egui::Widget for Btn {
         let size = self.exact.unwrap_or(vec2((g.size().x + 24.0).max(self.min.x), self.min.y));
         let (r, resp) = ui.allocate_exact_size(size, Sense::click());
         resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, en, g.text()));
-        paint_button(ui.painter(), r, en && resp.hovered(), en && resp.is_pointer_button_down_on());
+        if crate::motion::on() {
+            paint_button_t(ui.painter(), r, crate::ui_feel::hover_if(&resp, en), crate::ui_feel::press_if(&resp, en));
+        } else {
+            paint_button(ui.painter(), r, en && resp.hovered(), en && resp.is_pointer_button_down_on());
+        }
         ui.painter().galley(pos2(r.center().x - g.size().x / 2.0, r.center().y - g.size().y / 2.0), g, WHITE.c());
         resp
     }
@@ -712,7 +772,8 @@ impl egui::Widget for Check<'_> {
             *self.0 = !*self.0;
             resp.mark_changed();
         }
-        paint_checkbox(ui.painter(), Rect::from_center_size(r.center(), vec2(14.0, 14.0)), *self.0, ui.is_enabled());
+        let rr = Rect::from_center_size(r.center(), vec2(14.0, 14.0));
+        paint_check_t(ui.painter(), rr.min, rr.width(), crate::ui_feel::on_amt(resp.id, *self.0), ui.is_enabled());
         resp
     }
 }

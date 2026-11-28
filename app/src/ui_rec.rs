@@ -656,7 +656,7 @@ fn controls(app: &mut App, ui: &mut Ui, o: Pos2, export: bool) {
     }
     let ang = |x: f32| (-225.0 + 270.0 * x).to_radians();
     let ring: Vec<Pos2> = (0..=36).map(|i| kc + vec2(ang(i as f32 / 36.0).cos(), ang(i as f32 / 36.0).sin()) * 8.75).collect();
-    p.add(egui::Shape::line(ring, Stroke::new(2.5_f32, if kresp.hovered() || kresp.dragged() { gy(0x464646) } else { gy(0x323232) })));
+    p.add(egui::Shape::line(ring, Stroke::new(2.5_f32, crate::ui_feel::hot_col(&kresp, gy(0x323232), gy(0x464646)))));
     let a = ang((v + 1.0) / 2.0);
     p.line_segment([kc + vec2(a.cos(), a.sin()) * 5.5, kc + vec2(a.cos(), a.sin()) * 10.0], Stroke::new(2.0_f32, WHITE));
     if v != level {
@@ -701,7 +701,7 @@ fn controls(app: &mut App, ui: &mut Ui, o: Pos2, export: bool) {
     let k = (b[3].width() / 21.0).min(b[3].height() / 19.0);
     let tile = Rect::from_center_size(b[3].center(), vec2(21.0 * k, 19.0 * k));
     let red = Color32::from_rgb(200, 0, 0);
-    p.rect_filled(tile, 2.0 * k, if lit { red } else if rresp.hovered() { gy(0x343434) } else { gy(0x292929) });
+    p.rect_filled(tile, 2.0 * k, if lit { red } else { crate::ui_feel::hl(&rresp, gy(0x292929), gy(0x343434)) });
     p.circle_filled(tile.center() + vec2(0.0, -0.5 * k), 5.0 * k, if lit { gy(0xAFAFAF) } else { red });
     if rresp.clicked() {
         app.rec_button();
@@ -1347,8 +1347,8 @@ pub fn prefs_page(app: &mut App, ui: &mut Ui) {
         let p = ui.painter().clone();
         let hr = Rect::from_min_size(pos2(top.x + 327.0, sub_y - 7.0), vec2(14.0, 12.0));
         let hresp = ui.interact(hr, ui.id().with("rec_silence_help"), Sense::hover());
-        p.rect_stroke(hr, 1.5, Stroke::new(1.0_f32, if hresp.hovered() { gy(0x8A8A8A) } else { gy(0x4A4A4A) }), egui::StrokeKind::Inside);
-        p.text(pos2(hr.center().x, hr.center().y + 0.25), Align2::CENTER_CENTER, "?", inter_bold(9.5), if hresp.hovered() { WHITE.c() } else { gy(0x8A8A8A) });
+        p.rect_stroke(hr, 1.5, Stroke::new(1.0_f32, crate::ui_feel::hl(&hresp, gy(0x4A4A4A), gy(0x8A8A8A))), egui::StrokeKind::Inside);
+        p.text(pos2(hr.center().x, hr.center().y + 0.25), Align2::CENTER_CENTER, "?", inter_bold(9.5), crate::ui_feel::hl(&hresp, gy(0x8A8A8A), WHITE.c()));
         let _ = hresp.on_hover_text(HELP_SILENCE);
         ui.add_space(13.5);
         let (row, _) = ui.allocate_exact_size(vec2(ui.available_width(), 20.0), Sense::hover());

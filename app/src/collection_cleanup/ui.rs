@@ -158,7 +158,7 @@ impl Review {
                     .enumerate()
                     .map(|(i, t)| (t.id, i))
                     .collect();
-                app.collection_categories = Default::default();
+                app.invalidate_track_metadata();
                 app.selected.retain(|id| !removed.contains(id));
                 app.sub_sel.retain(|id| !removed.contains(id));
                 app.previews.retain(|id, _| !removed.contains(id));

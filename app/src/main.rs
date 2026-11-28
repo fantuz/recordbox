@@ -39,6 +39,7 @@ mod fx_sweep;
 mod fx_rev;
 mod fx_echo;
 mod fx_echo_plus;
+mod feel_selftest;
 #[cfg(test)]
 mod fx7b_tests;
 #[cfg(test)]
@@ -77,6 +78,8 @@ mod sampler_lib;
 mod sequencer;
 mod ui_sampler;
 mod model;
+mod motion;
+mod artwork_thumbs;
 mod manual;
 mod phrase;
 mod phrase_rb;
@@ -123,6 +126,7 @@ mod ui_dialogs;
 mod ui_edit;
 mod ui_edit_view;
 mod ui_kit;
+mod ui_feel;
 mod ui_library_ext;
 mod ui_midi;
 mod ui_mpl;
@@ -279,6 +283,9 @@ impl eframe::App for Gui {
     fn raw_input_hook(&mut self, _ctx: &egui::Context, raw: &mut egui::RawInput) {
         ui_groove::frame_hook(&mut self.app, raw);
         app_hooks::raw_input(&mut self.app, raw);
+        if self.app.screenshot.is_some() && raw.viewport_id == egui::ViewportId::ROOT {
+            feel_selftest::raw_input(&mut self.app, raw);
+        }
         let Some((_, frame)) = self.app.screenshot.clone() else { return };
         self.app.shot_player_events(frame, raw);
         self.app.shot_perf_events(frame, raw);
@@ -340,6 +347,7 @@ impl eframe::App for Gui {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         let bench_t0 = std::time::Instant::now();
         let app = &mut self.app;
+        ui_feel::begin_frame(app, ctx);
         if self.pending_docked_size.is_some() && windowed(ctx) {
             restore_docked_size(ctx, self.pending_docked_size.take());
         }
@@ -409,7 +417,11 @@ impl eframe::App for Gui {
         }
         let decks_visible = !ui_edit::is_edit(app) && (!app.full_browser() || app.performance());
         if ui_edit::is_edit(app) {
-            step!(ui_edit_view::top_panel(app, ctx));
+            if app.library_window.is_some() {
+                app.with_detached_player_drag(ctx, |app| ui_edit_view::top_panel(app, ctx));
+            } else {
+                step!(ui_edit_view::top_panel(app, ctx));
+            }
         } else if decks_visible {
             // The header is 28 pt and 1 Player / 2 Players 256 pt tall with no rule between them
             // (measured on rekordbox: the player ends 284 pt below the window top); the Simple
@@ -450,8 +462,10 @@ impl eframe::App for Gui {
                 }
                 window_input(app, child);
                 theme::sync(child, app.prefs.rb.color_theme == 2 && !ui_edit::is_edit(app));
-                step!(library_panel(app, child));
-                step!(ui_dialogs::library_dialogs(app, child));
+                ui_feel::library_frame(app, child, |app| {
+                    step!(library_panel(app, child));
+                    step!(ui_dialogs::library_dialogs(app, child));
+                });
                 false
             });
             if reattach {
@@ -485,6 +499,7 @@ impl eframe::App for Gui {
         step!(cue_tools::windows(app, ctx));
         step!(ui_midi::window(app, ctx));
         step!(ui_rec::windows(app, ctx));
+        ui_feel::end_frame(app, ctx);
 
         if app.analysis_total > 0 || app.importing.is_some() || app.export_job.is_some() {
             ctx.request_repaint_after(std::time::Duration::from_millis(250));
@@ -558,7 +573,7 @@ impl eframe::App for Gui {
                 std::process::exit(1);
             }
             app.screenshot = Some((path, frames + 1));
-            ctx.request_repaint();
+            if !feel_selftest::idle_probe() { ctx.request_repaint(); }
         }
     }
 

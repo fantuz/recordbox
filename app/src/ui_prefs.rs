@@ -534,7 +534,7 @@ fn prefs_body(app: &mut App, ui: &mut Ui, height: f32) {
         }
         let sel = app.dialogs.prefs_tab == *i && app.dialogs.ext.prefs_search.trim().is_empty();
         let resp = ui.interact(r, ui.id().with(("prefs_page", *i)), egui::Sense::click());
-        let bg = if sel { PBLUE } else if resp.hovered() { gy(0x2A2A2A) } else { BG2.c() };
+        let bg = if sel { PBLUE } else { crate::ui_feel::hl(&resp, BG2.c(), gy(0x2A2A2A)) };
         if bg != BG2 {
             ui.painter().rect_filled(r, 0.0, bg);
         }
@@ -572,7 +572,7 @@ fn prefs_body(app: &mut App, ui: &mut Ui, height: f32) {
         }
         let r = Rect::from_min_size(at(x, 4.0), vec2(w, 30.0));
         let resp = ui.interact(r, ui.id().with(("prefs_tab", page, i)), egui::Sense::click());
-        ui.painter().rect_filled(r, 0.0, if sel { PBLUE } else if resp.hovered() && out.is_none() { gy(0x2A2A2A) } else { BG2.c() });
+        ui.painter().rect_filled(r, 0.0, if sel { PBLUE } else { crate::ui_feel::hl_if(&resp, out.is_none(), BG2.c(), gy(0x2A2A2A)) });
         crate::prefs_font::draw(ui, r, t, 14.0, false, if sel { ON_ACCENT.c() } else if out.is_some() { OFF.c() } else { PREF_CAT.c() }, kit::Just::Centre);
         crate::ui_prefs_item::tab_seen(t, r);
         if let Some(why) = out {
@@ -1121,7 +1121,7 @@ fn place(ui: &mut Ui, r: Rect, enabled: bool, w: impl egui::Widget) -> egui::Res
 /// The grey 20 pt square with a white arrow head under the Active list.
 fn order_button(ui: &mut Ui, r: Rect, up: bool, enabled: bool, tip: &str) -> bool {
     let resp = ui.interact(r, ui.id().with(("order", up, r.min.x as i32)), if enabled { egui::Sense::click() } else { egui::Sense::hover() });
-    ui.painter().rect_filled(r, 2.0, if !enabled { gy(0x3A3A3A) } else if resp.hovered() { gy(0x666666) } else { gy(0x555555) });
+    ui.painter().rect_filled(r, 2.0, if !enabled { gy(0x3A3A3A) } else { crate::ui_feel::hl(&resp, gy(0x555555), gy(0x666666)) });
     let (a, b) = if up { (r.min.y + 12.0, r.min.y + 8.0) } else { (r.min.y + 8.0, r.min.y + 12.0) };
     let pts = vec![pos2(r.min.x + 6.0, a), pos2(r.min.x + 10.0, b), pos2(r.min.x + 14.0, a)];
     ui.painter().add(egui::Shape::line(pts, egui::Stroke::new(1.0, if enabled { WHITE } else { OFF })));

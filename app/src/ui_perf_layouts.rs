@@ -301,17 +301,10 @@ pub(crate) fn capture_mode() -> bool {
 /// a press on the running loop or on the slicer's domain picks it up to be dropped on a
 /// sampler slot (`WidgetWaveView::startCaptureDragging`). Called after the waveform has been
 /// drawn, so that this takes the drag before the waveform's own scrubbing.
-pub(crate) fn capture_pick(app: &mut App, ui: &mut Ui, lane: Rect, n: u8, vertical: bool) {
+fn capture_pick(app: &mut App, ui: &mut Ui, lane: Rect, n: u8, vertical: bool, pos: f64, pps: f64) {
     if !capture_mode() || app.deck.audio.is_none() {
         return;
     }
-    let Some((r, pos, pps)) = (if vertical { None } else { app.deck.detail_map }) .or_else(|| {
-        let span = span(app)?;
-        Some((lane, app.pos(), lane.height() as f64 / span))
-    }) else { return };
-    let along = |t: f64| -> f32 {
-        if vertical { lane.center().y + ((t - pos) * pps) as f32 } else { r.center().x + ((t - pos) * pps) as f32 }
-    };
     let ni = (n as usize).min(3);
     let slicer = app.pads.deck[ni].slicer.active;
     let region = if slicer {
@@ -327,8 +320,7 @@ pub(crate) fn capture_pick(app: &mut App, ui: &mut Ui, lane: Rect, n: u8, vertic
         }
         return;
     };
-    let (u0, u1) = (along(a), along(b));
-    let rr = if vertical { Rect::from_min_max(pos2(lane.min.x, u0.min(u1)), pos2(lane.max.x, u0.max(u1))) } else { Rect::from_min_max(pos2(u0.min(u1), lane.min.y), pos2(u0.max(u1), lane.max.y)) }.intersect(lane);
+    let rr = capture_region(lane, vertical, pos, pps, a, b);
     if rr.width() <= 0.0 || rr.height() <= 0.0 {
         return;
     }
@@ -342,6 +334,18 @@ pub(crate) fn capture_pick(app: &mut App, ui: &mut Ui, lane: Rect, n: u8, vertic
         let pp = ui.input(|i| i.pointer.press_origin()).unwrap_or(rr.center());
         CAPTURE_DRAG.with(|c| c.set(Some((n, slicer, pp))));
     }
+}
+
+/// Project the selected loop or slicer range using the transform already painted this frame.
+fn capture_region(lane: Rect, vertical: bool, pos: f64, pps: f64, a: f64, b: f64) -> Rect {
+    let center = if vertical { lane.center().y } else { lane.center().x };
+    let px = |t| center + ((t - pos) * pps) as f32;
+    let (lo, hi) = (px(a.min(b)), px(a.max(b)));
+    if vertical {
+        Rect::from_min_max(pos2(lane.min.x, lo), pos2(lane.max.x, hi))
+    } else {
+        Rect::from_min_max(pos2(lo, lane.min.y), pos2(hi, lane.max.y))
+    }.intersect(lane)
 }
 
 /// The capture being dragged: drawn under the pointer, and dropped on a sampler slot when the
@@ -949,7 +953,7 @@ pub(crate) fn tab_column(ui: &mut Ui, r: Rect, grid_on: bool) -> Option<bool> {
     for (i, (rr, name)) in [(top, "padIcon.svg"), (bot, "gridIcon.svg")].into_iter().enumerate() {
         let resp = ui.interact(rr, ui.id().with(("decktab", i)), Sense::click());
         let on = (i == 1) == grid_on;
-        let col = if on { WHITE.c() } else if resp.hovered() { gy(0x969696) } else { gy(0x646464) };
+        let col = if on { WHITE.c() } else { crate::ui_feel::hl(&resp, gy(0x646464), gy(0x969696)) };
         let ir = Rect::from_center_size(rr.center() + vec2(0.0, 0.5), vec2(12.0, 13.0));
         if !skin_at(&p, name, ir, col) {
             if i == 0 {
@@ -1003,8 +1007,8 @@ pub(crate) fn grid_panel(app: &mut App, ui: &mut Ui, area: Rect, n: u8, right: b
         if !skin_at(&p, name, r, tint) {
             p.rect_filled(r, 2.0, gy(0x191919));
         }
-        if resp.hovered() && on {
-            p.rect_filled(r, 2.0, Color32::from_white_alpha(25));
+        if let Some(c) = crate::ui_feel::hover_fill_if(&resp, on, Color32::from_white_alpha(25)) {
+            p.rect_filled(r, 2.0, c);
         }
         let held = on && resp.is_pointer_button_down_on() && {
             let now = ui.input(|i| i.time);
@@ -1024,7 +1028,7 @@ pub(crate) fn grid_panel(app: &mut App, ui: &mut Ui, area: Rect, n: u8, right: b
     // Column 1: Set (the 1.1 Bars), A-GAIN, PLAY/PAUSE.
     let tb = |ui: &mut Ui, p: &Painter, r: Rect, id: &str, t: &str, on: bool| -> egui::Response {
         let resp = ui.interact(r, ui.id().with(("gridt", n, id)), Sense::click());
-        p.rect_filled(r, 2.0, if resp.hovered() && on { lighten(gy(0x191919)) } else { gy(0x191919) });
+        p.rect_filled(r, 2.0, crate::ui_feel::hl_if(&resp, on, gy(0x191919), lighten(gy(0x191919))));
         p.text(r.center(), Align2::CENTER_CENTER, t, arial(14.0 * 0.87), if on { grey } else { gy(0x505050) });
         resp
     };
@@ -1346,10 +1350,8 @@ pub(crate) fn beat_count_text(app: &App, pos: f64) -> String {
 /// and y exchanged: what the horizontal one has along its top edge (beat marks, hot cue
 /// letters) is along the left edge here, what it has along its bottom (the current cue,
 /// memory cues, phrases) along the right. The waveform is one mesh, as `ui_kit::Bars`.
-pub(crate) fn draw_detail_vertical(app: &mut App, ui: &mut Ui, lane: Rect, pos: f64) {
+fn draw_detail_vertical(app: &mut App, ui: &mut Ui, lane: Rect, pos: f64, pps: f64, transport_pps: f64) {
     let p = ui.painter_at(lane);
-    let span = span(app).unwrap_or(2.0);
-    let pps = lane.height() as f64 / span;
     let cy = lane.center().y;
     // The beat marks' outer ends: 1 pt in from the left, 2.5 pt in from the right.
     let (xl, xr) = (lane.min.x + 1.0, lane.max.x - 2.5);
@@ -1556,7 +1558,7 @@ pub(crate) fn draw_detail_vertical(app: &mut App, ui: &mut Ui, lane: Rect, pos: 
         app.play_pause();
     }
     if !click_mode || alt || resp.context_menu_opened() {
-        let t = app.deck.x.menu_time.unwrap_or(pos);
+        let t = app.deck.x.menu_time.unwrap_or_else(|| app.pos());
         resp.context_menu(|ui| crate::ui_player2::wave_menu(app, ui, t));
     }
     // Cue markers can be dragged along the lane as on the horizontal waveforms (hot cues by
@@ -1593,7 +1595,7 @@ pub(crate) fn draw_detail_vertical(app: &mut App, ui: &mut Ui, lane: Rect, pos: 
             let start = app.deck.cues.iter().find(|c| c.id == id).map(|c| c.start).unwrap_or(0.0);
             app.deck.cue_drag = Some((id, app.deck.cues.clone(), t_of(pp.y) - start));
         } else {
-            app.deck.drag_origin = Some((pp.map(|p| p.y).unwrap_or(cy), pos));
+            app.deck.drag_origin = Some((pp.map(|p| p.y).unwrap_or(cy), app.pos()));
         }
     }
     if let Some((id, _, grab)) = app.deck.cue_drag.clone() {
@@ -1613,14 +1615,14 @@ pub(crate) fn draw_detail_vertical(app: &mut App, ui: &mut Ui, lane: Rect, pos: 
         }
     } else if let Some((y0, t0)) = app.deck.x.adjust_drag {
         if let (true, Some(pp)) = (resp.dragged(), resp.interact_pointer_pos()) {
-            app.loop_adjust_to(t0 + (pp.y - y0) as f64 / pps);
+            app.loop_adjust_to(t0 + (pp.y - y0) as f64 / transport_pps);
         }
         if resp.drag_stopped() || !resp.dragged() {
             app.deck.x.adjust_drag = None;
         }
     } else if resp.dragged() {
         if let (Some((y0, p0)), Some(pp)) = (app.deck.drag_origin, resp.interact_pointer_pos()) {
-            let t = p0 - (pp.y - y0) as f64 / pps;
+            let t = p0 - (pp.y - y0) as f64 / transport_pps;
             app.deck.x.scrub += t.clamp(0.0, dur.max(0.0)) - app.pos();
             app.seek(t);
         }
@@ -1639,8 +1641,9 @@ pub(crate) fn draw_detail_vertical(app: &mut App, ui: &mut Ui, lane: Rect, pos: 
             zoom_step(app, if scroll.y > 0.0 { -1 } else { 1 });
         } else if scroll.y.abs() > 0.5 || scroll.x.abs() > 0.5 {
             let d = if scroll.y.abs() >= scroll.x.abs() { scroll.y } else { scroll.x };
-            let t = pos - d as f64 / pps;
-            app.deck.x.scrub += t.clamp(0.0, dur.max(0.0)) - app.pos();
+            let current = app.pos();
+            let t = current - d as f64 / transport_pps;
+            app.deck.x.scrub += t.clamp(0.0, dur.max(0.0)) - current;
             app.seek(t);
         }
     }
@@ -1662,11 +1665,13 @@ pub(crate) fn h_lane(app: &mut App, ui: &mut Ui, lane: Rect, n: u8) {
     let mut child = ui.new_child(egui::UiBuilder::new().max_rect(lane).id_salt(("perfwave", n)));
     child.set_clip_rect(lane.intersect(ui.clip_rect()));
     app.with_deck(n, |app| {
-        let pos = app.pos();
+        let pos = if app.deck.x.dk.grid_tab { app.pos() } else { crate::ui_feel::shown_pos(app) };
         // (Cmd / Ctrl + wheel changes `prefs.zoom` in there: taken as a Performance zoom step.)
         let z = app.prefs.zoom;
         crate::ui_player::draw_detail_at(app, &mut child, r, pos, 0.0, crate::ui_player::DetailMode::Full);
-        capture_pick(app, &mut child, r, n, false);
+        if let Some((rect, shown, pps)) = app.deck.detail_map {
+            capture_pick(app, &mut child, rect, n, false, shown, pps);
+        }
         if app.prefs.zoom != z {
             let dir = if app.prefs.zoom < z { -1 } else { 1 };
             app.prefs.zoom = z;
@@ -1792,9 +1797,15 @@ fn vertical(app: &mut App, ui: &mut Ui) {
         let mut child = ui.new_child(egui::UiBuilder::new().max_rect(lane).id_salt(("perfvwave", *n)));
         child.set_clip_rect(lane.intersect(ui.clip_rect()));
         let label = app.with_deck(*n, |app| {
-            let pos = app.pos();
-            draw_detail_vertical(app, &mut child, lane, pos);
-            capture_pick(app, &mut child, lane, *n, true);
+            let selected_span = span(app).unwrap_or(2.0);
+            let (pos, shown_span) = if app.deck.x.dk.grid_tab {
+                (app.pos(), selected_span)
+            } else {
+                (crate::ui_feel::shown_pos(app), crate::ui_feel::zoom_span(&child, lane, selected_span))
+            };
+            let pps = lane.height() as f64 / shown_span;
+            draw_detail_vertical(app, &mut child, lane, pos, pps, lane.height() as f64 / selected_span);
+            capture_pick(app, &mut child, lane, *n, true, pos, pps);
             beat_count_text(app, pos)
         });
         // The beat count under the lane: rekordbox's labels are 64 pt wide at 31 and 153 pt
@@ -2012,8 +2023,8 @@ pub(crate) fn layout_selector(app: &mut App, ui: &mut Ui, bar: Rect) {
     let p = ui.painter().clone();
     let r = Rect::from_min_size(bar.min + vec2(130.0, 3.0), vec2(50.0, 22.0));
     let resp = ui.interact(r, ui.id().with("perflayout"), Sense::click());
-    if resp.hovered() {
-        p.rect_filled(r, 2.0, gy(0x1E1E1E));
+    if let Some(c) = crate::ui_feel::hover_fill(&resp, gy(0x1E1E1E)) {
+        p.rect_filled(r, 2.0, c);
     }
     let row = layout(app).row();
     let mark = |p: &Painter, row: usize, c: Pos2| {
@@ -2109,7 +2120,7 @@ pub(crate) fn performance_tools(app: &mut App, ui: &mut Ui, bar: Rect) {
         let r = Rect::from_center_size(pos2(rx - 482.0, ty + 16.0), vec2(30.0, 16.0));
         let resp = ui.interact(r, ui.id().with(("top", "PAD")), Sense::click());
         let on = app.pads.editor_open;
-        p.text(pos2(rx - 482.0, ty + 15.75), Align2::CENTER_CENTER, "PAD", arial_b(12.0), if on { WHITE.c() } else if resp.hovered() { gy(0x8C8C8C) } else { gy(0x646464) });
+        p.text(pos2(rx - 482.0, ty + 15.75), Align2::CENTER_CENTER, "PAD", arial_b(12.0), if on { WHITE.c() } else { crate::ui_feel::hl(&resp, gy(0x646464), gy(0x8C8C8C)) });
         if resp.on_hover_text("Open/Close the PAD EDITOR window.").clicked() {
             app.pads.editor_open = !on;
         }
@@ -2398,6 +2409,19 @@ fn layout_state(app: &App) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn capture_hit_region_uses_the_rendered_playhead_and_scale_on_each_axis() {
+        let lane = Rect::from_min_max(pos2(10.0, 20.0), pos2(210.0, 140.0));
+        // Rendered head time 10.25 s, rendered scale 80 pt/s. The capture spans
+        // 9.75–10.5 s. Both marker endpoints must lie inside the capture target.
+        assert_eq!(capture_region(lane, false, 10.25, 80.0, 9.75, 10.5),
+                   Rect::from_min_max(pos2(70.0, 20.0), pos2(130.0, 140.0)));
+        assert_eq!(capture_region(lane, true, 10.25, 80.0, 9.75, 10.5),
+                   Rect::from_min_max(pos2(10.0, 40.0), pos2(210.0, 100.0)));
+        assert_eq!(capture_region(lane, true, 10.25, 80.0, 9.0, 11.0), lane);
+        assert!(capture_region(lane, false, 10.25, 80.0, 12.0, 13.0).width() <= 0.0);
+    }
 
     #[test]
     fn layout_modes_and_selector_rows_are_rekordboxs() {

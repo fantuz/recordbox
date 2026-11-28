@@ -60,6 +60,7 @@ To open the Homebrew app in Finder, run `open "$(brew --prefix fantuz/recordbox/
 
 ## Prepare and play
 
+- **Adjust the interface.** EXPORT and PERFORMANCE offer a Light appearance and a detachable library. Choose Full, Reduced or Off under **Preferences → Advanced → Others → recordbox → Interface motion**. [Interface behavior and measurements](docs/UPSTREAM-INTEGRATION.md#interface-motion-from-ef454ed)
 - **Build a collection.** Import local tracks and folders, M3U playlists or a rekordbox XML collection. Rate and tag tracks, organise playlists, and back up or restore your recordbox library.
 - **Prepare a track in EXPORT.** Analyse BPM, key and waveforms, edit the beat grid, and set loops, memory cues and hot cues. New analysis uses the Rekordbox-compatible beat detector. Choose **recordbox classic** in **Preferences → Analysis → Beat grid estimator** to use the earlier detector. Optional high-precision refinement works with either choice.
   By default, press **1–8** to set or recall hot cues A–H. Hold **Shift** and press the same number to clear that slot.

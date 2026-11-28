@@ -462,14 +462,14 @@ impl App {
 /// A small text button without a box (Q, BPM SYNC, MASTER, MUTE, ERASE): grey, blue when on.
 fn text_button(ui: &mut Ui, r: Rect, id: impl std::hash::Hash, label: &str, on: bool, enabled: bool) -> egui::Response {
     let resp = ui.interact(r, ui.id().with(id), Sense::click());
-    let col = if !enabled { gy(0x424242) } else if on { BLUE.c() } else if resp.hovered() { WHITE.c() } else { gy(0x8C8C8C) };
+    let col = if !enabled { gy(0x424242) } else if on { BLUE.c() } else { crate::ui_feel::hl(&resp, gy(0x8C8C8C), WHITE.c()) };
     ui.painter().text(r.center(), Align2::CENTER_CENTER, label, caps(9.5), col);
     resp
 }
 
 fn box_button(ui: &mut Ui, r: Rect, id: impl std::hash::Hash, label: &str, on: bool) -> egui::Response {
     let resp = ui.interact(r, ui.id().with(id), Sense::click());
-    ui.painter().rect_filled(r, 2.0, if on { BLUE.c() } else if resp.hovered() { lighten(BTN.c()) } else { BTN.c() });
+    ui.painter().rect_filled(r, 2.0, if on { BLUE.c() } else { crate::ui_feel::hl(&resp, BTN.c(), lighten(BTN.c())) });
     if !label.is_empty() {
         ui.painter().text(r.center(), Align2::CENTER_CENTER, label, caps(8.0), WHITE.c());
     }
@@ -633,7 +633,7 @@ pub fn panel(app: &mut App, ui: &mut Ui, r: Rect) {
         let presp = ui.interact(pr, ui.id().with(("smp_play", idx)), Sense::click_and_drag());
         let code = app.sampler_color_code(idx);
         let col = crate::sampler_ext::pad_color(code);
-        p.rect_filled(pr, 2.0, if !loaded { OFF.c() } else if playing { hex(crate::sampler_ext::PAD_COLORS[code as usize]) } else if presp.hovered() { lighten(col) } else { col });
+        p.rect_filled(pr, 2.0, if !loaded { OFF.c() } else if playing { hex(crate::sampler_ext::PAD_COLORS[code as usize]) } else { crate::ui_feel::hl(&presp, col, lighten(col)) });
         if loaded {
             let c = pr.center();
             p.add(egui::Shape::convex_polygon(vec![c + vec2(-3.0, -4.0), c + vec2(4.0, 0.0), c + vec2(-3.0, 4.0)], WHITE, Stroke::NONE));
@@ -733,8 +733,10 @@ pub fn panel(app: &mut App, ui: &mut Ui, r: Rect) {
 
         // A track dragged from the browser or from a deck loads here.
         if let Some(ids) = app.drag.clone() {
-            if hovered {
+            if crate::ui_feel::drop_glow(ui, ui.id().with(("sampler_drop", idx)), sr, hovered, 0.0) {
                 p.rect_stroke(sr.shrink(3.0), 0.0, Stroke::new(2.0_f32, BLUE), egui::StrokeKind::Inside);
+            }
+            if hovered {
                 if released {
                     if let Some(id) = ids.first() {
                         app.sampler_load(idx, *id);
@@ -744,8 +746,10 @@ pub fn panel(app: &mut App, ui: &mut Ui, r: Rect) {
         }
         // Sampler list rows dragged here (sampler_lib.rs).
         crate::ui_sampler_lib::note_slot(app, idx, sr);
-        if app.mixx.lib.drag.is_some() && app.drag.is_none() && hovered {
+        if app.mixx.lib.drag.is_some() && app.drag.is_none() && crate::ui_feel::drop_glow(ui, ui.id().with(("sampler_drop", idx)), sr, hovered, 0.0) {
             p.rect_stroke(sr.shrink(3.0), 0.0, Stroke::new(2.0_f32, BLUE), egui::StrokeKind::Inside);
+        }
+        if app.mixx.lib.drag.is_some() && app.drag.is_none() && hovered {
             if released {
                 app.smplib_drop_on_slot(idx);
             }
@@ -788,7 +792,7 @@ pub fn panel(app: &mut App, ui: &mut Ui, r: Rect) {
     let hp_on = crate::audio::HP_ACTIVE.load(std::sync::atomic::Ordering::Relaxed);
     let cr = at(c + 7.0, 50.0, 30.0, 14.0);
     let cresp = ui.interact(cr, ui.id().with("smp_cue"), Sense::click());
-    p.rect_filled(cr, 2.0, if sp.cue { gy(0xFFA500) } else if cresp.hovered() { lighten(BTN.c()) } else { BTN.c() });
+    p.rect_filled(cr, 2.0, if sp.cue { gy(0xFFA500) } else { crate::ui_feel::hl(&cresp, BTN.c(), lighten(BTN.c())) });
     p.text(cr.center(), Align2::CENTER_CENTER, "CUE", caps(8.0), if sp.cue { BG.c() } else { gy(0x8C8C8C) });
     if cresp.on_hover_text(if hp_on { "Headphones CUE of the sampler" } else { "Headphones CUE of the sampler.\nNo headphones output is set: choose one in Preferences > Audio > Input/Output." }).clicked() {
         sp.cue = !sp.cue;
@@ -805,7 +809,7 @@ pub fn panel(app: &mut App, ui: &mut Ui, r: Rect) {
     let hy = fb - sp.volume / 100.0 * (fb - ft);
     p.rect_filled(Rect::from_min_max(pos2(fx - 1.0, ft), pos2(fx + 1.0, fb)), 0.0, OFF);
     p.rect_filled(Rect::from_min_max(pos2(fx - 1.0, hy), pos2(fx + 1.0, fb)), 0.0, BLUE);
-    p.rect_filled(Rect::from_center_size(pos2(fx, hy), vec2(24.0, 2.0)), 0.0, if fresp.hovered() || fresp.dragged() { WHITE.c() } else { gy(0x646464) });
+    p.rect_filled(Rect::from_center_size(pos2(fx, hy), vec2(24.0, 2.0)), 0.0, crate::ui_feel::hot_col(&fresp, gy(0x646464), WHITE.c()));
 
     // BPM (bold 18, 52 x 20): drag up or down, or the wheel; + and - under it.
     // (While it follows the master deck, + / - and typing are off; as the MASTER it is free.)
@@ -864,7 +868,7 @@ pub fn panel(app: &mut App, ui: &mut Ui, r: Rect) {
     for (dir, x, label) in [(1.0f32, w / 2.0 - 22.0, "+"), (-1.0, w / 2.0 + 2.0, "-")] {
         let rr = at(x, h - 25.0, 20.0, 20.0);
         let resp = ui.interact(rr, ui.id().with(("smp_bpm_step", label)), Sense::click_and_drag());
-        let col = if synced { gy(0x424242) } else if resp.hovered() { WHITE.c() } else { gy(0xC8C8C8) };
+        let col = if synced { gy(0x424242) } else { crate::ui_feel::hl(&resp, gy(0xC8C8C8), WHITE.c()) };
         p.rect_filled(Rect::from_center_size(rr.center(), vec2(9.0, 1.2)), 0.0, col);
         if dir > 0.0 {
             p.rect_filled(Rect::from_center_size(rr.center(), vec2(1.2, 9.0)), 0.0, col);
@@ -900,7 +904,7 @@ pub fn panel(app: &mut App, ui: &mut Ui, r: Rect) {
     for b in 0..4usize {
         let rr = at(43.0 + 28.0 * b as f32, h - 19.0, 22.0, 10.0);
         let resp = ui.interact(rr, ui.id().with(("smp_bank", b)), Sense::click());
-        p.rect_filled(rr, 1.0, if bank == b { BLUE.c() } else if resp.hovered() { lighten(gy(0x282828)) } else { gy(0x282828) });
+        p.rect_filled(rr, 1.0, if bank == b { BLUE.c() } else { crate::ui_feel::hl(&resp, gy(0x282828), lighten(gy(0x282828))) });
         if crate::ui_player::press_fired(ui, &resp) && bank != b {
             sp.bank = b as u8;
             // Changing the bank closes an open EDIT panel.
@@ -1015,7 +1019,7 @@ fn sequencer_strip(app: &mut App, ui: &mut Ui, so: Pos2, sv: &SeqView, sp: &mut 
     let save = q_at(50.0, 5.0, 46.0, 20.0);
     let resp = ui.interact(save, ui.id().with("seq_save"), Sense::click());
     p.rect_filled(save, 2.0, gy(0x0A0A0A));
-    p.text(save.center(), Align2::CENTER_CENTER, "SAVE", caps(10.5), if !sv.dirty { gy(0x303030) } else if resp.hovered() { WHITE.c() } else { gy(0x8C8C8C) });
+    p.text(save.center(), Align2::CENTER_CENTER, "SAVE", caps(10.5), if !sv.dirty { gy(0x303030) } else { crate::ui_feel::hl(&resp, gy(0x8C8C8C), WHITE.c()) });
     if tip(resp, app, "Sequence Save:\nSave Sampler sequence").clicked() && sv.dirty {
         app.sampler_seq_save();
     }
@@ -1025,7 +1029,7 @@ fn sequencer_strip(app: &mut App, ui: &mut Ui, so: Pos2, sv: &SeqView, sp: &mut 
     for (dir, x, id) in [(-1i32, 105.0f32, "seq_prev"), (1, 200.0, "seq_next")] {
         let ar = q_at(x, 11.0, 5.0, 8.0);
         let resp = ui.interact(ar.expand2(vec2(4.0, 6.0)), ui.id().with(id), Sense::click());
-        let col = if resp.hovered() { WHITE.c() } else { arrow };
+        let col = crate::ui_feel::hl(&resp, arrow, WHITE.c());
         let (tipx, backx) = if dir < 0 { (ar.min.x, ar.max.x) } else { (ar.max.x, ar.min.x) };
         let s = if dir < 0 { 1.0 } else { -1.0 };
         // The chevron of the SVG: tip at (0, 4.07), arms to the far edge, 1.8 thick.
@@ -1117,7 +1121,7 @@ fn sequencer_strip(app: &mut App, ui: &mut Ui, so: Pos2, sv: &SeqView, sp: &mut 
     if slot_hover && (saved_slot || sv.has_events || sv.dirty) && sv.reserved.is_none() {
         let dr = q_at(185.0, 9.0, 12.0, 12.0);
         let dresp = ui.interact(dr, ui.id().with("seq_delete"), Sense::click());
-        let col = if dresp.hovered() { WHITE.c() } else { gy(0xA0A0A0) };
+        let col = crate::ui_feel::hl(&dresp, gy(0xA0A0A0), WHITE.c());
         let c = dr.center();
         p.line_segment([c + vec2(-3.5, -3.5), c + vec2(3.5, 3.5)], Stroke::new(1.3_f32, col));
         p.line_segment([c + vec2(-3.5, 3.5), c + vec2(3.5, -3.5)], Stroke::new(1.3_f32, col));
@@ -1175,7 +1179,7 @@ fn sequencer_strip(app: &mut App, ui: &mut Ui, so: Pos2, sv: &SeqView, sp: &mut 
         // (Arial 12 in rekordbox: a little larger than Q and BPM SYNC.)
         let mr = q_at(x, 5.0, 46.0, 20.0);
         let resp = ui.interact(mr, ui.id().with(id), Sense::click());
-        let col = if !sv.playing { gy(0x484848) } else if on { BLUE.c() } else if resp.hovered() { WHITE.c() } else { gy(0x8C8C8C) };
+        let col = if !sv.playing { gy(0x484848) } else if on { BLUE.c() } else { crate::ui_feel::hl(&resp, gy(0x8C8C8C), WHITE.c()) };
         p.text(mr.center(), Align2::CENTER_CENTER, label, caps(10.5), col);
         if tip(resp, app, hint).clicked() {
             if sv.playing {
@@ -1261,7 +1265,7 @@ fn edit_panel(app: &mut App, ui: &mut Ui, er: Rect, idx: usize, slot_w: f32) {
         let on = if label == "MT" { s.mt } else { s.sync };
         let rr = at(x, 8.0, 30.0, 14.0);
         let resp = ui.interact(rr, ui.id().with((id, idx)), Sense::click());
-        p.rect_filled(rr, 2.0, if on && s.looped { BLUE.c() } else if resp.hovered() && s.looped { lighten(BTN.c()) } else { BTN.c() });
+        p.rect_filled(rr, 2.0, if on && s.looped { BLUE.c() } else { crate::ui_feel::hl_if(&resp, s.looped, BTN.c(), lighten(BTN.c())) });
         p.text(rr.center(), Align2::CENTER_CENTER, label, caps(8.0), if s.looped { WHITE.c() } else { gy(0x424242) });
         let hint = if label == "MT" { "MASTER TEMPO: the sample keeps its pitch when its tempo changes" } else { "SYNC: the loop sample follows the sampler's BPM" };
         if tip(resp, app, hint).clicked() && s.looped {

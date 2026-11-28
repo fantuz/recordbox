@@ -460,7 +460,7 @@ const OUTLINE: egui::Color32 = hex(0x646464);
 fn small(ui: &mut Ui, r: Rect, id: impl std::hash::Hash, label: &str, lit: bool, enabled: bool) -> egui::Response {
     let resp = ui.interact(r, ui.id().with(id), Sense::click());
     let p = ui.painter();
-    p.rect_filled(r, 2.0, if lit { BLUE.c() } else if resp.hovered() && enabled { lighten(BTN.c()) } else { gy(0x282828) });
+    p.rect_filled(r, 2.0, if lit { BLUE.c() } else { crate::ui_feel::hl_if(&resp, enabled, gy(0x282828), lighten(BTN.c())) });
     p.text(r.center(), Align2::CENTER_CENTER, label, caps(9.0), if enabled { WHITE.c() } else { OFF.c() });
     resp
 }
@@ -469,7 +469,7 @@ fn small(ui: &mut Ui, r: Rect, id: impl std::hash::Hash, label: &str, lit: bool,
 fn choice(ui: &mut Ui, r: Rect, id: impl std::hash::Hash, label: &str, lit: bool) -> egui::Response {
     let resp = ui.interact(r, ui.id().with(id), Sense::click());
     let p = ui.painter();
-    p.rect_filled(r, 2.0, if lit { BLUE.c() } else if resp.hovered() { lighten(BTN.c()) } else { gy(0x1E1E1E) });
+    p.rect_filled(r, 2.0, if lit { BLUE.c() } else { crate::ui_feel::hl(&resp, gy(0x1E1E1E), lighten(BTN.c())) });
     if !lit {
         p.rect_stroke(r, 2.0, Stroke::new(1.0_f32, OUTLINE), egui::StrokeKind::Inside);
     }
@@ -489,12 +489,15 @@ fn fx_knob_r(ui: &mut Ui, c: egui::Pos2, rad: f32, id: impl std::hash::Hash, val
     if resp.double_clicked() {
         out = Some(reset);
     } else if resp.dragged() {
-        let dy = resp.drag_delta().y;
+        let dy = crate::ui_feel::knob_dy(ui, &resp);
         if dy != 0.0 {
             out = Some((value - dy / 150.0).clamp(0.0, 1.0));
         }
     }
     let v = out.unwrap_or(value);
+    crate::ui_feel::grab_cursor(&resp);
+    crate::ui_feel::knob_readout(ui, &resp, egui::pos2(c.x, c.y - rad + 6.0), v, if bipolar { 0.5 } else { -1.0 });
+    let v = crate::ui_feel::knob_shown(&resp, v);
     let ang = |x: f32| (-225.0 + 270.0 * x).to_radians();
     let arc = |a: f32, b: f32| -> Vec<egui::Pos2> { (0..=32).map(|i| { let t = ang(a + (b - a) * i as f32 / 32.0); c + vec2(t.cos(), t.sin()) * rad }).collect() };
     let active = resp.hovered() || resp.dragged();
@@ -519,7 +522,7 @@ fn mode_button(ui: &mut Ui, r: Rect, id: impl std::hash::Hash, dots: i32, lit: b
     if lit {
         p.rect_filled(r, 2.0, BLUE);
     } else {
-        p.rect_filled(r, 2.0, if resp.hovered() { lighten(BTN.c()) } else { gy(0x181818) });
+        p.rect_filled(r, 2.0, crate::ui_feel::hl(&resp, gy(0x181818), lighten(BTN.c())));
         p.rect_stroke(r, 2.0, Stroke::new(1.0_f32, gy(0x646464)), egui::StrokeKind::Inside);
     }
     for k in 0..dots {
@@ -555,7 +558,7 @@ fn slot(app: &mut App, ui: &mut Ui, u: usize, s: usize, l: Lay, dx: f32) {
     let mut name_r = l.r(163.0 + dx, 2.0, 70.0, 18.0);
     name_r.max.x -= 2.0;
     let nresp = ui.interact(name_r, ui.id().with(("fxname", u, s)), Sense::click());
-    p.rect_filled(name_r, 2.0, if sp.on { BLUE.c() } else if nresp.hovered() { lighten(BTN.c()) } else { BTN.c() });
+    p.rect_filled(name_r, 2.0, if sp.on { BLUE.c() } else { crate::ui_feel::hl(&nresp, BTN.c(), lighten(BTN.c())) });
     p.text(name_r.center(), Align2::CENTER_CENTER, fx::name(sp.kind), caps(8.75), WHITE.c());
     if tip(nresp, app, "Turns the effect on/off.").clicked() {
         let f = &mut app.px.fx[u].params;
@@ -563,7 +566,7 @@ fn slot(app: &mut App, ui: &mut Ui, u: usize, s: usize, l: Lay, dx: f32) {
     }
     let list_r = l.r(233.0 + dx, 2.0, 16.0, 18.0);
     let lresp = ui.interact(list_r, ui.id().with(("fxlist", u, s)), Sense::click());
-    p.rect_filled(list_r, 2.0, if lresp.hovered() { lighten(BTN.c()) } else { BTN.c() });
+    p.rect_filled(list_r, 2.0, crate::ui_feel::hl(&lresp, BTN.c(), lighten(BTN.c())));
     crate::icons_player::chevron_down(&p, list_r.center() + vec2(0.0, 0.0), 0.85, WHITE.c());
     crate::ui_browser::dropdown(ui, &lresp, &format!("fxpop{u}{s}"), |ui| {
         egui::ScrollArea::vertical().max_height(420.0).show(ui, |ui| {
@@ -634,7 +637,7 @@ fn single_controls(app: &mut App, ui: &mut Ui, u: usize, l: Lay) {
         let mut r = l.r(287.0 + dx + if k == 1 { 5.0 } else { 0.0 }, 28.0 - k as f32, 50.0, 18.0);
         r.max.x -= 2.0;
         let resp = ui.interact(r, ui.id().with(("fxbtn", u, k)), Sense::click());
-        p.rect_filled(r, 2.0, if sp.btn[k] { BLUE.c() } else if resp.hovered() { lighten(BTN.c()) } else { BTN.c() });
+        p.rect_filled(r, 2.0, if sp.btn[k] { BLUE.c() } else { crate::ui_feel::hl(&resp, BTN.c(), lighten(BTN.c())) });
         p.text(r.center(), Align2::CENTER_CENTER, label, caps(8.0), WHITE.c());
         if resp.clicked() {
             app.px.fx[u].params.one.btn[k] = !sp.btn[k];
@@ -646,7 +649,7 @@ fn single_controls(app: &mut App, ui: &mut Ui, u: usize, l: Lay) {
     let now: Snap = (sp.knob[0], sp.knob[1], sp.btn[0], sp.btn[1]);
     let saved = app.px.fx[u].snaps[pos(sp.kind)] == Some(now);
     let resp = ui.interact(r, ui.id().with(("fxsnap", u)), Sense::click());
-    p.rect_filled(r, 2.0, if resp.hovered() { lighten(BTN.c()) } else { BTN.c() });
+    p.rect_filled(r, 2.0, crate::ui_feel::hl(&resp, BTN.c(), lighten(BTN.c())));
     let c = if saved { hex(0x3C8CFF) } else { WHITE.c() };
     let body = Rect::from_center_size(r.center() + vec2(0.0, 0.5), vec2(12.0, 8.0));
     p.rect_stroke(body, 1.5, Stroke::new(1.0_f32, c), egui::StrokeKind::Inside);
@@ -760,7 +763,7 @@ pub fn panel(app: &mut App, ui: &mut Ui, r: Rect) {
             let mut lr = rl.r(81.0, 4.0, 16.0, 18.0).shrink2(vec2(0.0, 0.5));
             lr.min.x += 1.5;
             let rlresp = ui.interact(lr, ui.id().with(("fxrellist", u)), Sense::click());
-            p.rect_filled(lr, 2.0, if rlresp.hovered() { lighten(BTN.c()) } else { BTN.c() });
+            p.rect_filled(lr, 2.0, crate::ui_feel::hl(&rlresp, BTN.c(), lighten(BTN.c())));
             crate::icons_player::chevron_down(&p, lr.center(), 0.85, WHITE.c());
             crate::ui_browser::dropdown(ui, &rlresp, &format!("fxrelpop{u}"), |ui| {
                 for (i, (name, _)) in fx::RELEASE.iter().enumerate() {
@@ -865,7 +868,7 @@ fn cfx_row(app: &mut App, ui: &mut Ui, r: Rect) {
             let on = app.px.fxx.cfx_multi_on[ch];
             let er = c.r(21.0, 3.0, 68.0, 18.0).shrink2(vec2(0.5, 0.0));
             let eresp = ui.interact(er, ui.id().with(("cfxmname", ch)), Sense::click());
-            p.rect_filled(er, 2.0, if on { BLUE.c() } else if eresp.hovered() { lighten(BTN.c()) } else { BTN.c() });
+            p.rect_filled(er, 2.0, if on { BLUE.c() } else { crate::ui_feel::hl(&eresp, BTN.c(), lighten(BTN.c())) });
             p.text(er.center(), Align2::CENTER_CENTER, crate::cfx::name(kind), caps(9.0), WHITE.c());
             if eresp.clicked() {
                 app.px.fxx.cfx_multi_on[ch] = !on;
@@ -874,7 +877,7 @@ fn cfx_row(app: &mut App, ui: &mut Ui, r: Rect) {
             let _ = eresp.on_hover_text("Turns the effect on/off.");
             let lr = c.r(89.0, 3.0, 18.0, 18.0).shrink2(vec2(0.5, 0.0));
             let lresp = ui.interact(lr, ui.id().with(("cfxmlist", ch)), Sense::click());
-            p.rect_filled(lr, 2.0, if lresp.hovered() { lighten(BTN.c()) } else { BTN.c() });
+            p.rect_filled(lr, 2.0, crate::ui_feel::hl(&lresp, BTN.c(), lighten(BTN.c())));
             crate::icons_player::chevron_down(&p, lr.center() + vec2(0.0, 0.5), 1.0, WHITE.c());
             crate::ui_browser::dropdown(ui, &lresp, &format!("cfxmpop{ch}"), |ui| {
                 for (name, kd) in crate::cfx::LIST {
@@ -968,7 +971,7 @@ fn mfx_row(app: &mut App, ui: &mut Ui, r: Rect) {
         let sel = app.prefs.fx.mfx.select[u].min(3) as usize;
         let sr = h.r(120.0, 3.0, 86.0, 18.0);
         let sresp = ui.interact(sr, ui.id().with(("mfxsel", u)), Sense::click());
-        p.rect_filled(sr, 2.0, if sresp.hovered() { lighten(BTN.c()) } else { BTN.c() });
+        p.rect_filled(sr, 2.0, crate::ui_feel::hl(&sresp, BTN.c(), lighten(BTN.c())));
         p.text(pos2(sr.min.x + 6.0, sr.center().y), Align2::LEFT_CENTER, format!("MERGE FX {}", sel + 1), caps(9.0), WHITE.c());
         crate::icons_player::chevron_down(&p, pos2(sr.max.x - 8.0, sr.center().y + 0.5), 1.0, WHITE.c());
         let names: Vec<String> = (0..4).map(|i| format!("MERGE FX {}   {}", i + 1, mfx::PRESETS[app.prefs.fx.mfx.preset[i].min(7) as usize].0)).collect();
@@ -985,7 +988,7 @@ fn mfx_row(app: &mut App, ui: &mut Ui, r: Rect) {
         let or = h.r(212.0, 3.0, 44.0, 18.0);
         let oresp = ui.interact(or, ui.id().with(("mfxon", u)), Sense::click());
         let busy = app.px.fxx.mfx.units[u].phase_on && !on;
-        p.rect_filled(or, 2.0, if on { BLUE.c() } else if busy { hex(0x1E468C) } else if oresp.hovered() { lighten(BTN.c()) } else { BTN.c() });
+        p.rect_filled(or, 2.0, if on { BLUE.c() } else if busy { hex(0x1E468C) } else { crate::ui_feel::hl(&oresp, BTN.c(), lighten(BTN.c())) });
         p.text(or.center(), Align2::CENTER_CENTER, "ON", caps(9.0), WHITE.c());
         if oresp.on_hover_text("MERGE FX ON/OFF (Shift + click: cancel)").clicked() {
             let shift = ui.input(|i| i.modifiers.shift);
@@ -1010,7 +1013,7 @@ fn mfx_row(app: &mut App, ui: &mut Ui, r: Rect) {
     p.text(l.r(1186.0, 0.0, 48.0, 24.0).center(), Align2::CENTER_CENTER, format!("{vol:+.1}dB"), bold(8.5), WHITE.c());
     let gr = l.r(1251.0, 3.0, 18.0, 18.0);
     let gresp = ui.interact(gr, ui.id().with("mfxsettings"), Sense::click());
-    p.rect_filled(gr, 2.0, if gresp.hovered() { lighten(BTN.c()) } else { BTN.c() });
+    p.rect_filled(gr, 2.0, crate::ui_feel::hl(&gresp, BTN.c(), lighten(BTN.c())));
     let c = gr.center();
     p.circle_stroke(c, 3.2, Stroke::new(1.6_f32, WHITE));
     for i in 0..6 {

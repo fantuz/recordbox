@@ -440,8 +440,10 @@ fn player_panel(app: &mut App, ui: &mut Ui, r: Rect) {
 fn drop_target(app: &mut App, ui: &mut Ui, r: Rect) {
     let over = ui.ctx().pointer_latest_pos().map(|pp| r.contains(pp)).unwrap_or(false);
     if let Some(ids) = app.drag.clone() {
-        if over {
+        if !app.deck_options.disable_load && crate::ui_feel::drop_glow(ui, ui.id().with("edit_drop"), r, over, 0.0) {
             ui.painter().rect_stroke(r.shrink(1.0), 0.0, st(1.0, WHITE.c()), egui::StrokeKind::Inside);
+        }
+        if over {
             if ui.input(|i| i.pointer.any_released()) {
                 if let Some(id) = ids.first() {
                     load_track(app, *id);
@@ -915,7 +917,7 @@ fn zoom_control(app: &mut App, ui: &mut Ui, r: Rect) {
         }
         let rst = Rect::from_min_size(r.min + vec2(35.0, 11.0), vec2(19.0, 8.0));
         let resp = ui.interact(rst.expand(4.0), ui.id().with("edit_rst"), Sense::click());
-        p.text(rst.center(), Align2::CENTER_CENTER, "RST", caps(em(10.0)), if resp.is_pointer_button_down_on() { ICON_DOWN } else if resp.hovered() { ICON_OVER } else { ICON });
+        p.text(rst.center(), Align2::CENTER_CENTER, "RST", caps(em(10.0)), if resp.is_pointer_button_down_on() { ICON_DOWN } else { crate::ui_feel::hl(&resp, ICON, ICON_OVER) });
         app.edit.map.rects.insert("zoom_rst".into(), rst);
         if resp.on_hover_text("Reset Zoom").clicked() {
             app.edit.queue.push(Cmd::ZoomReset);
@@ -926,7 +928,7 @@ fn zoom_control(app: &mut App, ui: &mut Ui, r: Rect) {
     }
     let ar = Rect::from_center_size(arrow.center(), vec2(10.0, 6.0));
     let resp = ui.interact(arrow, ui.id().with("edit_zoom_fold"), Sense::click());
-    let col = if resp.hovered() { ICON_OVER } else { hex(0x646464) };
+    let col = crate::ui_feel::hl(&resp, hex(0x646464), ICON_OVER);
     match skin(app, if open { "downArrow.svg" } else { "upArrow.svg" }) {
         Some(t) => paint_tex(&p, &t, ar, col),
         None => {
@@ -958,8 +960,8 @@ fn pad(app: &mut App, ui: &mut Ui, r: Rect, name: &str, asset: &str, label: &str
     }
     if enabled && resp.is_pointer_button_down_on() {
         p.rect_filled(r, 0.0, Color32::from_black_alpha(140));
-    } else if enabled && resp.hovered() {
-        p.rect_filled(r, 0.0, Color32::from_white_alpha(26));
+    } else if let Some(c) = crate::ui_feel::hover_fill_if(&resp, enabled, Color32::from_white_alpha(26)) {
+        p.rect_filled(r, 0.0, c);
     }
     app.edit.map.rects.insert(name.to_string(), r);
     let resp = if app.prefs.tooltips { resp.on_hover_text(tip) } else { resp };
@@ -1051,7 +1053,7 @@ fn tool_panel(app: &mut App, ui: &mut Ui, r: Rect, glyph_y: f32) {
     let strip = Rect::from_min_max(r.min, pos2(r.min.x + 22.0, r.max.y));
     let sresp = ui.interact(strip, ui.id().with("edit_tool_strip"), Sense::click());
     p.rect_filled(strip, 0.0, FRAME);
-    p.text(pos2(strip.center().x, glyph_y), Align2::CENTER_CENTER, if open { ">" } else { "<" }, rb(em(13.0)), if sresp.hovered() { WHITE.c() } else { hex(0xC8C8C8) });
+    p.text(pos2(strip.center().x, glyph_y), Align2::CENTER_CENTER, if open { ">" } else { "<" }, rb(em(13.0)), crate::ui_feel::hl(&sresp, hex(0xC8C8C8), WHITE.c()));
     app.edit.map.rects.insert("tool_strip".into(), strip);
     let sresp = if app.prefs.tooltips { sresp.on_hover_text("Shows/hides the tool area.") } else { sresp };
     if sresp.clicked() {
@@ -1096,7 +1098,7 @@ fn tool_panel(app: &mut App, ui: &mut Ui, r: Rect, glyph_y: f32) {
         let p = ui.painter().clone();
         p.rect_filled(add, 0.0, BAR);
         let can_add = can(app, &Cmd::AddToPalette);
-        let col = if !can_add { ICON.gamma_multiply(0.4) } else if resp.is_pointer_button_down_on() { ICON_DOWN } else if resp.hovered() { ICON_OVER } else { ICON };
+        let col = if !can_add { ICON.gamma_multiply(0.4) } else if resp.is_pointer_button_down_on() { ICON_DOWN } else { crate::ui_feel::hl(&resp, ICON, ICON_OVER) };
         let c = add.center();
         p.rect_filled(Rect::from_center_size(c, vec2(7.0, 1.0)), 0.0, col);
         p.rect_filled(Rect::from_center_size(c, vec2(1.0, 7.0)), 0.0, col);

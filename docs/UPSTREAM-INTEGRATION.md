@@ -21,6 +21,14 @@ The MIDI window gains the new palette. The controller protocol change in this in
 
 On Linux/X11, the native detached library showed both sync directions and their source and destination paths in Light appearance. Choosing a vocal export in the child brought the main window forward for confirmation. The Light EXPORT and PERFORMANCE headers measured 18.43:1 text contrast on the rendered fixture. [Desktop sync and write-back](LIBRARY-SYNC.md)
 
+### Interface motion from ef454ed
+
+The next upstream commit adds visual feedback for mouse presses, selection, drops, knobs and faders, plus smoother waveform drawing and scrolling to a selected track. Choose **Preferences → Advanced → Others → recordbox → Interface motion** for Full, Reduced or Off. Full also follows the system’s reduced-motion setting on macOS and Windows. [Upstream implementation](https://github.com/adamsardo/recordbox/commit/ef454ed0536aad897bb1c4da1d6215c419de8595)
+
+The fork keeps waveform repainting under the existing playback frame-rate setting. A hardware fader movement takes effect immediately. Waveform clicks use the geometry the user sees, and relative seeks and grid edits use the audio clock. Native wheel and trackpad events keep their original deltas and modifiers in both windows.
+
+A headless egui test showed why each browser pane needs its own animation state. With the same track visible in two panes and selected in just one, upstream requested 120 repaints over 120 idle test frames. Using a separate key per pane brought that to zero after the transition settled. The library decodes visible album covers on a background thread even when motion is Off. It limits the request and result queues to 16 each, uploads at most four thumbnails per viewport pass, and keeps up to 256 list thumbnails. Replacing album art invalidates a pending read of the older file.
+
 ### What the precision checks establish
 
 With generated 44.1 kHz audio, the ported tempo classifier reported 124.00 BPM and constant tempo on a steady 124 BPM track. On a track stepping from 128 to 86 BPM it reported 128.00 BPM with the changing-tempo flag. Those match the two published reference observations. The 128.00 figure is the detector’s reported track tempo. The flag determines how Auto handles the changing section. The optional model can now convert eligible rates such as 32, 88.2, 96 and 192 kHz. A track that exceeds the 15-minute limit stays on the selected ordinary estimator. Dynamic and Auto can use the new changing-tempo pipeline. Too few beats, unresolved half-beat offsets and some half/double or fractional tempo interpretations still need the ordinary estimator. [Upstream tempo classifier](https://github.com/adamsardo/recordbox/blob/8e4f60f/app/src/analysis/rb_hp_bia2.rs)

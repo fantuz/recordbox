@@ -205,10 +205,12 @@ pub fn drop_to_load(app: &mut App, ui: &mut Ui, rect: Rect) {
     if app.deck_options.disable_load { return; }
     let Some(ids) = app.drag.clone() else { return };
     let Some(pp) = ui.ctx().pointer_latest_pos() else { return };
+    if crate::ui_feel::drop_glow(ui, ui.id().with(("deck_drop", app.px.active)), rect, rect.contains(pp), 0.0) {
+        ui.painter().rect_stroke(rect.shrink(1.0), 0.0, Stroke::new(2.0_f32, BLUE), egui::StrokeKind::Inside);
+    }
     if !rect.contains(pp) {
         return;
     }
-    ui.painter().rect_stroke(rect.shrink(1.0), 0.0, Stroke::new(2.0_f32, BLUE), egui::StrokeKind::Inside);
     if ui.input(|i| i.pointer.any_released()) {
         if let Some(id) = ids.first() {
             app.load_track_here(*id);
@@ -466,7 +468,7 @@ pub fn grid_strip(app: &mut App, ui: &mut Ui, s: Rect, main: Rect) {
     let pb = |x0: f32, x1: f32| Rect::from_min_max(pos2(x_of(x0), y - 8.5), pos2(x_of(x1), y + 8.5));
     let flat = |ui: &mut Ui, r: Rect, id: &str, label: &str, col: Color32| -> egui::Response {
         let resp = ui.interact(r, ui.id().with(id), Sense::click());
-        ui.painter().rect_filled(r, 2.0, if resp.hovered() && col == WHITE { lighten(gy(0x212121)) } else { gy(0x212121) });
+        ui.painter().rect_filled(r, 2.0, crate::ui_feel::hl_if(&resp, col == WHITE, gy(0x212121), lighten(gy(0x212121))));
         ui.painter().text(r.center(), Align2::CENTER_CENTER, label, caps(8.8), col);
         resp
     };
@@ -524,7 +526,7 @@ pub(crate) fn cue_play(app: &mut App, ui: &mut Ui, cue_c: Pos2, play_c: Pos2, ra
     let cue_lit = loaded && (!playing || app.deck.cue_preview);
     // The same button faces as the 1 Player layout, scaled to this layout's size.
     let dia = rad * 2.0 + 3.0;
-    crate::ui_player::cue_button_face(&p, cue_c, dia, cue_lit, loaded, cr.hovered());
+    crate::ui_feel::round_face(&p, cue_c, dia, cue_lit, loaded, &cr, true);
     if crate::ui_player::press_fired(ui, &cr) && !app.deck.cue_preview {
         app.cue_down();
     }
@@ -664,7 +666,7 @@ pub fn two_players(app: &mut App, ui: &mut Ui) {
 /// A raised 17 pt tall button of the deck rows with a caps label; `lit`: blue (on).
 fn row_button(ui: &mut Ui, r: Rect, id: &str, label: &str, lit: bool, enabled: bool) -> egui::Response {
     let resp = ui.interact(r, ui.id().with(id), Sense::click());
-    let fill = if lit { BLUE.c() } else if resp.is_pointer_button_down_on() { BG2.c() } else if resp.hovered() { lighten(BTN.c()) } else { BTN.c() };
+    let fill = if lit { BLUE.c() } else if resp.is_pointer_button_down_on() { BG2.c() } else { crate::ui_feel::hl(&resp, BTN.c(), lighten(BTN.c())) };
     ui.painter().rect_filled(r, 2.0, fill);
     ui.painter().text(r.center(), Align2::CENTER_CENTER, label, caps(8.8), if enabled { WHITE.c() } else { OFF.c() });
     resp
@@ -678,7 +680,7 @@ fn row_icon(ui: &mut Ui, r: Rect, id: &str, draw: impl FnOnce(&Painter, Pos2, Co
 /// `row_icon`; with `enabled` false the tile lies flat in the row (an empty deck).
 fn row_icon_on(ui: &mut Ui, r: Rect, id: &str, enabled: bool, draw: impl FnOnce(&Painter, Pos2, Color32, bool)) -> egui::Response {
     let resp = ui.interact(r, ui.id().with(id), Sense::click());
-    let fill = if !enabled { gy(0x212121) } else if resp.is_pointer_button_down_on() { BG2.c() } else if resp.hovered() { lighten(BTN.c()) } else { BTN.c() };
+    let fill = if !enabled { gy(0x212121) } else if resp.is_pointer_button_down_on() { BG2.c() } else { crate::ui_feel::hl(&resp, BTN.c(), lighten(BTN.c())) };
     ui.painter().rect_filled(r, 2.0, fill);
     draw(ui.painter(), r.center(), WHITE.c(), resp.is_pointer_button_down_on());
     resp
@@ -711,7 +713,7 @@ fn deck_rows(app: &mut App, ui: &mut Ui, g: &TwoGeom, rows: &DeckRows, n: u8, is
     let p = ui.painter().clone();
     let (l, t) = (g.full.min.x, g.full.min.y);
     let (mx0, mx1) = (g.mx0, g.mx1);
-    let pos = app.pos();
+    let pos = crate::ui_feel::shown_pos(app);
     let loaded = app.deck.track.is_some();
     let track = app.deck.track.and_then(|id| app.track(id)).cloned();
     let mut jumped = None;
@@ -732,7 +734,7 @@ fn deck_rows(app: &mut App, ui: &mut Ui, g: &TwoGeom, rows: &DeckRows, n: u8, is
         }
         let bj_rect = Rect::from_min_size(pos2(l + 8.0, t + jump_y + 26.0), vec2(54.0, 27.0));
         let r = tip(ui.interact(bj_rect, ui.id().with("bjsize"), Sense::click()), app, "Select the beat/bar length jumping from the current position.");
-        p.rect_filled(bj_rect, 0.0, if r.hovered() { lighten(BTN.c()) } else { BTN.c() });
+        p.rect_filled(bj_rect, 0.0, crate::ui_feel::hl(&r, BTN.c(), lighten(BTN.c())));
         p.text(pos2(bj_rect.center().x, bj_rect.min.y + 8.7), Align2::CENTER_CENTER, crate::player_ext::jump_label(bj, app.prefs.beat_jump_bars), bold(9.0), WHITE.c());
         crate::icons_player::chevron_down(&p, pos2(bj_rect.center().x + 0.75, bj_rect.min.y + 20.5), 1.0, WHITE.c());
         crate::ui_browser::dropdown(ui, &r, "bjpop", |ui: &mut Ui| jump_size_menu(app, ui));
@@ -774,7 +776,7 @@ fn deck_rows(app: &mut App, ui: &mut Ui, g: &TwoGeom, rows: &DeckRows, n: u8, is
             let r = Rect::from_min_size(pos2(l + 79.0, t + eq_y + i as f32 * 20.0), vec2(36.0, 16.0));
             let resp = ui.interact(r, ui.id().with(("eqkill", i)), Sense::click());
             let killed = app.deck.x.eq_kill[*band];
-            p.rect_filled(r, 2.0, if resp.hovered() { lighten(BTN.c()) } else { BTN.c() });
+            p.rect_filled(r, 2.0, crate::ui_feel::hl(&resp, BTN.c(), lighten(BTN.c())));
             if killed {
                 p.rect_stroke(r, 2.0, Stroke::new(1.0_f32, BLUE), egui::StrokeKind::Inside);
             }
@@ -828,7 +830,7 @@ fn deck_rows(app: &mut App, ui: &mut Ui, g: &TwoGeom, rows: &DeckRows, n: u8, is
         // MASTER: outlined; blue while this deck is the master.
         let r = top_btn(75.0, 20.0);
         let resp = ui.interact(r, ui.id().with("master"), Sense::click());
-        p.rect_filled(r, 2.0, if resp.hovered() { gy(0x1A1A1A) } else { BG.c() });
+        p.rect_filled(r, 2.0, crate::ui_feel::hl(&resp, BG.c(), gy(0x1A1A1A)));
         p.rect_stroke(r, 2.0, Stroke::new(1.0_f32, if is_master { BLUE } else { OFF }), egui::StrokeKind::Inside);
         p.text(r.center(), Align2::CENTER_CENTER, "MASTER", caps(8.8), WHITE.c());
         if tip(resp, app, "Click here to set this deck as a master for Sync.").clicked() {
@@ -919,7 +921,7 @@ fn deck_rows(app: &mut App, ui: &mut Ui, g: &TwoGeom, rows: &DeckRows, n: u8, is
         let dr = Rect::from_min_max(pos2(field.max.x - 14.0, field.min.y), field.max);
         let dresp = tip(ui.interact(dr, ui.id().with("lsize"), Sense::click()), app, "Beat Loop");
         if ui.rect_contains_pointer(field) {
-            crate::icons_player::chevron_down(&p, dr.center(), 0.9, if dresp.hovered() { WHITE.c() } else { DIM.c() });
+            crate::icons_player::chevron_down(&p, dr.center(), 0.9, crate::ui_feel::hl(&dresp, DIM.c(), WHITE.c()));
         }
         crate::ui_browser::dropdown(ui, &dresp, "lsizepop", |ui: &mut Ui| loop_size_menu(app, ui));
         if tip(row_icon(ui, b(429.0, 20.0), "ldouble", |p, c, col, _| crate::icons_player::chevron_right(p, c, 1.25, col)), app, "Auto Beat Loop:\nMake Loop length longer.").clicked() {
@@ -1041,7 +1043,7 @@ fn shared_controls(app: &mut App, ui: &mut Ui, g: &TwoGeom) {
         app.set_crossfader(0.5);
     }
     let hy = y0 + app.px.crossfader * (y1 - y0);
-    p.rect_filled(Rect::from_center_size(pos2(cx, hy), vec2(28.0, 3.0)), 0.0, if resp.hovered() || resp.dragged() { gy(0x8C8C8C) } else { gy(0x646464) });
+    p.rect_filled(Rect::from_center_size(pos2(cx, hy), vec2(28.0, 3.0)), 0.0, crate::ui_feel::hot_col(&resp, gy(0x646464), gy(0x8C8C8C)));
     let _ = tip(resp, app, "CROSSFADER:\nOutputs audio of each channel according to the curve characteristics set in [Preferences].");
 
     // Zoom (both waveforms): on a black strip over the left end of the waveform area.
@@ -1061,7 +1063,7 @@ fn shared_controls(app: &mut App, ui: &mut Ui, g: &TwoGeom) {
     // Waveform link: a 30 pt tile at the right end of the waveform area.
     let lr = Rect::from_min_max(pos2(g.mx1 - 30.0, t + 173.0), pos2(g.mx1, t + 203.0));
     let resp = ui.interact(lr, ui.id().with("wavelink"), Sense::click());
-    p.rect_filled(lr, 0.0, if resp.hovered() { gy(0x1E1E1E) } else { gy(0x0A0A0A) });
+    p.rect_filled(lr, 0.0, crate::ui_feel::hl(&resp, gy(0x0A0A0A), gy(0x1E1E1E)));
     crate::icons_player::link(&p, lr.center(), 1.25, if app.px.wave_link { BLUE.c() } else { gy(0x686868) });
     if tip(resp, app, "Link the waveforms:\nScrolling one enlarged waveform moves both decks.").clicked() {
         app.px.wave_link = !app.px.wave_link;
@@ -1092,7 +1094,7 @@ pub fn simple_player(app: &mut App, ui: &mut Ui) {
     let full = ui.max_rect();
     let p = ui.painter().clone();
     p.rect_filled(full, 0.0, BG);
-    let pos = app.pos();
+    let pos = crate::ui_feel::shown_pos(app);
     let (l, t, r) = (full.min.x, full.min.y, full.max.x);
     let loaded = app.deck.track.is_some();
     p.rect_filled(Rect::from_min_max(pos2(l, t + 1.0), pos2(l + 58.0, full.max.y)), 0.0, BG2);

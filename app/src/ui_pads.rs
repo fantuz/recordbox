@@ -133,9 +133,7 @@ fn pad_body(ui: &mut Ui, p: &Painter, r: Rect, clip: Rect, id: egui::Id, look: L
     let resp = ui.interact(if hit.is_positive() { hit } else { Rect::NOTHING }, id, Sense::click());
     let down = resp.is_pointer_button_down_on() && enabled;
     let mut fill = look.fill;
-    if resp.hovered() && enabled {
-        fill = blend(fill, Color32::WHITE, 0.1);
-    }
+    fill = crate::ui_feel::hl_if(&resp, enabled, fill, blend(fill, Color32::WHITE, 0.1));
     if down {
         fill = blend(BG2.c(), fill, 0.7);
     }
@@ -306,7 +304,7 @@ fn pull_down_at(app: &mut App, ui: &mut Ui, g: Geom, n: u8) {
     let p = ui.painter().clone();
     let mode = app.pad_mode();
     let resp = ui.interact(g.pull, ui.id().with("padmode"), Sense::click());
-    p.rect_filled(g.pull, 2.0, if resp.hovered() { blend(PULL.c(), Color32::WHITE, 0.1) } else { PULL.c() });
+    p.rect_filled(g.pull, 2.0, crate::ui_feel::hl(&resp, PULL.c(), blend(PULL.c(), Color32::WHITE, 0.1)));
     // (rekordbox fits the caption into the button: a long one is drawn narrower, down to 0.7.)
     let avail = g.pull.width() - 7.5 - 17.5;
     let label = mode.label();
@@ -379,7 +377,7 @@ fn page_buttons(app: &App, ui: &mut Ui, r: Rect, id: &str, can_down: bool, can_u
     for (i, (en, up)) in [(can_down, false), (can_up, true)].into_iter().enumerate() {
         let br = Rect::from_min_size(pos2(r.min.x + i as f32 * 26.0, r.min.y), vec2(24.0, 18.0));
         let resp = ui.interact(br, ui.id().with((id, i)), Sense::click());
-        p.rect_filled(br, 0.0, if resp.hovered() && en { blend(PAD_BG.c(), Color32::WHITE, 0.1) } else { PAD_BG.c() });
+        p.rect_filled(br, 0.0, crate::ui_feel::hl_if(&resp, en, PAD_BG.c(), blend(PAD_BG.c(), Color32::WHITE, 0.1)));
         // (`keyUpBtn.svg` / `keyDownBtn.svg`: a 6 x 10 chevron in #646464.)
         let col = if en { gy(0x646464) } else { gy(0x323232) };
         if up {
@@ -466,7 +464,7 @@ fn hot_cue_view(app: &mut App, ui: &mut Ui, g: Geom, n: u8, pad_layout: bool, pi
                     let dr = Rect::from_min_size(pos2(pr.max.x - 24.0, cy - 7.0), vec2(14.0, 14.0));
                     let dresp = ui.interact(dr.intersect(sc.view), ui.id().with(("hotdel", slot)), Sense::click());
                     over_delete = dresp.hovered() || dresp.is_pointer_button_down_on();
-                    crate::icons_player::cross(&p, dr.center(), 8.0, 1.0, if dresp.hovered() { WHITE.c() } else { GREY.c() });
+                    crate::icons_player::cross(&p, dr.center(), 8.0, 1.0, crate::ui_feel::hl(&dresp, GREY.c(), WHITE.c()));
                     if dresp.on_hover_text("Clear a Hot Cue.").clicked() {
                         app.delete_cue(c.id);
                         continue;
@@ -740,7 +738,7 @@ fn keyboard_controls(app: &mut App, ui: &mut Ui, g: Geom, n: u8) {
     let kr = g.beside_pull(114.0, 35.0);
     let key_cue = app.pads.deck[ni].key_cue.filter(|s| app.deck.cues.iter().any(|c| c.kind == CueKind::Hot && c.slot == *s));
     let resp = ui.interact(kr, ui.id().with("kbcue"), Sense::click());
-    p.rect_filled(kr, 2.0, if resp.hovered() { blend(PULL.c(), Color32::WHITE, 0.1) } else { PULL.c() });
+    p.rect_filled(kr, 2.0, crate::ui_feel::hl(&resp, PULL.c(), blend(PULL.c(), Color32::WHITE, 0.1)));
     let text = key_cue.map(|s| ((b'A' + s as u8) as char).to_string()).unwrap_or_else(|| "---".into());
     p.text(pos2(kr.min.x + 5.0, kr.center().y), Align2::LEFT_CENTER, text, caps(10.0), WHITE.c());
     crate::icons_player::chevron_down(&p, pos2(kr.max.x - 8.0, kr.center().y + 0.5), 0.8, WHITE.c());
@@ -827,7 +825,7 @@ fn slicer_view(app: &mut App, ui: &mut Ui, g: Geom, n: u8, pad_layout: bool) {
         let br = at(x, 16.0);
         let resp = ui.interact(br, ui.id().with(("slshift", fwd)), Sense::click());
         // (`ShiftL_2DeckHorizontal.svg`: a 6 x 8 triangle, #969696.)
-        triangle(&cp, br.center(), 6.0, 8.0, !fwd, if resp.hovered() { WHITE.c() } else { GREY.c() });
+        triangle(&cp, br.center(), 6.0, 8.0, !fwd, crate::ui_feel::hl(&resp, GREY.c(), WHITE.c()));
         if crate::ui_player::tip(resp, app, tip).clicked() {
             app.slicer_shift(fwd);
         }
@@ -855,7 +853,7 @@ fn selector(app: &App, ui: &mut Ui, r: Rect, id: &str, value: &str, can_down: bo
         let br = Rect::from_min_size(pos2(if up { r.max.x - 21.0 } else { r.min.x }, r.min.y), vec2(21.0, 16.0));
         let resp = ui.interact(br, ui.id().with((id, i)), Sense::click());
         // (`LengthRoll_ArrowL.svg`: a 5 x 8 chevron, #969696.)
-        let col = if !en { gy(0x424242) } else if resp.hovered() { WHITE.c() } else { GREY.c() };
+        let col = if !en { gy(0x424242) } else { crate::ui_feel::hl(&resp, GREY.c(), WHITE.c()) };
         if up {
             crate::icons_player::chevron_right(&p, br.center(), 0.9, col);
         } else {
@@ -974,7 +972,7 @@ fn censor_view(app: &mut App, ui: &mut Ui, g: Geom, n: u8, pad_layout: bool) {
         let br = at(x, 30.0);
         let resp = ui.interact(br, ui.id().with(("accall", next)), Sense::click());
         // (`p10651_shiftl.svg`: a 6 x 8 triangle in a 30 x 16 box, #969696.)
-        triangle(&cp, br.center(), 6.0, 8.0, !next, if resp.hovered() { WHITE.c() } else { GREY.c() });
+        triangle(&cp, br.center(), 6.0, 8.0, !next, crate::ui_feel::hl(&resp, GREY.c(), WHITE.c()));
         if resp.clicked() {
             app.censor_call(next);
         }
@@ -982,7 +980,7 @@ fn censor_view(app: &mut App, ui: &mut Ui, g: Geom, n: u8, pad_layout: bool) {
     for (x, right) in [(70.0, false), (95.0, true)] {
         let br = at(x, 24.0);
         let resp = ui.interact(br, ui.id().with(("acbeat", right)), Sense::click());
-        let col = if resp.hovered() { WHITE.c() } else { GREY.c() };
+        let col = crate::ui_feel::hl(&resp, GREY.c(), WHITE.c());
         if right {
             crate::icons_player::chevron_right(&cp, br.center(), 0.9, col);
         } else {
@@ -1340,7 +1338,7 @@ fn memory_view(app: &mut App, ui: &mut Ui, g: Geom, n: u8) {
         tp.text(pos2(tr.max.x + 8.0, cy), Align2::LEFT_CENTER, &c.comment, FontId::proportional(10.7), gy(0xF4F4F4));
         let dr = Rect::from_min_size(pos2(r.max.x - 24.0, cy - 7.0), vec2(14.0, 14.0));
         let dresp = ui.interact(dr.intersect(sc.view), ui.id().with(("memdel", c.id)), Sense::click());
-        crate::icons_player::cross(&p, dr.center(), 8.0, 1.0, if dresp.hovered() { WHITE.c() } else { GREY.c() });
+        crate::icons_player::cross(&p, dr.center(), 8.0, 1.0, crate::ui_feel::hl(&dresp, GREY.c(), WHITE.c()));
         if dresp.clicked() {
             app.delete_cue(c.id);
             continue;

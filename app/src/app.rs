@@ -1630,6 +1630,8 @@ pub struct App {
     pub side: SideMode,
     pub expanded: HashSet<i64>,
     pub list: Vec<i64>,
+    pub(crate) list_totals: Option<(u64, String)>,
+    track_metadata_revision: u64,
     pub list_dirty: bool,
     pub selected: HashSet<i64>,
     pub anchor: Option<usize>,
@@ -1732,6 +1734,7 @@ pub struct App {
     /// A track being dragged between the decks or sampler while the library is in another window.
     detached_player_drag: Option<Vec<i64>>,
     pub textures: HashMap<String, Option<egui::TextureHandle>>,
+    pub(crate) list_artwork: crate::artwork_thumbs::Cache,
     pub ctx: egui::Context,
     pub screenshot: Option<(String, u32)>,
     pub(crate) screenshot_devices: Vec<crate::device_ext::ScreenshotDevice>,
@@ -1817,6 +1820,8 @@ impl App {
             side: SideMode::Collection,
             expanded: HashSet::new(),
             list: vec![],
+            list_totals: None,
+            track_metadata_revision: 0,
             list_dirty: true,
             selected: HashSet::new(),
             anchor: None,
@@ -1882,6 +1887,7 @@ impl App {
             library_window: None,
             detached_player_drag: None,
             textures: HashMap::new(),
+            list_artwork: Default::default(),
             ctx: ctx.clone(),
             screenshot: screenshot.map(|s| (s, 0)),
             screenshot_devices: Vec::new(),
@@ -2329,7 +2335,7 @@ impl App {
         self.reload_tags();
     }
     pub fn reload_tracks(&mut self) {
-        self.collection_categories.clear();
+        self.invalidate_track_metadata();
         let queued: HashSet<i64> = self.tracks.iter().filter(|t| t.analyzed == 3).map(|t| t.id).collect();
         self.tracks = self.db.all_tracks().unwrap_or_default();
         let mut replaced: Vec<i64> = vec![];
@@ -2418,9 +2424,35 @@ impl App {
         let i = *self.index.get(&id)?;
         // Metadata dialogs, inline edits, tag reloads and Undo/Redo can update a track
         // without reloading the library. Invalidate before handing out mutable access.
-        self.collection_categories.clear();
+        self.invalidate_track_metadata();
         Some(&mut self.tracks[i])
     }
+    pub(crate) fn invalidate_track_metadata(&mut self) {
+        self.collection_categories.clear();
+        self.track_metadata_revision = self.track_metadata_revision.wrapping_add(1);
+    }
+
+    /// Each browser keeps its own materialized list. A track edit in either browser can
+    /// change both totals, including the total parked while the sub-browser is active.
+    pub(crate) fn list_totals_label(&mut self) -> &str {
+        let revision = self.track_metadata_revision;
+        if self.list_totals.as_ref().is_none_or(|(old, _)| *old != revision) {
+            let mut count = 0usize;
+            let mut seconds = 0.0;
+            let mut bytes = 0u128;
+            for track in self.list.iter().filter_map(|id| self.track(*id)) {
+                count += 1;
+                seconds += track.duration;
+                bytes += u128::from(track.file_size);
+            }
+            let hours = (seconds / 3600.0).floor();
+            let minutes = ((seconds - hours * 3600.0) / 60.0).floor();
+            let label = format!("{count} Tracks, {hours} hours {minutes} minutes, {:.1} GB", bytes as f64 / 1e9);
+            self.list_totals = Some((revision, label));
+        }
+        &self.list_totals.as_ref().unwrap().1
+    }
+
     /// Save a track without recording an undo step (analysis, sync and other system updates).
     pub fn save_track_quiet(&mut self, id: i64) {
         if let Some(t) = self.track(id).cloned() {
@@ -2795,6 +2827,7 @@ impl App {
         });
         self.ext.list_num = v.iter().map(|id| order[id] + 1).collect();
         self.list = v;
+        self.list_totals = None;
         let idx = &self.index;
         self.selected.retain(|id| idx.contains_key(id));
         self.anchor = self.anchor_id.and_then(|id| self.list.iter().position(|x| *x == id));

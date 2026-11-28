@@ -160,7 +160,7 @@ pub fn mytag_panel(app: &mut App, ui: &mut Ui, r: Rect) {
                 let mut plus_clicked = false;
                 if last && !adding {
                     let presp = ui.interact(plus, ui.id().with(("mytag_plus", c.id)), Sense::click());
-                    crate::icons_src::plus_disc(ui.painter(), plus.center(), if presp.hovered() { WHITE.c() } else { gy(0xA0A0A0) }, BG.c());
+                    crate::icons_src::plus_disc(ui.painter(), plus.center(), crate::ui_feel::hl(&presp, gy(0xA0A0A0), WHITE.c()), BG.c());
                     let presp = if app.prefs.tooltips { presp.on_hover_text("Create a new My Tag.") } else { presp };
                     plus_clicked = presp.clicked();
                     if plus_clicked {
@@ -337,7 +337,7 @@ pub fn related_window(app: &mut App, ui: &mut Ui, r: Rect, which: usize) {
     let tile = Rect::from_min_size(pos2(l + 11.0, t + 4.0), vec2(18.0, 18.0));
     let tresp = ui.interact(Rect::from_min_max(tile.min, pos2(right - 62.0, tile.max.y)), ui.id().with(("relwin_tile", which)), Sense::click());
     if which == 0 {
-        p.rect_filled(tile, 2.0, if tresp.hovered() { gy(0x3A3A3A) } else { BTN.c() });
+        p.rect_filled(tile, 2.0, crate::ui_feel::hl(&tresp, BTN.c(), gy(0x3A3A3A)));
         crate::icons_src::related(&p, tile, WHITE.c(), BTN.c());
         let name = app.prefs.related_lists.get(app.prefs.related_sel).map(|x| x.name.clone()).unwrap_or_else(|| "Related Tracks".into());
         p.with_clip_rect(Rect::from_min_max(pos2(l, t), pos2(right - 62.0, t + 26.0))).text(pos2(l + 30.5, t + 13.0), Align2::LEFT_CENTER, name, rb(SUB_NAME_FONT), WHITE.c());
@@ -378,7 +378,7 @@ pub fn related_window(app: &mut App, ui: &mut Ui, r: Rect, which: usize) {
     } else {
         // Skin subBrows_trackSuggestion_btn: a 16 pt #323232 tile with a #969696 atom.
         let st = Rect::from_center_size(tile.center(), vec2(16.0, 16.0));
-        p.rect_filled(st, 2.0, if tresp.hovered() { gy(0x3E3E3E) } else { gy(0x323232) });
+        p.rect_filled(st, 2.0, crate::ui_feel::hl(&tresp, gy(0x323232), gy(0x3E3E3E)));
         crate::icons_src::atom(&p, st.center(), 6.0, 2.2, 1.0, DIM.c());
         let kind = app.prefs.bx.suggest_kind.min(3);
         if kind > 0 {
@@ -415,7 +415,7 @@ pub fn related_window(app: &mut App, ui: &mut Ui, r: Rect, which: usize) {
         let br = Rect::from_min_size(pos2(l + x, t + 32.0), vec2(w, 16.0));
         let resp = ui.interact(br, ui.id().with(("relwin_src", which, k)), Sense::click());
         let on = src_now == k;
-        p.rect_stroke(br, 2.0, Stroke::new(1.0, if on { BLUE.c() } else if resp.hovered() { gy(0x8C8C8C) } else { OFF.c() }), egui::StrokeKind::Inside);
+        p.rect_stroke(br, 2.0, Stroke::new(1.0, if on { BLUE.c() } else { crate::ui_feel::hl(&resp, OFF.c(), gy(0x8C8C8C)) }), egui::StrokeKind::Inside);
         p.text(br.center() + vec2(0.0, 0.5), Align2::CENTER_CENTER, label, rb_bold(if k >= 2 { 9.75 } else { 9.0 }), if k >= 2 { BLUE.c() } else { WHITE.c() });
         let resp = if tips { resp.on_hover_text(tip) } else { resp };
         if resp.clicked() {
@@ -438,7 +438,7 @@ pub fn related_window(app: &mut App, ui: &mut Ui, r: Rect, which: usize) {
     let target = if app.node(target).is_some() { target } else { 0 };
     let tname = app.node(target).map(|n| n.name.clone()).unwrap_or_else(|| "Collection".into());
     let tr = ui.interact(Rect::from_min_max(tt.min, pos2(l + 160.0, tt.max.y)), ui.id().with(("relwin_target", which)), Sense::click());
-    p.rect_filled(tt, 2.0, if tr.hovered() { gy(0x3A3A3A) } else { BTN.c() });
+    p.rect_filled(tt, 2.0, crate::ui_feel::hl(&tr, BTN.c(), gy(0x3A3A3A)));
     for y in [5.0, 8.5, 12.0] {
         p.rect_filled(Rect::from_min_max(tt.min + vec2(4.5, y - 1.0), tt.min + vec2(13.5, y + 1.0)), 0.0, gy(0xC9C9C9));
     }
@@ -447,7 +447,7 @@ pub fn related_window(app: &mut App, ui: &mut Ui, r: Rect, which: usize) {
     dropdown(ui, &tr, if which == 0 { "relwin_target_menu" } else { "sugwin_target_menu" }, |ui| target_menu(app, ui, which));
     let info = if which == 0 { app.prefs.bx.related_info } else { app.prefs.bx.suggest_info }.min(4);
     let ir = ui.interact(Rect::from_min_max(pos2(l + 164.0, t + 58.0), pos2(l + 250.0, t + 76.0)), ui.id().with(("relwin_info", which)), Sense::click());
-    crate::icons_src::sub_sort(&p, pos2(l + 174.0, t + 67.0), if ir.hovered() { WHITE.c() } else { DIM.c() });
+    crate::icons_src::sub_sort(&p, pos2(l + 174.0, t + 67.0), crate::ui_feel::hl(&ir, DIM.c(), WHITE.c()));
     p.text(pos2(l + 185.0, t + 67.0), Align2::LEFT_CENTER, INFO_CHOICES[info as usize], rb(SUB_NAME_FONT), WHITE.c());
     dropdown(ui, &ir, if which == 0 { "relwin_info_menu" } else { "sugwin_info_menu" }, |ui| {
         for (i, n) in INFO_CHOICES.iter().enumerate() {
@@ -636,7 +636,7 @@ pub fn node_row_extras(app: &mut App, ui: &mut Ui, n: &PlaylistNode, rr: Rect, s
     if sel && !is_cue && n.kind != NodeKind::Smart {
         let c = pos2(rr.max.x - 10.5, rr.center().y);
         let resp = ui.interact(Rect::from_center_size(c, vec2(14.0, 14.0)), ui.id().with(("node_plus", n.id)), Sense::click());
-        crate::icons_src::plus_disc(ui.painter(), c, if resp.hovered() { WHITE.c() } else { gy(0xA0A0A0) }, ROW_SEL.c());
+        crate::icons_src::plus_disc(ui.painter(), c, crate::ui_feel::hl(&resp, gy(0xA0A0A0), WHITE.c()), ROW_SEL.c());
         let parent = if n.kind == NodeKind::Folder { n.id } else { n.parent };
         dropdown(ui, &resp, "node_plus_menu", |ui| {
             for (label, kind) in [("Create New Playlist", NodeKind::Playlist), ("Create New Intelligent Playlist", NodeKind::Smart), ("Create New Folder", NodeKind::Folder)] {
@@ -793,11 +793,14 @@ pub fn column_view(app: &mut App, ui: &mut Ui, drop: &mut Vec<(Rect, i64)>) {
 fn cv_row(ui: &mut Ui, text: &str, icon: TreeIcon, count: Option<usize>, folder: bool, selected: bool) -> egui::Response {
     use crate::icons_src as src;
     let (rr, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 15.0), Sense::click());
+    if !ui.is_rect_visible(rr) {
+        return resp;
+    }
     let p = ui.painter().with_clip_rect(rr.intersect(ui.clip_rect()));
-    let bg = if selected { ROW_SEL.c() } else if resp.hovered() { gy(0x262626) } else { BG2.c() };
+    let bg = if selected { ROW_SEL.c() } else { crate::ui_feel::hl(&resp, BG2.c(), gy(0x262626)) };
     // (A selected row keeps rekordbox's fixed blue and white text in Light: `ListViewer::findTextColour`.)
     let _sel_dark = crate::theme::dark_scope(selected);
-    if selected || resp.hovered() {
+    if selected || bg != BG2.c() {
         p.rect_filled(rr, 0.0, bg);
     }
     let col = if selected { WHITE } else { TREE_ICON };
@@ -827,6 +830,7 @@ pub struct SubState {
     pub view: View,
     pub side: SideMode,
     pub list: Vec<i64>,
+    list_totals: Option<(u64, String)>,
     pub list_dirty: bool,
     pub selected: HashSet<i64>,
     pub anchor: Option<usize>,
@@ -861,6 +865,7 @@ impl SubState {
             view: View::Collection,
             side: SideMode::Playlists,
             list: vec![],
+            list_totals: None,
             list_dirty: true,
             selected: HashSet::new(),
             anchor: None,
@@ -895,6 +900,7 @@ fn swap_state(app: &mut App, s: &mut SubState) {
     swap(&mut app.view, &mut s.view);
     swap(&mut app.side, &mut s.side);
     swap(&mut app.list, &mut s.list);
+    swap(&mut app.list_totals, &mut s.list_totals);
     swap(&mut app.list_dirty, &mut s.list_dirty);
     swap(&mut app.selected, &mut s.selected);
     swap(&mut app.anchor, &mut s.anchor);
@@ -920,6 +926,65 @@ fn swap_state(app: &mut App, s: &mut SubState) {
     swap(&mut app.colbrowse_values, &mut s.colbrowse_values);
     swap(&mut app.filter_tags, &mut s.filter_tags);
     swap(&mut app.prefs.palette_open, &mut s.palette_open);
+}
+
+#[cfg(test)]
+mod footer_tests {
+    use super::*;
+
+    #[test]
+    fn totals_follow_each_list_and_edits_in_the_sub_browser() -> anyhow::Result<()> {
+        const TEST: &str = "ui_browser_ext::footer_tests::totals_follow_each_list_and_edits_in_the_sub_browser";
+        const PROFILE: &str = "RECORDBOX_FOOTER_TEST_PROFILE";
+        if std::env::var_os(PROFILE).is_none() {
+            let dir = tempfile::tempdir()?;
+            let child = std::process::Command::new(std::env::current_exe()?)
+                .args(["--exact", TEST, "--nocapture"])
+                .env(PROFILE, dir.path()).env("PREPDECK_DATA", dir.path()).output()?;
+            let stdout = String::from_utf8_lossy(&child.stdout);
+            anyhow::ensure!(child.status.success() && stdout.contains("1 passed"), "{stdout}\n{}", String::from_utf8_lossy(&child.stderr));
+            return Ok(());
+        }
+        assert_eq!(std::env::var_os(PROFILE), std::env::var_os("PREPDECK_DATA"));
+        let mut app = App::open_library(&Default::default(), None, crate::DeckOptions { disable_play: true, disable_load: true });
+        let add = |title: &str, duration, file_size| app.db.insert_track(&Track {
+            title: title.into(), path: format!("{title}.wav"), duration, file_size, ..Default::default()
+        });
+        add("Footer Red", 60.0, 100_000_000)?;
+        let blue = add("Footer Blue", 120.0, 500_000_000)?;
+        app.reload_tracks();
+        app.search = "Footer".into();
+        app.rebuild_list();
+        assert_eq!(app.list_totals_label(), "2 Tracks, 0 hours 3 minutes, 0.6 GB");
+
+        let mut sub = SubState::new();
+        swap_state(&mut app, &mut sub);
+        app.ext.in_sub = true;
+        app.search = "Red".into();
+        app.rebuild_list();
+        assert_eq!(app.list_totals_label(), "1 Tracks, 0 hours 1 minutes, 0.1 GB");
+        // Changing the filter can keep the same count with completely different totals.
+        app.search = "Blue".into();
+        app.rebuild_list();
+        assert_eq!(app.list_totals_label(), "1 Tracks, 0 hours 2 minutes, 0.5 GB");
+        let track = app.track_mut(blue).unwrap();
+        track.duration = 3660.0;
+        track.file_size = 700_000_000;
+        app.save_track_quiet(blue);
+        assert_eq!(app.list_totals_label(), "1 Tracks, 1 hours 1 minutes, 0.7 GB");
+        swap_state(&mut app, &mut sub);
+        app.ext.in_sub = false;
+        assert_eq!(app.list_totals_label(), "2 Tracks, 1 hours 2 minutes, 0.8 GB");
+        // Library restores or imports can update the database while the visible list is parked.
+        let mut saved = app.db.track(blue).unwrap();
+        assert_eq!((saved.duration, saved.file_size), (3660.0, 700_000_000));
+        saved.duration = 600.0;
+        saved.file_size = 900_000_000;
+        app.db.update_track(&saved)?;
+        app.reload_tracks();
+        assert_eq!(app.list_totals_label(), "2 Tracks, 0 hours 11 minutes, 1.0 GB");
+        Ok(())
+    }
 }
 
 /// Sub-browser (references 14 and 15): a second browser with its own source strip (27 pt:

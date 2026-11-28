@@ -208,7 +208,7 @@ fn small_knob(ui: &mut Ui, r: Rect, id: impl std::hash::Hash, value: f32, enable
     // 3.927 to 8.639 rad from 12 o'clock, clockwise (the slot knob's rotary range): 270 degrees.
     let ang = |x: f32| (-225.0 + 270.0 * x).to_radians();
     let pts: Vec<Pos2> = (0..=30).map(|i| c + vec2(ang(i as f32 / 30.0).cos(), ang(i as f32 / 30.0).sin()) * 7.0).collect();
-    p.add(egui::Shape::line(pts, Stroke::new(2.0_f32, fade(if resp.hovered() || resp.dragged() { gy(0x464646) } else { BTN_FILL.c() }, a))));
+    p.add(egui::Shape::line(pts, Stroke::new(2.0_f32, fade(crate::ui_feel::hot_col(&resp, BTN_FILL.c(), gy(0x464646)), a))));
     let t = ang(v);
     p.line_segment([c + vec2(t.cos(), t.sin()) * 3.5, c + vec2(t.cos(), t.sin()) * 8.0], Stroke::new(1.6_f32, fade(WHITE.c(), a)));
     (out, resp)
@@ -486,13 +486,14 @@ fn slot(app: &mut App, ui: &mut Ui, r: Rect, deck: usize, idx: usize, st: groove
         }
     }
     // A track dragged from the browser or from a deck loads here.
-    if let Some(ids) = app.drag.clone() {
-        if ui.rect_contains_pointer(r) {
+    if let Some(ids) = &app.drag {
+        let over = ui.rect_contains_pointer(r);
+        if crate::ui_feel::drop_glow(ui, ui.id().with(("groove_drop", deck, idx)), r, over, 0.0) {
             p.rect_stroke(r, 0.0, Stroke::new(2.0_f32, BLUE), egui::StrokeKind::Inside);
-            if ui.input(|i| i.pointer.any_released()) {
-                if let Some(id) = ids.first() {
-                    app.groove_load_track(deck, idx, *id);
-                }
+        }
+        if over && ui.input(|i| i.pointer.any_released()) {
+            if let Some(id) = ids.first().copied() {
+                app.groove_load_track(deck, idx, id);
             }
         }
     }
@@ -681,7 +682,7 @@ pub fn wave_column(app: &mut App, ui: &mut Ui, o: Pos2, waves_h: f32) -> bool {
     for (name, r, id) in [("up", at(6, 2, 10, 10), "gcpgup"), ("down", at(6, h - 12, 10, 10), "gcpgdn")] {
         let resp = ui.interact(r.expand(2.0), ui.id().with(id), Sense::click());
         let (a, _) = feedback(&resp, true);
-        icon(app, &p, name, Rect::from_center_size(r.center(), vec2(9.0, 5.0)), fade(if resp.hovered() { WHITE.c() } else { gy(0xAAAAAA) }, a));
+        icon(app, &p, name, Rect::from_center_size(r.center(), vec2(9.0, 5.0)), fade(crate::ui_feel::hl(&resp, gy(0xAAAAAA), WHITE.c()), a));
         if resp.clicked() {
             app.gc.page = if app.gc.page == 2 { 0 } else { 2 };
         }

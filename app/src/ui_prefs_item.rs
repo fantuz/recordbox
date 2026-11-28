@@ -247,8 +247,10 @@ impl Item<'_> {
 
     /// A radio button (19 pt row): true when it was clicked.
     pub fn radio(&mut self, x: f32, y: f32, on: bool, s: &str) -> bool {
-        let (r, _, clicked) = self.toggle_row("radio", x, y, ROW_H, (CTL + 5.0).floor(), s, 0.5);
-        kit::paint_radio_at(self.ui.painter(), r.min, ROW_H, on, self.en);
+        let (r, resp, clicked) = self.toggle_row("radio", x, y, ROW_H, (CTL + 5.0).floor(), s, 0.5);
+        resp.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::RadioButton, self.en, on || clicked, s));
+        let to = if crate::motion::on() { on || clicked } else { on };
+        kit::paint_radio_t(self.ui.painter(), r.min, ROW_H, crate::ui_feel::on_amt(resp.id, to), self.en);
         self.changed |= clicked && !on;
         clicked
     }
@@ -267,12 +269,13 @@ impl Item<'_> {
 
     /// A check box (19 pt row): true when it was changed.
     pub fn check(&mut self, x: f32, y: f32, v: &mut bool, s: &str) -> bool {
-        let (r, _, clicked) = self.toggle_row("check", x, y, ROW_H, (CTL + 5.0).floor(), s, 0.5);
+        let (r, resp, clicked) = self.toggle_row("check", x, y, ROW_H, (CTL + 5.0).floor(), s, 0.5);
         if clicked {
             *v = !*v;
             self.changed = true;
         }
-        kit::paint_check_at(self.ui.painter(), r.min, CTL, *v, self.en);
+        resp.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::Checkbox, self.en, *v, s));
+        kit::paint_check_t(self.ui.painter(), r.min, CTL, crate::ui_feel::on_amt(resp.id, *v), self.en);
         clicked
     }
 
@@ -285,8 +288,13 @@ impl Item<'_> {
             *v = !*v;
             self.changed = true;
         }
+        resp.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::Checkbox, self.en, *v, s));
         // (The track is t tall, centred on 0.425 of the row.)
-        kit::paint_pill(self.ui.painter(), pos2(r.min.x, r.min.y + 0.425 * h - t / 2.0), h / lines, *v, self.en, resp.hovered());
+        if crate::motion::on() {
+            kit::paint_pill_t(self.ui.painter(), pos2(r.min.x, r.min.y + 0.425 * h - t / 2.0), h / lines, crate::ui_feel::on_amt(resp.id, *v), self.en, crate::ui_feel::hover(&resp));
+        } else {
+            kit::paint_pill(self.ui.painter(), pos2(r.min.x, r.min.y + 0.425 * h - t / 2.0), h / lines, *v, self.en, resp.hovered());
+        }
         clicked
     }
 
@@ -377,7 +385,10 @@ impl Item<'_> {
                 }
             }
         }
-        kit::paint_slider(self.ui.painter(), track, track.min.x + t.clamp(0.0, 1.0) * track.width(), self.en, resp.hovered() || resp.dragged());
+        if self.en {
+            crate::ui_feel::grab_cursor(&resp);
+        }
+        kit::paint_slider_t(self.ui.painter(), track, track.min.x + t.clamp(0.0, 1.0) * track.width(), self.en, crate::ui_feel::hot(&resp));
         self.note("slider", "", r);
         self.hover(resp)
     }
