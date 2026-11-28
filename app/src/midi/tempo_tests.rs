@@ -91,4 +91,13 @@ fn pitch_faders_follow_deck_reset_master_and_range_across_queued_events() {
     poll(&mut app);
     assert_eq!(hub.takeover_state(0).leds(), (false, true));
     assert!(app.deck_of(0).x.tempo_adj > 0.04);
+
+    // Two different non-Fast faders send on the same deck before a UI frame.
+    // The stale centre packet must not give the other fader control at its end stop.
+    app.tempo_reset();
+    pitch(9, 1, 8192, false);
+    pitch(10, 1, 16383, false);
+    poll(&mut app);
+    assert_eq!(app.deck.x.tempo_adj, 0.0);
+    assert_eq!(hub.takeover_state(0).leds(), (true, false));
 }

@@ -702,7 +702,7 @@ pub fn column_view(app: &mut App, ui: &mut Ui, drop: &mut Vec<(Rect, i64)>) {
     if app.ext.tree_search_open {
         crate::ui_library_ext::tree_search_field(app, ui);
     }
-    let query = if app.ext.tree_search_open { crate::smart::fold(app.ext.tree_search.trim()) } else { String::new() };
+    let filter = crate::browser_ext::PlaylistTreeFilter::new(app);
     let shown = match app.view {
         View::Playlist(id) => Some(id),
         _ => None,
@@ -748,7 +748,7 @@ pub fn column_view(app: &mut App, ui: &mut Ui, drop: &mut Vec<(Rect, i64)>) {
                 }
                 let kids: Vec<PlaylistNode> = app.nodes.iter().filter(|n| n.parent == *parent).cloned().collect();
                 for n in kids {
-                    if !query.is_empty() && !crate::ui_library_ext::node_matches(app, n.id, &query, 0) {
+                    if !filter.includes(&n) {
                         continue;
                     }
                     if matches!(&app.dialogs.rename, Some((rid, _)) if *rid == n.id) {

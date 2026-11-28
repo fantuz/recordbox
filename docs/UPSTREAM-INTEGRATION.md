@@ -20,12 +20,16 @@ The controller changes follow Adam Sardo’s November 28 MIDI work. They use the
 | Connect a controller with a separate feedback port | The input can work as soon as it appears. When its matching output becomes available, recordbox refreshes the lamps. Ambiguous output names leave feedback paused. |
 | Change rows in MIDI Learn | Packets captured for the previous row stay with that edit. Two CC messages on different channels can be learned independently, including when their control numbers are 32 apart. |
 
+**Platter-based grid editing remains a separate compatibility gap.** Upstream’s earlier GRID ADJUST gesture can reduce a variable-tempo grid to a single tempo. The fork stores measured beat positions and supports edits that start at the current beat. Porting that gesture needs an edit that preserves those positions outside the intended region and supports undo for a full gesture. The counted scratch motion above changes playback position. [Upstream controller implementation](https://github.com/adamsardo/recordbox/commit/4c33514)
+
 ### Checking a controller on your computer
 
 1. Run `recordbox --midi-ports` to list input and output names. On Windows use `.\recordbox.exe` in the portable folder. On Linux use `./recordbox`.
 2. Close any application holding the input exclusively. Run `recordbox --midi-probe "exact input name" 10` and move one control. The command only opens that input. It reports received channel messages, capture overflow and which codes MIDI Learn accepts. The probe can also identify names from the installed AlphaTheta user mapping.
-3. To diagnose a live performance session, launch with `RECORDBOX_MIDI_LOG=1`. Hover over **MIDI** in the PERFORMANCE top bar to see the path to `midi.log`. It records connections, mapping paths, received channel messages and successfully sent feedback bytes. A background writer keeps the current file and one previous file (`midi.log.1`) at about 5 MiB each. If the writer falls behind, the log counts skipped events. The setting applies to that process.
+3. To diagnose a live performance session, launch with `RECORDBOX_MIDI_LOG=1`. Hover over **MIDI** in the PERFORMANCE top bar to see the path to `midi.log`. It records connections, mapping paths, received channel messages, routed actions and successfully sent feedback bytes. A background writer keeps the current file and one previous file (`midi.log.1`) at about 5 MiB each. If the writer falls behind, the log counts skipped events. The setting applies to that process.
 4. On macOS and Linux, `recordbox --midi-virtual "recordbox test controller" 15` creates temporary MIDI endpoints in a second process. It sends a test note on channel 1 once a second, releases it, and counts returned feedback. Use a test mapping to assign note `900B` to an action and LED. A physical check on the intended controller is still needed for platter calibration, lamp colors and feel.
+
+On a Linux machine with an ALSA sequencer, developers can run the native round-trip check with `cargo test --manifest-path app/Cargo.toml --locked --bin recordbox midi::diagnostics::linux::tests::alsa_duplex_port_routes_both_directions_at_one_address -- --exact --ignored`. It verifies a note and a returned lamp message at the same virtual ALSA address. The software routing suite runs across all three desktop systems. The macOS package checks also exercise a real CoreMIDI virtual connection.
 
 ## Optional beat model from 4b4756e
 

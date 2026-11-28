@@ -332,6 +332,15 @@ jobs:
             cargo test --manifest-path app/Cargo.toml --release --locked --bin recordbox "$suite" -- --test-threads=1 | tee "$RUNNER_TEMP/midi-tests.log"
             grep -Eq '^test result: ok\. [1-9][0-9]* passed;' "$RUNNER_TEMP/midi-tests.log"
           done
+      - name: Check native Linux MIDI loopback when the runner has an ALSA sequencer
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          if [ -c /dev/snd/seq ]; then
+            cargo test --manifest-path app/Cargo.toml --release --locked --bin recordbox midi::diagnostics::linux::tests::alsa_duplex_port_routes_both_directions_at_one_address -- --exact --ignored
+          else
+            echo "::notice::Native ALSA loopback unavailable on this runner (/dev/snd/seq)."
+          fi
       - name: Check hardware setup, STEMS deck and cache behavior, and track matching
         shell: bash
         run: |

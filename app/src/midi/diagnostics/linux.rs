@@ -15,7 +15,8 @@ impl VirtualPort {
         let seq = Seq::open(None, None, true).context("Opening the ALSA sequencer")?;
         seq.set_client_name(c"recordbox virtual controller")?;
         let caps = PortCap::READ | PortCap::SUBS_READ | PortCap::WRITE | PortCap::SUBS_WRITE;
-        let port = seq.create_simple_port(&CString::new(name)?, caps, PortType::MIDI_GENERIC | PortType::APPLICATION)?;
+        let port =
+            seq.create_simple_port(&CString::new(name)?, caps, PortType::MIDI_GENERIC | PortType::APPLICATION)?;
         Ok(Self { seq, port })
     }
 
@@ -38,7 +39,10 @@ impl VirtualPort {
                 Ok(event) => {
                     use EventType::*;
                     // ALSA also reports connections and disconnections on this port.
-                    if matches!(event.get_type(), Noteon | Noteoff | Keypress | Controller | Control14 | Pgmchange | Chanpress | Pitchbend) {
+                    if matches!(
+                        event.get_type(),
+                        Noteon | Noteoff | Keypress | Controller | Control14 | Pgmchange | Chanpress | Pitchbend
+                    ) {
                         count += 1;
                     }
                 }
@@ -46,7 +50,9 @@ impl VirtualPort {
                 Err(error) if error.errno() == libc::EAGAIN => {
                     let timeout_ms = remaining.as_millis() as i32 + 1;
                     if let Err(error) = poll::poll(&mut fds, timeout_ms) {
-                        if error.errno().abs() != libc::EINTR { return Err(error.into()); }
+                        if error.errno().abs() != libc::EINTR {
+                            return Err(error.into());
+                        }
                     }
                 }
                 Err(error) => return Err(error.into()),
@@ -58,8 +64,12 @@ impl VirtualPort {
 
 pub(super) fn virtual_controller(name: &str, duration: Duration) -> Result<()> {
     let ctl = VirtualPort::open(name)?;
-    eprintln!("Virtual controller {name} at {}:{} is sending note 0B on channel 1 for {:.2} s",
-        ctl.seq.client_id()?, ctl.port, duration.as_secs_f64());
+    eprintln!(
+        "Virtual controller {name} at {}:{} is sending note 0B on channel 1 for {:.2} s",
+        ctl.seq.client_id()?,
+        ctl.port,
+        duration.as_secs_f64()
+    );
     let end = Instant::now() + duration;
     let mut received = 0;
     while Instant::now() < end {
@@ -91,7 +101,15 @@ mod tests {
             .context("virtual feedback destination missing")?;
         assert_eq!(destinations[index].id(), id);
         let (tx, rx) = crossbeam_channel::bounded(2);
-        let _reader = input.connect(&source, "test-notes", move |_, msg, _| { let _ = tx.try_send(msg.to_vec()); }, ())
+        let _reader = input
+            .connect(
+                &source,
+                "test-notes",
+                move |_, msg, _| {
+                    let _ = tx.try_send(msg.to_vec());
+                },
+                (),
+            )
             .map_err(|e| anyhow::anyhow!("{e}"))?;
         let mut writer = output.connect(&destinations[index], "test-led").map_err(|e| anyhow::anyhow!("{e}"))?;
         ctl.send_note(127)?;

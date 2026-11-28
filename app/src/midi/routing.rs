@@ -98,6 +98,8 @@ pub(super) struct Routing {
     jog_owner: [Option<Arc<Device>>; 4],
     // Received entry on the physical connection that last moved each deck's tempo.
     pub(super) tempo_sources: [Option<(std::sync::Weak<Device>, usize)>; 4],
+    /// Earliest queued non-Fast fader packet still owned by this source and software target.
+    pub(super) tempo_since: [u64; 4],
 }
 
 impl Routing {
@@ -329,6 +331,7 @@ impl Hub {
         for (n, source) in route.tempo_sources.iter_mut().enumerate() {
             if source.as_ref().is_some_and(|(port, _)| port.upgrade().is_none_or(|d| matches(&d))) {
                 *source = None;
+                route.tempo_since[n] = self.seq.load(Relaxed);
                 self.takeover.lock()[n] = TempoTakeover::default();
             }
         }

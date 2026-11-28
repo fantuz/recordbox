@@ -74,7 +74,13 @@ fn generic_hub(dir: &Path) -> (Arc<Hub>, crossbeam_channel::Receiver<UiEvent>) {
 
 fn decoded(secs: usize) -> Arc<crate::audio::Decoded> {
     let frames = 44100 * secs;
-    Arc::new(crate::audio::Decoded { sr: 44100, samples: vec![0.1; frames * 2], raw_frames: frames, damaged: 0, truncated: false })
+    Arc::new(crate::audio::Decoded {
+        sr: 44100,
+        samples: vec![0.1; frames * 2],
+        raw_frames: frames,
+        damaged: 0,
+        truncated: false,
+    })
 }
 
 #[test]
@@ -127,6 +133,9 @@ fn two_reconnected_controllers_keep_identical_wires_separate_for_decks_and_lamps
             device, deck: destination, tag, val: Val::Abs { v, .. }, fast_done: true, ..
         }) if device == dev.name && destination == deck && tag == registry().tag("Gain") && v == expected));
     }
+    for (index, value) in [132, 259].into_iter().enumerate() {
+        assert_eq!(hub.decks[index].lock().trim, crate::mixer::trim_gain(value as f32 / 16384.0));
+    }
     assert!(events.try_recv().is_err());
 }
 
@@ -135,9 +144,11 @@ fn ergo_half_turn_moves_the_audio_half_a_revolution_in_either_direction() {
     let tmp = tempfile::tempdir().unwrap();
     let (hub, _events) = generic_hub(tmp.path());
     let name = "PIONEER DDJ-ERGO";
-    let csv = format!("@file,1,{name}\r\n\
+    let csv = format!(
+        "@file,1,{name}\r\n\
         JogTouch,,JogTouch,9036,0,,,,,,,,,RO;,\r\n\
-        JogScratch,,JogRotate,B022,0,,,,,,,,,RO;,\r\n");
+        JogScratch,,JogRotate,B022,0,,,,,,,,,RO;,\r\n"
+    );
     let dev = Device::mapped(name, name.into(), MidiMap::load(name, Some(csv.as_bytes()), None).unwrap(), true, None);
     const RATE: u32 = 44_100;
     let start = f64::from(RATE);

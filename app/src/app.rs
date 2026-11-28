@@ -4170,6 +4170,11 @@ impl App {
         let mut s = self.player.state.lock();
         if let Some(a) = &s.audio {
             s.pos = t * a.sr as f64;
+            // A seek while the platter is held supersedes counts at its old position.
+            if s.dk.jog_left.is_some() {
+                s.dk.jog_left = Some(0.0);
+                s.dk.jog = crate::deck::Jog::Speed(0.0);
+            }
         }
     }
     pub fn set_playing(&mut self, p: bool) {

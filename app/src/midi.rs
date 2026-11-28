@@ -35,6 +35,7 @@ use std::time::{Duration, Instant};
 pub(crate) mod trace;
 pub(crate) mod diagnostics;
 mod ports;
+pub(crate) use ports::is_test_input;
 mod performance;
 mod routing;
 #[cfg(test)]
@@ -1182,7 +1183,7 @@ impl Device {
             if !matches!(out.link, ports::FeedbackLink::Idle) { return; }
         }
         let Some((key, port)) = desired else { return };
-        let Some(lease) = claims.acquire(&key.id) else { return };
+        let Some(lease) = claims.acquire(key) else { return };
         let Ok(output) = midir::MidiOutput::new("recordbox") else { return };
         let Ok(conn) = output.connect(port, "recordbox-out") else { return };
         self.seed_output(key.clone());
@@ -1522,9 +1523,7 @@ impl Hub {
             if name.is_empty() || name == "<error>" || name == "Arduino Leonardo" { return None; }
             Some((name, port.id(), port))
         }).collect();
-        let allowed = |name: &String| !ignore.contains(name)
-            && only.as_ref().map_or_else(|| !name.starts_with("rbxtest-"), |names| names.contains(name));
-        let visible = ports::Inputs::inspect(ports.iter().filter(|(name, _, _)| allowed(name))
+        let visible = ports::Inputs::inspect(ports.iter().filter(|(name, _, _)| ports::allowed_input(name, &ignore, only.as_deref()))
             .map(|(name, id, _)| (name.as_str(), id.as_str())));
         let mut previous = self.paused_input_names.lock();
         let mut changed = *previous != visible.paused;
@@ -1682,6 +1681,7 @@ impl Hub {
                 let same = source.as_ref().is_some_and(|(old, entry)| old.ptr_eq(&port) && *entry == ev.entry);
                 if (deck == n && !same) || (deck != n && same) {
                     *source = (deck == n).then(|| (port.clone(), ev.entry));
+                    route.tempo_since[deck] = self.seq.load(Relaxed);
                     self.takeover.lock()[deck] = TempoTakeover::default();
                 }
             }
@@ -1689,9 +1689,9 @@ impl Hub {
         }
         if f.act == Act::Needle {
             let Some(n) = self.deck_ix(ev.deck) else { return };
-            let Some(frac) = ev.val.unit() else { return };
+            let Some(step) = ev.val.needle_step() else { return };
             ev.deck = n as u8 + 1;
-            ev.val = Val::Needle { step: (frac * 400.0) as u16, held: route.jog_held(ev.deck) };
+            ev.val = Val::Needle { step, held: route.jog_held(ev.deck) };
         }
         if routing::momentary(f.act) {
             if !f.per_deck {
@@ -1892,7 +1892,8 @@ impl Hub {
     fn rearm_takeover(&self, n: usize, target: TempoTarget) {
         // Serialize with a fast fader move, including the engine write and its
         // queued UI mirror. A reset must win over the fader value it supersedes.
-        let _route = self.routing.lock();
+        let mut route = self.routing.lock();
+        route.tempo_since[n] = self.seq.load(Relaxed);
         {
             let mut snap = self.snap.lock();
             let d = &mut snap.decks[n];
@@ -2006,7 +2007,7 @@ impl Hub {
                 }
             }
             Act::Tempo => {
-                let Some(raw) = val.tempo_position() else { return false };
+                let Some(raw) = val.position14() else { return false };
                 match self.tempo_slider(n, raw) {
                     Some(adj) => {
                         self.set_param(n, Param::Tempo, adj as f32);
@@ -2558,10 +2559,11 @@ fn browse_step(app: &mut App, value: i32, encoder: bool) {
 
 fn tree_forward(app: &mut App) -> bool {
     let View::Playlist(id) = app.view else { return false };
-    if !app.node(id).is_some_and(|n| n.kind == NodeKind::Folder) || !app.expanded.insert(id) {
+    let filter = crate::browser_ext::PlaylistTreeFilter::new(app);
+    if filter.searching() || !app.node(id).is_some_and(|n| n.kind == NodeKind::Folder) || !app.expanded.insert(id) {
         return false;
     }
-    if let Some(first) = app.nodes.iter().filter(|n| n.parent == id).min_by_key(|n| n.seq).map(|n| n.id) {
+    if let Some(first) = filter.first_child(&app.nodes, id) {
         app.set_view(View::Playlist(first));
     }
     true
@@ -2719,7 +2721,7 @@ pub fn apply(app: &mut App, hub: &Arc<Hub>, device: &str, f: &Func, deck: u8, va
             let (step, held) = match val {
                 Val::Needle { step, held } => (step, held),
                 // Commands injected without a physical controller still honour Needle Lock.
-                _ => match unit { Some(p) => ((p * 400.0) as u16, false), None => return },
+                _ => match val.needle_step() { Some(step) => (step, false), None => return },
             };
             let lock = app.prefs.midi.needle_lock;
             app.with_deck(n, |a| a.needle_at_step(step, lock, held));
@@ -2749,7 +2751,12 @@ pub fn apply(app: &mut App, hub: &Arc<Hub>, device: &str, f: &Func, deck: u8, va
             }
         }
         Act::Tempo => {
-            let Some(raw) = val.tempo_position() else { return };
+            let Some(raw) = val.position14() else { return };
+            // A custom non-Fast mapping has waited for this frame. A different
+            // physical fader or a software reset can have taken its place meanwhile.
+            if !fast_done && seq != 0 && seq < hub.routing.lock().tempo_since[ni] {
+                return;
+            }
             let target = TempoTarget::read(app, n);
             let adj = if fast_done {
                 // The engine can already have received the next controller event. Mirror
@@ -3973,6 +3980,10 @@ mod tests {
         };
         let native = connect();
         assert!(native.from_rekordbox() && native.factory);
+        let summary = native.mapping_summary();
+        assert!(summary.contains(&format!("factory {}", factory_path.display())));
+        assert!(summary.contains(&format!("AlphaTheta rekordbox {}", native_path.display())));
+        assert!(summary.contains("2 input codes"));
         assert_eq!(native.map.lock().live_inputs().count(), 2);
         hub.set_profile_trial(&native, true);
         hub.set_learning(&native, true);
@@ -3984,6 +3995,7 @@ mod tests {
         crate::ui_midi::select_device(&mut midi, name);
         crate::ui_midi::close(&mut midi);
         assert!(native.profile_trial_active(), "closing settings keeps the session trial");
+        assert!(native.mapping_summary().contains("temporary controller profile"));
         hub.set_profile_trial(&native, false);
         assert!(native.from_rekordbox());
         let codes = |d: &Device| d.map.lock().live_inputs().map(|i| i.e.code).collect::<Vec<_>>();
@@ -3995,6 +4007,8 @@ mod tests {
         hub.devices.lock().clear();
         let reset = connect();
         assert!(!reset.from_rekordbox());
+        assert!(reset.mapping_summary().contains(&format!("recordbox override {}", local_path.display())));
+        assert!(!reset.mapping_summary().contains("AlphaTheta rekordbox"));
         assert_eq!(codes(&reset), [0x9010]);
         hub.set_profile_trial(&reset, true);
         assert!(reset.profile_trial_active());
@@ -4093,6 +4107,41 @@ mod tests {
         let mut out = dev.out.lock();
         let packets: Vec<_> = std::iter::from_fn(|| out.queue.pop()).collect();
         assert_eq!(&packets[2..], &[[0xB2, 9, 127], [0xB2, 0x19, 127]]);
+    }
+
+    #[test]
+    fn output_replacement_replays_held_buttons_and_current_meters_without_restarting_input() {
+        let csv = b"@file,1,Test
+Load,Load,Button,,9046,,,,,9046,,,,,
+ChannelLevel,ChannelLevel,Indicator,,,,,,,B002,,,,RO;,
+";
+        let map = MidiMap::load("Test", None, Some(csv)).unwrap();
+        let dev = Device::mapped("Test", "input-1".into(), map, false, None);
+        let endpoint = |id: &str| ports::Endpoint { name: "Test out".into(), id: id.into() };
+        let drain = || {
+            let mut out = dev.out.lock();
+            std::iter::from_fn(|| out.queue.pop()).collect::<Vec<_>>()
+        };
+        dev.seed_output(endpoint("out-1"));
+        assert_eq!(drain(), [[0x90, 0x46, 0]]);
+        let load = registry().tag("Load");
+        dev.set_led(load, 1, Led::On);
+        dev.set_named("ChannelLevel", 1, |_| 64);
+        assert_eq!(drain().len(), 2);
+        dev.output_closed();
+        dev.learning.store(true, Relaxed);
+        let epoch = dev.input_epoch.load(Relaxed);
+        dev.seed_output(endpoint("out-2"));
+        assert_eq!(drain(), [[0x90, 0x46, 127]]);
+        dev.set_named("ChannelLevel", 1, |_| 64);
+        dev.set_named("ChannelLevel", 1, |_| 64);
+        assert_eq!(drain(), [[0xB0, 0x02, 64]]);
+        assert!(dev.has_output() && dev.learning_at(epoch));
+        assert_eq!(dev.input_id, "input-1");
+        dev.output_closed();
+        dev.clear_button_feedback();
+        dev.seed_output(endpoint("out-3"));
+        assert_eq!(drain(), [[0x90, 0x46, 0]]);
     }
 
     #[test]
@@ -4441,9 +4490,30 @@ mod tests {
         assert!(learned);
         assert!(!decks[0].lock().playing, "LEARN must not play the deck");
 
+        // Losing only the feedback port must preserve the input, its Learn state and mapping.
+        drop(_ctl_in);
+        wait("the old feedback destination to close", || {
+            hub.scan();
+            !dev.has_output()
+        });
+        let replacement_leds = Arc::new(Mutex::new(Vec::new()));
+        let sink = replacement_leds.clone();
+        let replacement = midir::MidiInput::new("test-controller").unwrap().create_virtual(
+            &name, move |_, bytes, _| sink.lock().push(bytes.to_vec()), ()
+        ).unwrap();
+        wait("the replacement feedback destination", || {
+            hub.scan();
+            dev.has_output()
+        });
+        assert!(Arc::ptr_eq(&dev, &hub.device(&name).unwrap()));
+        assert!(dev.learning.load(Relaxed));
+        dev.set_led(sync, 1, Led::On);
+        wait("feedback on the new destination", || {
+            replacement_leds.lock().iter().any(|m| m == &[0x90, 0x58, 127])
+        });
         // Unplugged: the device goes at the next scan.
         drop(ctl_out);
-        drop(_ctl_in);
+        drop(replacement);
         wait("the device to go", || {
             hub.scan();
             hub.devices.lock().is_empty()

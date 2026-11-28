@@ -32,9 +32,9 @@ pub enum Val {
 }
 
 impl Val {
-    /// Physical tempo position: 8192 steps below centre and 8191 above. Keep every
-    /// native high-resolution step and use the same centre for custom mapped ranges.
-    pub fn tempo_position(self) -> Option<i32> {
+    /// Normalize an absolute MIDI control into the native 14-bit range, with 8192
+    /// steps below centre and 8191 above. Native positions pass through exactly.
+    pub fn position14(self) -> Option<i32> {
         let Val::Abs { v, lo, mid, hi } = self else { return None };
         if hi <= lo { return None; }
         let v = v.clamp(lo, hi);
@@ -46,6 +46,16 @@ impl Val {
         Some(if mid <= lo || mid >= hi { scale(lo, hi, 16383) }
             else if v <= mid { scale(lo, mid, 8192) }
             else { 8192 + scale(mid, hi, 8191) })
+    }
+
+    /// The hardware needle strip has 401 positions. Preserve the traced scale factor
+    /// through the conversion: a one-step difference can be seconds on a long track.
+    pub fn needle_step(self) -> Option<u16> {
+        let raw = self.position14().or_else(|| match self {
+            Val::Raw(v) => Some((i32::from(v) * 16383 + 63) / 127),
+            _ => None,
+        })?;
+        Some(((raw as f32 * 0.024416) as u16).min(400))
     }
 
     /// An absolute value as 0..1, the centre at exactly 0.5.
@@ -1672,6 +1682,14 @@ mod tests {
     }
 
     #[test]
+    fn needle_steps_keep_native_boundary_values_and_custom_map_endpoints() {
+        let native = |v| Val::Abs { v, lo: 0, mid: 8192, hi: 16383 }.needle_step();
+        assert_eq!([native(0), native(982), native(983), native(16383)], [Some(0), Some(23), Some(24), Some(400)]);
+        assert_eq!(Val::Raw(127).needle_step(), Some(400));
+        assert_eq!(Val::Abs { v: 64, lo: 0, mid: 64, hi: 127 }.needle_step(), Some(200));
+    }
+
+    #[test]
     fn jog_rows() {
         let mut m = map(&["JogScratch,JogScratch,JogRotate,B022,0,1,,,,,,,,RO,", "JogSearch,JogSearch,Difference,B029,0,1,,,,,,,,RO,", "JogTouch,JogTouch,JogTouch,9036,0,1,,,,,,,,RO,"]);
         let e = m.handle(&[0xB0, 0x22, 0x41], 12.5).unwrap();
@@ -1913,13 +1931,13 @@ mod tests {
     #[test]
     fn physical_tempo_positions_keep_the_center_and_each_native_step() {
         for v in 0..=16383 {
-            assert_eq!(Val::Abs { v, lo: 0, mid: 8192, hi: 16383 }.tempo_position(), Some(v));
+            assert_eq!(Val::Abs { v, lo: 0, mid: 8192, hi: 16383 }.position14(), Some(v));
         }
-        let coarse = |v| Val::Abs { v, lo: 10, mid: 72, hi: 120 }.tempo_position();
+        let coarse = |v| Val::Abs { v, lo: 10, mid: 72, hi: 120 }.position14();
         assert_eq!([coarse(0), coarse(41), coarse(72), coarse(96), coarse(127)],
             [Some(0), Some(4096), Some(8192), Some(12288), Some(16383)]);
-        assert_eq!(Val::Abs { v: 9, lo: 9, mid: 9, hi: 9 }.tempo_position(), None);
-        assert_eq!(Val::Raw(64).tempo_position(), None);
+        assert_eq!(Val::Abs { v: 9, lo: 9, mid: 9, hi: 9 }.position14(), None);
+        assert_eq!(Val::Raw(64).position14(), None);
     }
 
     #[test]

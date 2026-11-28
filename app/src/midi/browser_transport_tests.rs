@@ -37,6 +37,21 @@ fn transport_feedback_follows_held_preview_playback_and_track_end() {
     assert!(hub.hot_cue(0, 0, false));
     hub.play_pause(0);
     check(Led::BlinkMs(1000), Led::BlinkMs(500));
+    // Advance the output worker's clock in 50 ms ticks. These are the two published
+    // OPUS-QUAD lamp addresses for deck 1.
+    let mut play_ticks = Vec::new();
+    let mut cue_ticks = Vec::new();
+    for tick in 0..=20 {
+        for (address, on) in dev.out.lock().blink.tick() {
+            match address {
+                0x9000 => play_ticks.push((tick, on)),
+                0x9001 => cue_ticks.push((tick, on)),
+                _ => {}
+            }
+        }
+    }
+    assert_eq!(play_ticks, [(0, true), (10, false), (20, true)]);
+    assert_eq!(cue_ticks, [(0, true), (5, false), (10, true), (15, false), (20, true)]);
     hub.snap.lock().decks[0].ui_preview = true;
     hub.decks[0].lock().playing = true;
     check(Led::BlinkMs(1000), Led::On);
@@ -87,6 +102,8 @@ fn browser_packets_follow_filtered_rows_tree_and_folder_focus() {
         }
     };
     let parent = app.db.create_node(0, "Folder", NodeKind::Folder, None).unwrap();
+    let hidden = app.db.create_node(parent, crate::browser_ext::CUE_PLAYLIST_NAME, NodeKind::Playlist, None).unwrap();
+    app.prefs.tree_items.insert("CUE Analysis Playlist".into(), false);
     let child = app.db.create_node(parent, "First", NodeKind::Playlist, None).unwrap();
     let empty = app.db.create_node(parent, "Empty", NodeKind::Folder, None).unwrap();
     app.reload_playlists();
@@ -106,6 +123,15 @@ fn browser_packets_follow_filtered_rows_tree_and_folder_focus() {
     click(&mut app, "Back");
     assert_eq!(app.view, View::Playlist(parent));
     assert!(!app.expanded.contains(&parent));
+    app.ext.tree_search_open = true;
+    app.ext.tree_search = "First".into();
+    // Search temporarily expands the matching child's ancestors. Hidden siblings stay out.
+    packet(&mut app, [0xb0, 0x4f, 1]);
+    assert_eq!(app.view, View::Playlist(child));
+    assert_ne!(app.view, View::Playlist(hidden));
+    packet(&mut app, [0xb0, 0x4f, 30]);
+    assert_eq!(app.view, View::Playlist(child));
+    app.ext.tree_search_open = false;
     packet(&mut app, [0xb0, 0x4f, 0]);
     assert!(!app.dialogs.ext.focus_tree && !app.ext.tree_focus);
 

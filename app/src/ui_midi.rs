@@ -1259,28 +1259,26 @@ impl App {
         if shot.is_empty() && !test {
             return;
         }
-        if frame == 2 {
-            if !test_ctl_start() {
-                eprintln!("miditest: CoreMIDI virtual ports are not available");
-            }
-            if !shot.is_empty() {
-                // A mapping to show: a few learned rows in the throwaway data folder.
-                let dir = crate::db::data_dir().join("MidiMappings");
-                let _ = std::fs::create_dir_all(&dir);
-                let demo = format!("@file,1,{TEST_NAME}\r\nPlayPause,PlayPause,Button,,900B,910B,,,,900B,910B,,,Fast;Blink=1000;Priority=50;,\r\nCue,Cue,Button,,900C,910C,,,,900C,910C,,,Fast;Blink=500;Priority=50;,\r\nSync,Sync,Button,,9058,9158,,,,9058,9158,,,Blink=600;,\r\nTempoSlider,TempoSlider,KnobSliderHiRes,,B000,B100,,,,,,,,Fast;,pitch fader\r\nLoopIn,LoopIn,Button,,9010,9110,,,,9010,9110,,,Fast;,\r\nLoopOut,LoopOut,Button,,9011,9111,,,,9011,9111,,,Fast;,\r\nNeedleSearch,NeedleSearch,Value,,B003,,,,,,,,,Max=16383;,\r\nTempoUp,TempoUp,Indicator,,,,,,,9034,9134,,,,\r\n");
-                let _ = std::fs::write(dir.join(format!("{TEST_NAME}.midi.csv")), demo);
-            }
+        if frame == 2 && !test_ctl_start() {
+            eprintln!("miditest: virtual MIDI ports are unavailable");
         }
+        let Some(name) = self.midi.devices.iter().find(|name| crate::midi::is_test_input(name, TEST_NAME)).cloned() else { return };
         let click = |raw: &mut egui::RawInput, p: Pos2, down: bool| raw.events.push(egui::Event::PointerButton { pos: p, button: egui::PointerButton::Primary, pressed: down, modifiers: Default::default() });
         if !shot.is_empty() {
-            if !self.midi.connected() {
-                return;
-            }
             if !self.midi.win.open && frame > 10 && shot != "prefs" {
                 self.midi.win.open = true;
                 if shot != "empty" {
-                    select_device(&mut self.midi, TEST_NAME);
-                    self.midi.win.sel[0] = Some(1);
+                    // ALSA includes the client and port address in the actual device name.
+                    let demo = format!("@file,1,{name}\r\nPlayPause,PlayPause,Button,,900B,910B,,,,900B,910B,,,Fast;Blink=1000;Priority=50;,\r\nCue,Cue,Button,,900C,910C,,,,900C,910C,,,Fast;Blink=500;Priority=50;,\r\nSync,Sync,Button,,9058,9158,,,,9058,9158,,,Blink=600;,\r\nTempoSlider,TempoSlider,KnobSliderHiRes,,B000,B100,,,,,,,,Fast;,pitch fader\r\nLoopIn,LoopIn,Button,,9010,9110,,,,9010,9110,,,Fast;,\r\nLoopOut,LoopOut,Button,,9011,9111,,,,9011,9111,,,Fast;,\r\nNeedleSearch,NeedleSearch,Value,,B003,,,,,,,,,Max=16383;,\r\nTempoUp,TempoUp,Indicator,,,,,,,9034,9134,,,,\r\n");
+                    if let Some(hub) = self.midi.hub.as_ref() {
+                        if let (Some(dev), Ok(map)) = (hub.device(&name), crate::midi_map::MidiMap::load(&name, None, Some(demo.as_bytes()))) {
+                            hub.edit_mapping(&dev, |current| *current = map);
+                        }
+                    }
+                    select_device(&mut self.midi, &name);
+                    if self.midi.win.rows[0].len() > 1 {
+                        self.midi.win.sel[0] = Some(1);
+                    }
                 }
                 if shot == "learn" {
                     set_learn(&mut self.midi, true);
@@ -1318,15 +1316,16 @@ impl App {
         let step = ((frame - START) / 8) as usize;
         let phase = (frame - START) % 8;
         let file = std::env::var("PREPDECK_MIDI_FILE").unwrap_or_default();
-        enum S {
-            Click(&'static str),
+        let menu_item = format!("item:{name}");
+        enum S<'a> {
+            Click(&'a str),
             Send([u8; 3]),
             Note(&'static str),
         }
         let steps: Vec<(&str, S)> = vec![
             ("the MIDI button opens the window", S::Click("MIDI")),
             ("the device list opens", S::Click("device")),
-            ("the test controller is picked", S::Click("item:rbxtest-midi4 controller")),
+            ("the test controller is picked", S::Click(&menu_item)),
             ("ADD opens its menu", S::Click("ADD")),
             ("PlayPause is added", S::Click("add:PlayPause")),
             ("LEARN is armed", S::Click("LEARN")),
