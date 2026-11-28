@@ -5,13 +5,20 @@ on:
     paths:
       - 'Formula/recordbox.rb'
       - '.github/workflows/homebrew.yml'
+      - '.github/workflows/homebrew-pin.yml'
   workflow_dispatch:
+  workflow_call:
+    inputs:
+      revision:
+        description: Exact formula commit to install
+        type: string
+        required: true
 
 permissions:
   contents: read
 
 concurrency:
-  group: homebrew-source-${{ github.ref }}
+  group: homebrew-source-${{ inputs.revision || github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -24,12 +31,14 @@ jobs:
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 60
     env:
+      TAP_REVISION: ${{ inputs.revision || github.sha }}
       HOMEBREW_NO_AUTO_UPDATE: '1'
       HOMEBREW_NO_INSTALL_CLEANUP: '1'
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          ref: ${{ inputs.revision || github.sha }}
       - name: Install the build interpreter alongside the runner's Python
         if: runner.arch == 'X64'
         # The Intel image provides Python.org symlinks. The formula uses Homebrew's private opt path.
@@ -40,7 +49,7 @@ jobs:
           # The tap contains the proposed recipe, even before it reaches the default branch.
           brew tap fantuz/recordbox "file://$GITHUB_WORKSPACE"
           tap_dir="$(brew --repository fantuz/recordbox)"
-          test "$(git -C "$tap_dir" rev-parse HEAD)" = "$GITHUB_SHA"
+          test "$(git -C "$tap_dir" rev-parse HEAD)" = "$TAP_REVISION"
           brew install --build-from-source fantuz/recordbox/recordbox
       - name: Test the installed app on this architecture
         run: |

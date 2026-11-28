@@ -1,0 +1,73 @@
+name: Pin Homebrew to the published release
+
+on:
+  workflow_run:
+    workflows: ['Build and package']
+    types: [completed]
+  workflow_dispatch:
+
+permissions: {}
+
+# Reordered or coalesced events always resolve the newest published stable version.
+concurrency:
+  # A skipped PR build must not evict a queued release reconciliation.
+  group: ${{ (github.event_name == 'workflow_dispatch' || (github.event.workflow_run.event == 'push' && github.event.workflow_run.conclusion == 'success')) && 'recordbox-published-homebrew' || github.run_id }}
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    if: >-
+      github.repository == 'fantuz/recordbox' &&
+      ((github.event_name == 'workflow_dispatch' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)) ||
+       (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success' &&
+        github.event.workflow_run.event == 'push' &&
+        github.event.workflow_run.head_repository.full_name == github.repository &&
+        (github.event.workflow_run.head_branch == github.event.repository.default_branch ||
+         startsWith(github.event.workflow_run.head_branch, 'v'))))
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    outputs:
+      base: ${{ steps.pin.outputs.base }}
+      commit: ${{ steps.pin.outputs.commit }}
+      tag: ${{ steps.pin.outputs.tag }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+      - id: pin
+        run: python3 packaging/homebrew_pin.py prepare
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PIN_DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+
+  install:
+    needs: prepare
+    if: needs.prepare.outputs.commit != ''
+    uses: ./.github/workflows/homebrew.yml
+    with:
+      revision: ${{ needs.prepare.outputs.commit }}
+    permissions:
+      contents: read
+
+  promote:
+    needs: [prepare, install]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+      - name: Verify the release and advance the tested tap
+        run: python3 packaging/homebrew_pin.py promote
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PIN_DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          PIN_BASE: ${{ needs.prepare.outputs.base }}
+          PIN_TESTED_COMMIT: ${{ needs.prepare.outputs.commit }}
+          PIN_TESTED_TAG: ${{ needs.prepare.outputs.tag }}

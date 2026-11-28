@@ -60,7 +60,9 @@ open "$(brew --prefix fantuz/recordbox/recordbox)/libexec/Recordbox.app"
 
 You can also start `recordbox` from the terminal. The build downloads its compiler and locked dependencies. The installed app uses macOS system libraries and carries a local ad-hoc signature. Developer ID signing and Apple notarization are separate distribution processes.
 
-After publishing a new stable release, update the `tag` and full commit `revision` together in the tap’s formula. Use the commit identified in the release notes, and check that the release tag resolves to it. The Homebrew workflow installs the formula by its tap name and tests the installed bundle. Once the formula change reaches the tap’s default branch, users can run `brew update` and `brew upgrade fantuz/recordbox/recordbox`. [Homebrew formula](../Formula/recordbox.rb) · [Native installation check](../.github/workflows/homebrew.yml)
+The recordbox formula pins both the release tag and the full merge commit. Projects that pin only a version, such as OneTagger, can prepare their formula at the version bump. For recordbox, the release identifies the final commit after merge. Once published, the Homebrew workflow checks the tag, release notes and source `VERSION`, then tests the formula update on Apple Silicon and Intel. It advances the tap by that exact tested commit if the default branch still has the same parent. Users can then run `brew update` and `brew upgrade fantuz/recordbox/recordbox`. [Homebrew formula](../Formula/recordbox.rb) · [Native install checks](../.github/workflows/homebrew.yml)
+
+To replay after an interrupted run, select **Actions → Pin Homebrew to the published release → Run workflow** on `main`. A matching pin finishes immediately. The workflow records the release, candidate and result in its job summary. A newer release or a default-branch change gets a fresh reconciliation. If repository protection blocks the update, the summary links to the tested, formula-only change for normal pull-request review. [Publication workflow](../.github/workflows/homebrew-pin.yml)
 
 ## Distributing a macOS app to DJs
 
