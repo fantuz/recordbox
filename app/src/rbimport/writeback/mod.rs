@@ -299,9 +299,16 @@ pub(crate) struct Plan {
     local_library: PathBuf,
 }
 
+#[derive(Debug, Default)]
+pub(crate) struct RecoveryFiles {
+    pub backup: Option<PathBuf>,
+    pub remaining_staging: Option<PathBuf>,
+}
+
 pub(crate) struct Receipt {
     pub applied: usize,
-    pub backup: PathBuf,
+    pub backup: Option<PathBuf>,
+    pub remaining_staging: Option<PathBuf>,
 }
 
 fn local_db(path: &Path, write: bool) -> Result<Db> {
@@ -349,7 +356,7 @@ pub(crate) fn backup_root(local: &Path) -> Result<PathBuf> {
         .context("Missing Recordbox data folder")?
         .join("native-recovery"))
 }
-pub(crate) fn recover(local: &Path, source: &Path) -> Result<PathBuf> {
+pub(crate) fn recover(local: &Path, source: &Path) -> Result<RecoveryFiles> {
     storage::recover(source, &backup_root(local)?)
 }
 
@@ -846,6 +853,16 @@ pub(crate) fn apply(
     plan: &Plan,
     selected: &[usize],
 ) -> Result<Receipt> {
+    apply_with_backup(local_db_path, source_dir, plan, selected, true)
+}
+
+pub(crate) fn apply_with_backup(
+    local_db_path: &Path,
+    source_dir: &Path,
+    plan: &Plan,
+    selected: &[usize],
+    retain_backup: bool,
+) -> Result<Receipt> {
     location::verify(source_dir)?;
     ensure!(!selected.is_empty(), "Select at least one edit");
     ensure!(
@@ -872,7 +889,14 @@ pub(crate) fn apply(
         }
     }
     let db = local_db(local_db_path, true)?;
-    let (proofs, backup) = storage::apply(source_dir, &backup_root(local_db_path)?, |remote| {
+    let recovery = if retain_backup {
+        storage::RecoveryCopy::Keep
+    } else if rows.iter().any(|r| r.field == Field::Grid) {
+        storage::RecoveryCopy::TemporaryForGrids
+    } else {
+        storage::RecoveryCopy::DatabaseTransaction
+    };
+    let (proofs, recovery_files) = storage::apply_with_policy(source_dir, &backup_root(local_db_path)?, recovery, |remote| {
         location::verify(source_dir)?;
         ensure!(
             Source::read(remote, source_dir)? == plan.source,
@@ -906,7 +930,7 @@ pub(crate) fn apply(
             }
             validated.push(now.write);
         }
-        // The encrypted backup is already verified and native patches are prepared.
+        // The native patches and any required recovery copy have been prepared.
         // Hold the local writer slot only for final validation and commit. Individual
         // lookups use (track_id,field), even in a collection with millions of records.
         db.conn.execute_batch("BEGIN IMMEDIATE")?;
@@ -1003,14 +1027,13 @@ pub(crate) fn apply(
         Ok(())
     };
     acknowledge().with_context(|| {
-        format!(
-            "Native changes committed. Recovery copy: {}. Import again to refresh local baselines",
-            backup.display()
-        )
+        let recovery = recovery_files.backup.as_ref().or(recovery_files.remaining_staging.as_ref()).map(|p| format!(" Recovery files at {}.", p.display())).unwrap_or_default();
+        format!("Native changes committed.{recovery} Import again to refresh local baselines.")
     })?;
     Ok(Receipt {
         applied: rows.len(),
-        backup,
+        backup: recovery_files.backup,
+        remaining_staging: recovery_files.remaining_staging,
     })
 }
 
