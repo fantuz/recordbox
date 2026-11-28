@@ -20,6 +20,8 @@ The controller changes follow Adam Sardo’s November 28 MIDI work. They use the
 | Connect a controller with a separate feedback port | The input can work as soon as it appears. When its matching output becomes available, recordbox refreshes the lamps. Ambiguous output names leave feedback paused. |
 | Change rows in MIDI Learn | Packets captured for the previous row stay with that edit. Two CC messages on different channels can be learned independently, including when their control numbers are 32 apart. |
 
+The DDJ-GRV6 replay produced the expected 1,773 events from 2,173 packets and matched all 12 expected feedback messages on the fork before and after this change and on upstream. In six order-balanced trials of roughly six million packets each, the median decoding time on one Linux CPU was 14.30 ns per packet at fork base `801255f`, 14.47 ns after integration and 38.84 ns at upstream `fcffc8d`. The fork’s before/after interquartile ranges overlapped. These measurements cover decoding in memory. USB delivery and audio output require a hardware measurement. [Fixture and replay method](studies/midi-replay/README.md)
+
 **Platter-based grid editing remains a separate compatibility gap.** Upstream’s earlier GRID ADJUST gesture can reduce a variable-tempo grid to a single tempo. The fork stores measured beat positions and supports edits that start at the current beat. Porting that gesture needs an edit that preserves those positions outside the intended region and supports undo for a full gesture. The counted scratch motion above changes playback position. [Upstream controller implementation](https://github.com/adamsardo/recordbox/commit/4c33514)
 
 ### Checking a controller on your computer

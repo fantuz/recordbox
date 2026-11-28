@@ -1525,15 +1525,20 @@ impl Hub {
         }).collect();
         let visible = ports::Inputs::inspect(ports.iter().filter(|(name, _, _)| ports::allowed_input(name, &ignore, only.as_deref()))
             .map(|(name, id, _)| (name.as_str(), id.as_str())));
-        let mut previous = self.paused_input_names.lock();
-        let mut changed = *previous != visible.paused;
+        // Exclude MIDI Learn only while publishing the input identity change.
+        // Opening or closing a driver and reading the CSVs can take much longer.
+        let (mut changed, gone) = {
+            let mut previous = self.paused_input_names.lock();
+            let changed = *previous != visible.paused;
+            if changed { previous.clone_from(&visible.paused); }
+            let gone: Vec<_> = self.devices.lock().extract_if(.., |d| !visible.contains(&d.name, &d.input_id)).collect();
+            for device in &gone { device.alive.store(false, Relaxed); }
+            (changed, gone)
+        };
         let mut removed = Vec::new();
-        // Retire old workers before a replacement can send its first note.
-        let gone: Vec<_> = self.devices.lock().extract_if(.., |d| !visible.contains(&d.name, &d.input_id)).collect();
         for device in gone {
             {
                 let _out = device.out.lock();
-                device.alive.store(false, Relaxed);
                 device.out_cv.notify_all();
             }
             device.in_conn.lock().take();
@@ -1552,11 +1557,9 @@ impl Hub {
             }
         }
         if changed {
-            let _ = self.tx.send(UiEvent::Ports { removed, paused: visible.paused.clone() });
+            let _ = self.tx.send(UiEvent::Ports { removed, paused: visible.paused });
             self.wake();
         }
-        *previous = visible.paused;
-        drop(previous); // A slow output driver must not block MIDI Learn's input identity check.
         let devices = self.devices.lock().clone();
         if !devices.is_empty() && std::env::var("PREPDECK_MIDI_NO_OUT").as_deref() != Ok("1") {
             let inputs: Vec<_> = ports.into_iter().map(|(name, _, _)| name).collect();
