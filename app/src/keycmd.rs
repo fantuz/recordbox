@@ -656,7 +656,7 @@ pub fn tree_key(app: &mut App, key: egui::Key) -> bool {
                     if folder && !open {
                         app.expanded.insert(id);
                     } else if folder {
-                        let first = crate::prefs_ext::visible_nodes(&app.nodes, &app.expanded).into_iter().find(|n| app.node(*n).map(|x| x.parent == id).unwrap_or(false));
+                        let first = crate::browser_ext::PlaylistTreeFilter::new(app).first_child(&app.nodes, id);
                         if let Some(c) = first {
                             app.set_view(View::Playlist(c));
                         }

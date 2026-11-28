@@ -716,6 +716,7 @@ impl App {
     /// BEAT SYNC state and beat grid to the audio thread. Outside the two-deck layouts the
     /// deck plays plainly (those controls are not on screen there).
     pub(crate) fn push_deck_controls(&mut self) {
+        crate::midi::before_push(self);
         let two = self.two_players();
         let dual = self.dual_player();
         let perf = self.performance();
@@ -871,6 +872,7 @@ impl App {
             self.prefs.deck.player_sync[(self.px.active as usize).min(3)] = false;
         }
         self.deck.x.tempo_adj = 0.0;
+        self.midi.reset_tempo_pickup(self.px.active);
         self.push_deck_controls();
     }
 
@@ -1274,6 +1276,8 @@ impl App {
             let mut s = self.player.state.lock();
             s.playing = false;
             s.audio = None;
+            s.dk.jog = crate::deck::Jog::None;
+            s.dk.jog_left = None;
             s.pos = 0.0;
             s.loop_range = None;
             s.metronome = None;

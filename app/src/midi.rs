@@ -32,12 +32,21 @@ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering::Relaxed};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+pub(crate) mod trace;
+pub(crate) mod diagnostics;
 mod ports;
+pub(crate) use ports::is_test_input;
 mod performance;
 mod routing;
 #[cfg(test)]
 mod grv6_groove_tests;
-use routing::{Platter, Routing};
+#[cfg(test)]
+mod tempo_tests;
+#[cfg(test)]
+mod browser_transport_tests;
+#[cfg(test)]
+mod universal_tests;
+use routing::{JogInput, Platter, Routing};
 pub(crate) use routing::change_mode;
 
 // ---------------------------------------------------------------------- settings
@@ -788,6 +797,8 @@ pub enum Led {
     On,
     /// Blinking in the row's `Blink=` cycle (500 ms without one).
     Blink,
+    /// Transport feedback sets its own blink interval in milliseconds.
+    BlinkMs(u16),
     Value(u8),
 }
 
@@ -795,6 +806,7 @@ pub enum Led {
 #[derive(Clone, Copy, Debug)]
 pub struct DeckSnap {
     pub loaded: bool,
+    pub ui_preview: bool,
     pub cue_point: f64,
     /// Hot cues A to P: start and, for a loop, its end (seconds).
     pub hot: [Option<(f64, Option<f64>)>; 16],
@@ -813,7 +825,7 @@ pub struct DeckSnap {
 
 impl Default for DeckSnap {
     fn default() -> DeckSnap {
-        DeckSnap { loaded: false, cue_point: 0.0, hot: [None; 16], range: 0.10, follower: false, button_bend: 0.0, stem_iso_on: false, assign: 0, eq: [0.5; 3], stem_iso: [0.5; 3] }
+        DeckSnap { loaded: false, ui_preview: false, cue_point: 0.0, hot: [None; 16], range: 0.10, follower: false, button_bend: 0.0, stem_iso_on: false, assign: 0, eq: [0.5; 3], stem_iso: [0.5; 3] }
     }
 }
 
@@ -855,7 +867,7 @@ pub enum Param {
 pub enum UiEvent {
     Control { device: String, tag: u32, deck: u8, val: Val, fast_done: bool, seq: u64 },
     /// A message seen while LEARN is armed.
-    Learn { device: std::sync::Weak<Device>, msg: [u8; 3] },
+    Learn { device: std::sync::Weak<Device>, input_epoch: u64, msg: [u8; 3] },
     /// A device came or went.
     Ports { removed: Vec<String>, paused: Vec<String> },
 }
@@ -884,7 +896,7 @@ struct OutState {
     blink: Blinker,
     /// Blinking codes: the entry to light and its priority.
     blinking: HashMap<u16, (Entry, i32)>,
-    conn: Option<midir::MidiOutputConnection>,
+    link: ports::FeedbackLink,
 }
 
 impl OutState {
@@ -907,6 +919,12 @@ impl OutState {
     }
 }
 
+#[derive(Default)]
+struct MappingSource {
+    factory: Option<PathBuf>,
+    user: Option<(PathBuf, bool)>, // path and whether it came from AlphaTheta rekordbox
+}
+
 /// One connected controller.
 pub struct Device {
     pub name: String,
@@ -916,12 +934,12 @@ pub struct Device {
     profile_original: Mutex<Option<MidiMap>>,
     /// The rekordbox installed here has a factory mapping for it.
     pub factory: bool,
-    native_mapping: AtomicBool,
+    source: Mutex<MappingSource>,
     /// rekordbox runs a hardware handshake with this model before it treats it as started.
     /// recordbox does not have one: the device is listed and its messages are read, but it
     /// is not supported and may not send anything.
     pub needs_auth: bool,
-    pub has_output: bool,
+    output_ready: AtomicBool,
     pub learning: AtomicBool,
     input_epoch: Arc<AtomicU64>,
     pub alive: AtomicBool,
@@ -942,7 +960,17 @@ pub struct Device {
 }
 
 impl Device {
-    fn mapped(name: &str, input_id: String, map: MidiMap, factory: bool, conn: Option<midir::MidiOutputConnection>) -> Arc<Self> {
+    /// Queued packets captured before selecting a different Learn row or typing a cell
+    /// must not become assignments for the new target.
+    pub(crate) fn change_learn_target(&self) {
+        self.input_epoch.fetch_add(1, Relaxed);
+    }
+
+    fn learning_at(&self, epoch: u64) -> bool {
+        self.alive.load(Relaxed) && self.learning.load(Relaxed) && self.input_epoch.load(Relaxed) == epoch
+    }
+
+    fn mapped(name: &str, input_id: String, map: MidiMap, factory: bool, source: Option<MappingSource>) -> Arc<Self> {
         let cpr = jog_counts(name);
         let dev = Arc::new(Self {
             name: name.to_string(),
@@ -950,16 +978,16 @@ impl Device {
             map: Mutex::new(map),
             profile_original: Mutex::new(None),
             factory,
-            native_mapping: AtomicBool::new(false),
+            source: Mutex::new(source.unwrap_or_default()),
             needs_auth: needs_auth(name),
-            has_output: conn.is_some(),
+            output_ready: AtomicBool::new(false),
             learning: AtomicBool::new(false),
             input_epoch: Arc::default(),
             alive: AtomicBool::new(true),
             out_index: Mutex::new(HashMap::new()),
             leds: Mutex::new(HashMap::new()),
             named: Mutex::new(NamedRows::default()),
-            out: Mutex::new(OutState { queue: OutQueue::default(), blink: Blinker::default(), blinking: HashMap::new(), conn }),
+            out: Mutex::new(OutState { queue: OutQueue::default(), blink: Blinker::default(), blinking: HashMap::new(), link: ports::FeedbackLink::Idle }),
             out_cv: Condvar::new(),
             interval_ms: AtomicU64::new(1),
             jog: Mutex::new(std::array::from_fn(|_| Platter::new(cpr))),
@@ -1024,7 +1052,26 @@ impl Device {
 
     /// Whether the selected user delta came from the installed AlphaTheta application.
     pub fn from_rekordbox(&self) -> bool {
-        self.native_mapping.load(Relaxed)
+        self.source.lock().user.as_ref().is_some_and(|(_, native)| *native)
+    }
+
+    pub fn has_output(&self) -> bool {
+        self.output_ready.load(Relaxed)
+    }
+
+    /// Describes the files accepted by the loader and the current effective mapping.
+    pub fn mapping_summary(&self) -> String {
+        let source = self.source.lock();
+        let mut origins = Vec::new();
+        if let Some(path) = &source.factory { origins.push(format!("factory {}", path.display())); }
+        if let Some((path, native)) = &source.user {
+            origins.push(format!("{} {}", if *native { "AlphaTheta rekordbox" } else { "recordbox override" }, path.display()));
+        }
+        drop(source);
+        if self.profile_trial_active() { origins.push("temporary controller profile".into()); }
+        if origins.is_empty() { origins.push("MIDI Learn only".into()); }
+        let map = self.map.lock();
+        format!("{}; {} input codes, {} output rows, {} rejected", origins.join(" + "), map.live_inputs().count(), map.outputs.len(), map.rejected)
     }
 
     pub fn out_keys(&self) -> Vec<(u32, u8)> {
@@ -1032,7 +1079,6 @@ impl Device {
     }
 
     fn clear_button_feedback(&self) {
-        if !self.has_output { return; }
         let held: Vec<_> = self.leds.lock().iter()
             .filter(|((tag, _), value)| **value == Led::On && registry().get(*tag).is_some_and(|f| echo_led(f.act)))
             .map(|(key, _)| *key)
@@ -1060,8 +1106,9 @@ impl Device {
             out.blink.stop(e.code);
             out.blinking.remove(&e.code);
             match led {
-                Led::Blink => {
-                    out.blink.start(e.code, e.opts.blink, 0);
+                Led::Blink | Led::BlinkMs(_) => {
+                    let interval = if let Led::BlinkMs(ms) = led { i32::from(ms) } else { 0 };
+                    out.blink.start(e.code, e.opts.blink, interval);
                     out.blinking.insert(e.code, (e.clone(), e.opts.priority));
                 }
                 Led::On => out.led(&map, &e, 127),
@@ -1096,14 +1143,71 @@ impl Device {
         if sent { self.out_cv.notify_one(); }
     }
 
+    /// Forget destination-specific output state while preserving current input holds and
+    /// MIDI Learn. Start each echo-only lamp from this controller's last physical state.
+    fn seed_output(&self, endpoint: ports::Endpoint) {
+        let map = self.map.lock();
+        let index = self.out_index.lock();
+        let mut leds = self.leds.lock();
+        let mut named = self.named.lock();
+        let mut out = self.out.lock();
+        named.last.clear();
+        named.last_ring = [None; 5];
+        out.blink = Blinker::default();
+        out.blinking.clear();
+        out.queue = OutQueue::default();
+        let echoes = |tag| registry().get(tag).is_some_and(|f| echo_led(f.act));
+        leds.retain(|(tag, _), _| echoes(*tag));
+        for (key, rows) in index.iter().filter(|((tag, _), _)| echoes(*tag)) {
+            let state = *leds.entry(*key).or_insert(Led::Off);
+            for row in rows { out.led(&map, row, if state == Led::On { 127 } else { 0 }); }
+        }
+        out.link = ports::FeedbackLink::Open(endpoint);
+        self.output_ready.store(true, Relaxed);
+    }
+
+    fn output_closed(&self) {
+        let mut out = self.out.lock();
+        self.output_ready.store(false, Relaxed);
+        out.link = ports::FeedbackLink::Idle;
+    }
+
+    fn follow_output(self: &Arc<Self>, desired: Option<(&ports::Endpoint, &midir::MidiOutputPort)>, claims: &mut ports::OutputClaims) {
+        {
+            let mut out = self.out.lock();
+            if out.link.retire_if_changed(desired.map(|(key, _)| key)) {
+                self.output_ready.store(false, Relaxed);
+                self.out_cv.notify_all();
+                trace::record(|| format!("PORT [{}] feedback destination disconnected or changed", self.name));
+            }
+            if !matches!(out.link, ports::FeedbackLink::Idle) { return; }
+        }
+        let Some((key, port)) = desired else { return };
+        let Some(lease) = claims.acquire(key) else { return };
+        let Ok(output) = midir::MidiOutput::new("recordbox") else { return };
+        let Ok(conn) = output.connect(port, "recordbox-out") else { return };
+        self.seed_output(key.clone());
+        let device = self.clone();
+        let thread = std::thread::Builder::new().name(format!("midi-out {}", self.name)).spawn(move || {
+            device.run_output(conn); // Drops the old OS handle before any input may reopen it.
+            drop(lease);
+            device.output_closed();
+        });
+        if let Err(error) = thread {
+            self.output_closed();
+            trace::record(|| format!("PORT [{}] feedback worker unavailable: {error}", self.name));
+        } else {
+            trace::record(|| format!("PORT [{}] feedback destination [{}] id {}", self.name, key.name, key.id));
+        }
+    }
+
     /// The output thread: one message per `MidiOutInterval`, and the 50 ms blink tick.
-    fn run_output(self: Arc<Self>) {
-        let Some(mut connection) = self.out.lock().conn.take() else { return };
+    fn run_output(&self, mut connection: midir::MidiOutputConnection) {
         let tick = Duration::from_millis(50);
         let mut next_tick = Instant::now() + tick;
         loop {
             let mut out = self.out.lock();
-            if !self.alive.load(Relaxed) { return; }
+            if !self.alive.load(Relaxed) || !matches!(out.link, ports::FeedbackLink::Open(_)) { return; }
             if Instant::now() >= next_tick {
                 next_tick = Instant::now() + tick;
                 let changes = out.blink.tick();
@@ -1120,9 +1224,12 @@ impl Device {
             match out.queue.pop() {
                 Some(msg) => {
                     drop(out);
-                    if connection.send(&msg).is_ok() {
-                        self.sent.fetch_add(1, Relaxed);
+                    if let Err(error) = connection.send(&msg) {
+                        trace::record(|| format!("PORT [{}] feedback send failed: {error}", self.name));
+                        return;
                     }
+                    self.sent.fetch_add(1, Relaxed);
+                    trace::record(|| format!("OUT [{}] {:02X} {:02X} {:02X}", self.name, msg[0], msg[1], msg[2]));
                     std::thread::sleep(Duration::from_millis(self.interval_ms.load(Relaxed).clamp(1, 16)));
                 }
                 None if out.blinking.is_empty() => {
@@ -1154,38 +1261,51 @@ pub fn hot_cue_led(color: u8, slot: i32, is_loop: bool, set: u8) -> u8 {
 /// the port (`~/Library/Application Support/Pioneer/rekordbox6/MidiMappings/<port>.midi.csv`),
 /// to name the function rekordbox would run.
 pub fn probe(port: &str, secs: f64) {
-    let say = |s: String| eprintln!("midiprobe: {s}");
-    let Ok(mut input) = midir::MidiInput::new("recordbox-probe") else { return say("MIDI input client could not be opened".into()) };
-    input.ignore(midir::Ignore::None);
-    let names: Vec<String> = input.ports().iter().filter_map(|p| input.port_name(p).ok()).collect();
-    say(format!("input ports: {names:?}"));
-    let Some(p) = input.ports().into_iter().find(|p| input.port_name(p).map(|n| n == port).unwrap_or(false)) else { return say(format!("{port}: no such input port")) };
-    let log: Arc<Mutex<Vec<(u64, Vec<u8>)>>> = Arc::new(Mutex::new(vec![]));
-    let l2 = log.clone();
-    let t0 = Instant::now();
-    let conn = input.connect(&p, "recordbox-probe-in", move |_, m, _| l2.lock().push((t0.elapsed().as_millis() as u64, m.to_vec())), ());
-    let Ok(conn) = conn else { return say(format!("{port}: could not be opened")) };
-    say(format!("{port}: listening for {secs:.1} s (input only; nothing is sent to the device)"));
-    std::thread::sleep(Duration::from_secs_f64(secs));
-    drop(conn);
-    let msgs = log.lock().clone();
-    for (t, m) in &msgs {
-        say(format!("{t:>6} ms  {}", m.iter().map(|b| format!("{b:02X}")).collect::<Vec<_>>().join(" ")));
+    if let Err(error) = diagnostics::duration(secs).and_then(|duration| read_input(port, duration)) {
+        eprintln!("midiprobe: {error}");
     }
-    say(format!("{} messages in {secs:.1} s", msgs.len()));
+}
+
+fn read_input(port: &str, duration: Duration) -> anyhow::Result<()> {
+    use anyhow::{anyhow, ensure};
+    let say = |s: String| eprintln!("midiprobe: {s}");
+    let mut input = midir::MidiInput::new("recordbox-probe")?;
+    input.ignore(midir::Ignore::None);
+    let matches: Vec<_> = input.ports().into_iter().filter(|p| input.port_name(p).is_ok_and(|name| name == port)).collect();
+    ensure!(matches.len() == 1, "{port}: found {} matching inputs. Run --midi-ports to see available names.", matches.len());
+    // Only three-byte channel messages can reach a recordbox mapping. Cap the capture so a
+    // busy controller cannot grow the buffer indefinitely while the listener is asleep.
+    let (tx, rx) = crossbeam_channel::bounded(8192);
+    let dropped = Arc::new(AtomicU64::new(0));
+    let overflow = dropped.clone();
+    let conn = input.connect(&matches[0], "recordbox-probe-in", move |us, msg, _| {
+        if let &[status @ 0x80..=0xef, key, value] = msg {
+            if tx.try_send((us, [status, key, value])).is_err() { overflow.fetch_add(1, Relaxed); }
+        }
+    }, ()).map_err(|e| anyhow!("{port}: {e}"))?;
+    say(format!("{port}: listening for {:.2} s (input only)", duration.as_secs_f64()));
+    std::thread::sleep(duration);
+    drop(conn);
+    let mut raw = Vec::<Vec<u8>>::new();
+    let mut first = None;
+    for (us, bytes) in rx.try_iter() {
+        let elapsed = us.saturating_sub(*first.get_or_insert(us));
+        say(format!("{:>8.1} ms  {:02X} {:02X} {:02X}", elapsed as f64 / 1000.0, bytes[0], bytes[1], bytes[2]));
+        raw.push(bytes.to_vec());
+    }
+    say(format!("{} channel messages captured, {} dropped", raw.len(), dropped.load(Relaxed)));
     // rekordbox's own mapping for the port (read only).
     let rb_user = crate::midi_csv::native_user_files(&crate::midi_csv::native_user_dirs(), port).into_iter().find(|p| p.is_file());
-    let rb_map = rb_user.as_ref().and_then(|f| std::fs::read(f).ok()).and_then(|b| MidiMap::load(port, None, Some(&b)).ok());
+    let rb_map = rb_user.as_ref().and_then(|f| crate::midi_csv::read_file(f).ok()).and_then(|b| MidiMap::load(port, None, Some(&b)).ok());
     say(format!("rekordbox's user mapping for the port: {}", match (&rb_user, &rb_map) { (Some(f), Some(m)) => format!("{} ({} output rows)", f.display(), m.outputs.len()), _ => "none".into() }));
     let factory = crate::midi_csv::factory_dirs().iter().find_map(|dir| crate::midi_csv::factory_file(dir, port));
     say(format!("factory mapping in the installed rekordbox: {}", factory.map(|f| f.display().to_string()).unwrap_or_else(|| "none".into())));
-    let raw: Vec<Vec<u8>> = msgs.iter().map(|m| m.1.clone()).collect();
     let learned = probe_learn(port, &raw, rb_map.as_ref());
     for (c, ok, in_rb) in &learned {
         say(format!("Learn code {c:04X}: binds {ok} | rekordbox's mapping: {in_rb}"));
     }
-    let codes = learned;
-    say(format!("{} distinct codes Learn would take; {}", codes.len(), if codes.is_empty() { "nothing was touched on the controller during the run" } else { "PASS (every received control can be learned)" }));
+    say(format!("{} distinct controls accepted by the Learn filter; {} mapped in this probe", learned.len(), learned.iter().filter(|(_, bound, _)| *bound).count()));
+    Ok(())
 }
 
 /// MIDI Learn on received messages: the codes its filter passes, whether each binds to a
@@ -1193,20 +1313,14 @@ pub fn probe(port: &str, secs: f64) {
 /// mapping for the port, when there is one) runs for it.
 pub fn probe_learn(port: &str, msgs: &[Vec<u8>], rb: Option<&MidiMap>) -> Vec<(u16, bool, String)> {
     let mut filter = LearnFilter::default();
-    let mut codes: Vec<u16> = vec![];
-    for m in msgs {
-        if let Some(c) = filter.feed(m) {
-            if !codes.contains(&c) {
-                codes.push(c);
-            }
-        }
-    }
+    let mut seen = std::collections::HashSet::new();
     let reg = registry();
-    codes
-        .into_iter()
+    let mut map = MidiMap::new(port);
+    let row = LearnEntry { name: "PlayPause".into(), deck: 1, kind: Kind::Button, min: -1, max: -1, comment: String::new() };
+    msgs.iter()
+        .filter_map(|m| filter.feed(m))
+        .filter(|c| seen.insert(*c))
         .map(|c| {
-            let mut map = MidiMap::new(port);
-            let row = LearnEntry { name: "PlayPause".into(), deck: 1, kind: Kind::Button, min: -1, max: -1, comment: String::new() };
             let ok = map.change_input(&row, None, Some(c), &|n: &str| reg.learnable(n)).is_ok() && map.input_at(c).is_some();
             let in_rb = rb.and_then(|m| m.input_at(c)).map(|e| format!("{} (deck {})", e.name, e.deck)).unwrap_or_else(|| "-".into());
             (c, ok, in_rb)
@@ -1225,6 +1339,7 @@ pub struct Hub {
     playback_enabled: bool,
     routing: Mutex<Routing>,
     paused_input_names: Mutex<Vec<String>>,
+    output_claims: Mutex<ports::OutputClaims>,
     mode_epoch: Arc<AtomicU64>,
     pub devices: Mutex<Vec<Arc<Device>>>,
     pub decks: [Arc<Mutex<PlayState>>; 4],
@@ -1279,6 +1394,7 @@ impl Hub {
             playback_enabled,
             routing: Mutex::new(Routing::default()),
             paused_input_names: Default::default(),
+            output_claims: Default::default(),
             mode_epoch: Arc::default(),
             devices: Mutex::new(vec![]),
             decks,
@@ -1320,24 +1436,25 @@ impl Hub {
         crate::midi_csv::local_file(&self.user_dir, device)
     }
 
-    fn factory_mapping(&self, device: &str) -> Option<Vec<u8>> {
+    fn factory_mapping(&self, device: &str) -> Option<(PathBuf, Vec<u8>)> {
         self.factory_dirs.iter().find_map(|dir| {
             let path = crate::midi_csv::factory_file(dir, device)?;
             let bytes = crate::midi_csv::read_file(&path).ok()?;
             let csv = crate::midi_csv::CsvFile::parse(&bytes).ok()?;
-            crate::midi_csv::factory_matches(device, &csv.device).then_some(bytes)
+            crate::midi_csv::factory_matches(device, &csv.device).then_some((path, bytes))
         })
     }
 
     /// Factory rows plus one user delta. A first connection never creates a local file.
     /// Earlier versions wrote a header before loading and thereby hid the native delta.
     pub fn load_map(&self, device: &str) -> (MidiMap, bool) {
-        let (map, factory, _) = self.load_map_source(device);
-        (map, factory)
+        let (map, source) = self.load_map_source(device);
+        (map, source.factory.is_some())
     }
 
-    fn load_map_source(&self, device: &str) -> (MidiMap, bool, bool) {
-        let factory = self.factory_mapping(device);
+    fn load_map_source(&self, device: &str) -> (MidiMap, MappingSource) {
+        let (factory_path, factory) = self.factory_mapping(device).unzip();
+        let mut source = MappingSource { factory: factory_path, user: None };
         let local = self.user_file(device);
         let legacy = || crate::midi_csv::legacy_file(&self.user_dir, device).filter(|path| *path != local);
         let native = || crate::midi_csv::native_user_files(&self.native_user_dirs, device);
@@ -1348,10 +1465,13 @@ impl Hub {
             if let Ok(data) = crate::midi_csv::read_file(&path) {
                 let Ok(csv) = crate::midi_csv::validate_import(device, &data) else { continue };
                 if own && crate::midi_csv::bare_header(&csv) { continue; }
-                if let Ok(map) = MidiMap::load(device, factory.as_deref(), Some(&data)) { return (map, factory.is_some(), !own); }
+                if let Ok(map) = MidiMap::load(device, factory.as_deref(), Some(&data)) {
+                    source.user = Some((path, !own));
+                    return (map, source);
+                }
             }
         }
-        (MidiMap::load(device, factory.as_deref(), None).unwrap_or_else(|_| MidiMap::new(device)), factory.is_some(), false)
+        (MidiMap::load(device, factory.as_deref(), None).unwrap_or_else(|_| MidiMap::new(device)), source)
     }
 
     pub fn export_file(&self, path: &Path, bytes: &[u8]) -> std::io::Result<()> {
@@ -1374,7 +1494,7 @@ impl Hub {
         }
         crate::midi_csv::atomic_write(&path, &saved, true, self.factory_dirs.iter().chain(&self.native_user_dirs))?;
         if let Some(controller) = controller.as_ref() {
-            controller.native_mapping.store(false, Relaxed);
+            controller.source.lock().user = Some((path, false));
         }
         Ok(())
     }
@@ -1392,59 +1512,82 @@ impl Hub {
 
     /// Look at the MIDI ports: connect controllers that appeared, drop those that left.
     pub fn scan(self: &Arc<Self>) {
+        // One inventory at a time, including ownership of destinations on retiring devices.
+        let Some(mut claims) = self.output_claims.try_lock() else { return };
         let Ok(mut input) = midir::MidiInput::new("recordbox") else { return };
         input.ignore(midir::Ignore::None);
-        let Some(mut previous) = self.paused_input_names.try_lock() else { return };
         let ignore = self.ignore.lock().clone();
         let only = self.only.lock().clone();
         let ports: Vec<_> = input.ports().into_iter().filter_map(|port| {
             let name = input.port_name(&port).ok()?;
-            if name.is_empty() || name == "<error>" || name == "Arduino Leonardo" || ignore.contains(&name)
-                || only.as_ref().is_some_and(|allowed| !allowed.contains(&name)) {
-                return None;
-            }
-            let id = port.id();
-            Some((name, id, port))
+            if name.is_empty() || name == "<error>" || name == "Arduino Leonardo" { return None; }
+            Some((name, port.id(), port))
         }).collect();
-        let visible = ports::Inputs::inspect(ports.iter().map(|(name, id, _)| (name.as_str(), id.as_str())));
-        let mut changed = *previous != visible.paused;
+        let visible = ports::Inputs::inspect(ports.iter().filter(|(name, _, _)| ports::allowed_input(name, &ignore, only.as_deref()))
+            .map(|(name, id, _)| (name.as_str(), id.as_str())));
+        // Exclude MIDI Learn only while publishing the input identity change.
+        // Opening or closing a driver and reading the CSVs can take much longer.
+        let (mut changed, gone) = {
+            let mut previous = self.paused_input_names.lock();
+            let changed = *previous != visible.paused;
+            if changed { previous.clone_from(&visible.paused); }
+            let gone: Vec<_> = self.devices.lock().extract_if(.., |d| !visible.contains(&d.name, &d.input_id)).collect();
+            for device in &gone { device.alive.store(false, Relaxed); }
+            (changed, gone)
+        };
         let mut removed = Vec::new();
-        // Retire old workers before a replacement can send its first note.
-        let gone: Vec<_> = self.devices.lock().extract_if(.., |d| !visible.contains(&d.name, &d.input_id)).collect();
         for device in gone {
             {
                 let _out = device.out.lock();
-                device.alive.store(false, Relaxed);
                 device.out_cv.notify_all();
             }
             device.in_conn.lock().take();
             self.release_device(&device);
+            trace::record(|| format!("PORT [{}] input disconnected (id {})", device.name, device.input_id));
             removed.push(device.name.clone());
             changed = true;
         }
-        for (name, id, port) in ports {
-            if visible.contains(&name, &id) && self.device(&name).is_none() && self.connect(&name, id, &port).is_some() {
-                changed = true;
+        let mut opened = Vec::new();
+        for (name, id, port) in &ports {
+            if visible.contains(name, id) && self.device(name).is_none() {
+                if let Some(device) = self.connect(name, id.clone(), port) {
+                    opened.push(device);
+                    changed = true;
+                }
             }
         }
         if changed {
-            let _ = self.tx.send(UiEvent::Ports { removed, paused: visible.paused.clone() });
+            let _ = self.tx.send(UiEvent::Ports { removed, paused: visible.paused });
             self.wake();
         }
-        *previous = visible.paused;
+        let devices = self.devices.lock().clone();
+        if !devices.is_empty() && std::env::var("PREPDECK_MIDI_NO_OUT").as_deref() != Ok("1") {
+            let inputs: Vec<_> = ports.into_iter().map(|(name, _, _)| name).collect();
+            if let Ok(output) = midir::MidiOutput::new("recordbox") {
+                let outputs: Vec<_> = output.ports().into_iter().filter_map(|p|
+                    Some((ports::Endpoint { name: output.port_name(&p).ok()?, id: p.id() }, p))).collect();
+                let names = outputs.iter().map(|(key, _)| key.name.clone()).collect::<Vec<_>>();
+                let pairs = ports::paired_outputs(&inputs, &names);
+                for device in devices {
+                    let target = inputs.iter().position(|n| n == &device.name).and_then(|i| pairs[i])
+                        .map(|i| (&outputs[i].0, &outputs[i].1));
+                    device.follow_output(target, &mut claims);
+                }
+            }
+        } else {
+            for device in devices { device.follow_output(None, &mut claims); }
+        }
+        for dev in opened {
+            let summary = dev.mapping_summary();
+            eprintln!("### MIDI:open success [{}] {summary}", dev.name);
+            trace::record(|| format!("PORT [{}] input connected (id {}); {summary}; feedback {}",
+                dev.name, dev.input_id, if dev.has_output() { "open" } else { "unavailable" }));
+        }
     }
 
     fn connect(self: &Arc<Self>, name: &str, input_id: String, port: &midir::MidiInputPort) -> Option<Arc<Device>> {
-        let (map, factory, native_mapping) = self.load_map_source(name);
-        let output_enabled = std::env::var("PREPDECK_MIDI_NO_OUT").as_deref() != Ok("1");
-        let conn = output_enabled.then(|| midir::MidiOutput::new("recordbox").ok()).flatten().and_then(|out| {
-            let ports: Vec<_> = out.ports().into_iter().filter_map(|p| out.port_name(&p).ok().map(|n| (n, p))).collect();
-            let names = ports.iter().map(|(n, _)| n.clone()).collect::<Vec<_>>();
-            let index = crate::midi_csv::paired_output(name, &names)?;
-            out.connect(&ports[index].1, "recordbox-out").ok()
-        });
-        let dev = Device::mapped(name, input_id, map, factory, conn);
-        dev.native_mapping.store(native_mapping, Relaxed);
+        let (map, source) = self.load_map_source(name);
+        let dev = Device::mapped(name, input_id, map, source.factory.is_some(), Some(source));
         // The callback only queues; the worker does the rest.
         let (tx, rx) = crossbeam_channel::unbounded();
         let device_epoch = dev.input_epoch.clone();
@@ -1459,12 +1602,7 @@ impl Hub {
         }, ()).ok()?;
         *dev.in_conn.lock() = Some(conn);
         let (h, d) = (self.clone(), dev.clone());
-        let _ = std::thread::Builder::new().name(format!("midi-in {name}")).spawn(move || h.run_input(d, rx));
-        if dev.has_output {
-            let d = dev.clone();
-            let _ = std::thread::Builder::new().name(format!("midi-out {name}")).spawn(move || d.run_output());
-        }
-        eprintln!("### MIDI:open success [{name}]{}", if factory { "" } else { " (no factory mapping: MIDI Learn only)" });
+        std::thread::Builder::new().name(format!("midi-in {name}")).spawn(move || h.run_input(d, rx)).ok()?;
         self.devices.lock().push(dev.clone());
         Some(dev)
     }
@@ -1502,13 +1640,22 @@ impl Hub {
         }
         dev.received.fetch_add(1, Relaxed);
         if dev.learning.load(Relaxed) {
-            let _ = self.tx.send(UiEvent::Learn { device: Arc::downgrade(dev), msg });
+            trace::record(|| format!("LEARN [{}] {:02X} {:02X} {:02X}", dev.name, msg[0], msg[1], msg[2]));
+            let _ = self.tx.send(UiEvent::Learn { device: Arc::downgrade(dev), input_epoch: device_epoch, msg });
             self.wake();
             return;
         }
         let (event, peer) = {
             let mut map = dev.map.lock();
-            let Some(event) = map.handle(&msg, t_ms) else { return };
+            let event = map.handle(&msg, t_ms);
+            trace::record(|| {
+                let [status, key, value] = msg;
+                let row = event.and_then(|ev| map.inputs.get(ev.entry)?.as_ref().map(|i| &i.e));
+                let name = row.map(|r| r.name.as_str()).unwrap_or("no decoded event");
+                let deck = row.map(|r| r.deck).unwrap_or_default();
+                format!("IN [{}] {status:02X} {key:02X} {value:02X} -> {name} deck {deck}", dev.name)
+            });
+            let Some(event) = event else { return };
             let peer = map.dual_event(&event);
             (event, peer)
         };
@@ -1523,10 +1670,31 @@ impl Hub {
         if !route.performance && !routing::browsing(f.act) { return; }
         // A stateless button echoes its press on the originating controller. Other
         // controllers may hold the same button and release it independently.
-        if dev.has_output && echo_led(f.act) {
+        if echo_led(f.act) {
             if let Val::On(pressed, _) = ev.val {
                 dev.set_led(ev.tag, ev.deck, if pressed { Led::On } else { Led::Off });
             }
+        }
+        if f.act == Act::Tempo {
+            let Some(n) = self.deck_ix(ev.deck) else { return };
+            let port = Arc::downgrade(dev);
+            // A shared fader can now address another deck; returning to the first
+            // must pick up again. Dedicated faders retain their independent states.
+            for (deck, source) in route.tempo_sources.iter_mut().enumerate() {
+                let same = source.as_ref().is_some_and(|(old, entry)| old.ptr_eq(&port) && *entry == ev.entry);
+                if (deck == n && !same) || (deck != n && same) {
+                    *source = (deck == n).then(|| (port.clone(), ev.entry));
+                    route.tempo_since[deck] = self.seq.load(Relaxed);
+                    self.takeover.lock()[deck] = TempoTakeover::default();
+                }
+            }
+            ev.deck = n as u8 + 1;
+        }
+        if f.act == Act::Needle {
+            let Some(n) = self.deck_ix(ev.deck) else { return };
+            let Some(step) = ev.val.needle_step() else { return };
+            ev.deck = n as u8 + 1;
+            ev.val = Val::Needle { step, held: route.jog_held(ev.deck) };
         }
         if routing::momentary(f.act) {
             if !f.per_deck {
@@ -1544,6 +1712,10 @@ impl Hub {
     fn deliver(&self, route: &mut Routing, dev: &Arc<Device>, ev: Event) {
         let seq = self.seq.fetch_add(1, Relaxed);
         let done = ev.fast && registry().get(ev.tag).is_some_and(|f| self.fast(route, dev, f, ev.deck, ev.val, seq));
+        trace::record(|| {
+            let name = registry().get(ev.tag).map(|f| f.name.as_str()).unwrap_or("unknown");
+            format!("ROUTE [{}] #{seq} {name} deck {} {:?} fast={done}", dev.name, ev.deck, ev.val)
+        });
         let _ = self.tx.send(UiEvent::Control { device: dev.name.clone(), tag: ev.tag, deck: ev.deck, val: ev.val, fast_done: done, seq });
         self.wake();
     }
@@ -1713,16 +1885,33 @@ impl Hub {
     pub fn tempo_slider(&self, n: usize, raw: i32) -> Option<f64> {
         let d = self.snap.lock().decks[n];
         let deck_pct = (self.decks[n].lock().tempo - 1.0) * 100.0;
-        let slider = tempo_slider_percent(raw, d.range * 100.0);
-        self.takeover.lock()[n].feed(slider, deck_pct, d.loaded, d.follower).map(|p| p / 100.0)
+        self.takeover.lock()[n].position(raw, deck_pct, d.loaded, d.follower, d.range * 100.0).map(|p| p / 100.0)
     }
 
     pub fn takeover_state(&self, n: usize) -> TempoTakeover {
         self.takeover.lock()[n.min(3)]
     }
 
-    pub fn arm_takeover(&self, n: usize) {
-        self.takeover.lock()[n.min(3)].arm();
+    fn rearm_takeover(&self, n: usize, target: TempoTarget) {
+        // Serialize with a fast fader move, including the engine write and its
+        // queued UI mirror. A reset must win over the fader value it supersedes.
+        let mut route = self.routing.lock();
+        route.tempo_since[n] = self.seq.load(Relaxed);
+        {
+            let mut snap = self.snap.lock();
+            let d = &mut snap.decks[n];
+            d.range = target.range;
+            d.loaded = target.loaded;
+            d.follower = target.follower;
+        }
+        self.overlay.lock().retain(|&(deck, param, _, _)| usize::from(deck) != n || param != Param::Tempo);
+        if !target.follower {
+            // Establish the new pickup target under the same lock used to dispatch
+            // a fader packet. A packet arriving during the UI's remaining deck
+            // updates will be replayed by after_push if it actually catches up.
+            self.decks[n].lock().tempo = 1.0 + target.tempo;
+        }
+        self.takeover.lock()[n].rearm(target.tempo * 100.0, target.loaded, target.follower, target.range * 100.0);
     }
 
     pub fn start_pickup(&self, n: usize) {
@@ -1733,7 +1922,7 @@ impl Hub {
 
     // ------------------------------------------------------------------ jog
 
-    fn jog_out(&self, n: usize, out: JogOut) {
+    fn jog_out(&self, n: usize, out: JogOut, input: JogInput) {
         if !self.playback_enabled { return; }
         match out {
             JogOut::Nothing => {}
@@ -1742,7 +1931,7 @@ impl Hub {
                 let base = self.snap.lock().decks[n].button_bend;
                 self.decks[n].lock().bend = base + b;
             }
-            other => jog_scratch(self, n, other),
+            other => jog_scratch(self, n, other, input),
         }
     }
 
@@ -1821,9 +2010,7 @@ impl Hub {
                 }
             }
             Act::Tempo => {
-                let Val::Abs { .. } = val else { return false };
-                let raw = (val.unit().unwrap_or(0.5) * 16383.0).round() as i32;
-                let raw = if val.unit() == Some(0.5) { 8192 } else { raw };
+                let Some(raw) = val.position14() else { return false };
                 match self.tempo_slider(n, raw) {
                     Some(adj) => {
                         self.set_param(n, Param::Tempo, adj as f32);
@@ -1851,13 +2038,17 @@ impl Hub {
                     j[n].jog.rpm = if snap.rpm45 { 45.0 } else { 100.0 / 3.0 };
                     j[n].jog.touch(on, playing)
                 };
-                self.routed_jog(route, dev, n, out, false);
+                self.routed_jog(route, dev, n, out, JogInput::Touch);
                 true
             }
             Act::Jog(scratch_row) => {
                 let Val::Jog { delta, t_ms } = val else { return true };
-                let out = dev.jog.lock()[n].rotate(delta, t_ms, scratch_row, Instant::now());
-                self.routed_jog(route, dev, n, out, false);
+                let (out, distance_ms) = {
+                    let mut platters = dev.jog.lock();
+                    let p = &mut platters[n];
+                    (p.rotate(delta, t_ms, scratch_row, Instant::now()), p.jog.k() * f64::from(delta))
+                };
+                self.routed_jog(route, dev, n, out, JogInput::Rotation(distance_ms));
                 true
             }
             Act::JogSearch => {
@@ -1883,7 +2074,7 @@ impl Hub {
     /// `ChannelLevelDeviceUnit::timerCallback` 0x1000d5ca0, here the deck's level before the
     /// faders as the engine meters it) and `LoadedIndicator` (127 loaded, 0 empty: not traced).
     pub fn engine_outputs(&self) {
-        let devs: Vec<Arc<Device>> = self.devices.lock().iter().filter(|d| d.has_output).cloned().collect();
+        let devs: Vec<Arc<Device>> = self.devices.lock().iter().filter(|d| d.has_output()).cloned().collect();
         if devs.is_empty() {
             return;
         }
@@ -1930,23 +2121,30 @@ impl Hub {
         }
     }
 
-    /// PLAY and CUE lights straight from the engine (so they follow a press without waiting
-    /// for a frame): PLAY lit while playing and blinking while a loaded deck stands; CUE lit
-    /// while playing or standing on the cue point, blinking elsewhere.
+    /// PLAY and CUE feedback from the live transport, including momentary previews.
     pub fn transport_leds(&self, n: usize) {
         let reg = registry();
         let (play, cue) = (reg.tag("PlayPause"), reg.tag("Cue"));
-        let cue_point = self.snap.lock().decks[n].cue_point;
-        let (loaded, playing, at_cue) = {
+        let (deck, active) = {
+            let snap = self.snap.lock();
+            (snap.decks[n], snap.active as usize)
+        };
+        let (pl, cl) = {
             let s = self.decks[n].lock();
             match s.audio.as_ref() {
-                Some(a) => (true, s.playing, (s.pos / a.sr as f64 - cue_point).abs() < 0.01),
-                None => (false, false, false),
+                Some(audio) => {
+                    let held = |p: &Preview| p.return_frame.is_some() && p.belongs_to(&s);
+                    let preview = deck.ui_preview || self.cue_preview[n].lock().as_ref().is_some_and(held)
+                        || self.hot_preview[n].lock().as_ref().is_some_and(held);
+                    let at_cue = (s.pos / audio.sr.max(1) as f64 - deck.cue_point).abs() < 0.01;
+                    let at_end = s.pos >= audio.frames().saturating_sub(1) as f64;
+                    let play = if s.playing && !preview { Led::On } else { Led::BlinkMs(1000) };
+                    let cue = if at_end { Led::Off } else if s.playing || at_cue || preview { Led::On } else { Led::BlinkMs(500) };
+                    (play, cue)
+                }
+                None => (Led::Off, Led::Off),
             }
         };
-        let pl = if playing { Led::On } else if loaded { Led::Blink } else { Led::Off };
-        let cl = if !loaded { Led::Off } else if playing || at_cue { Led::On } else { Led::Blink };
-        let active = self.snap.lock().active as usize;
         for d in self.devices.lock().iter() {
             d.set_led(play, n as u8 + 1, pl);
             d.set_led(cue, n as u8 + 1, cl);
@@ -1964,13 +2162,64 @@ impl Hub {
 /// platter's speed (negative = backwards), `Release` gives it back to normal play. A platter
 /// let go while spinning (`Spin`) is treated as a release: the worker gets no further speeds
 /// to follow the spin down with.
-pub fn jog_scratch(hub: &Hub, n: usize, out: JogOut) {
-    let jog = match out {
-        JogOut::Scratch(speed) => crate::deck::Jog::Speed(speed),
-        _ => crate::deck::Jog::None,
-    };
+fn jog_scratch(hub: &Hub, n: usize, out: JogOut, input: JogInput) {
+    use crate::deck::Jog;
+    let mut s = hub.decks[n].lock();
+    // Pointer takeovers, late worker deadlines and MIDI input share this state lock.
+    if s.dk.jog != Jog::None && s.dk.jog_left.is_none() {
+        return;
+    }
     hub.jog_bend[n].store(0f64.to_bits(), Relaxed);
-    hub.decks[n].lock().dk.jog = jog;
+    match out {
+        JogOut::Scratch(speed) => {
+            let left = match input {
+                JogInput::Touch => 0.0,
+                JogInput::Rotation(ms) => {
+                    let Some(audio) = s.audio.as_ref() else { return };
+                    let sr = f64::from(audio.sr);
+                    // At the 8x speed cap the worker carries at most one additional
+                    // 56 ms packet. Bound backlog the same way if the audio stalls.
+                    let limit = 8.0 * 0.112 * sr;
+                    (s.dk.jog_left.unwrap_or(0.0) + ms * sr / 1000.0).clamp(-limit, limit)
+                }
+                JogInput::Cancel => return,
+                JogInput::Idle => {
+                    let Some(left) = s.dk.jog_left else { return };
+                    left
+                }
+            };
+            // A deadline can precede the next output buffer. Finish the remaining
+            // counts even when the controller has already reported a stop.
+            let speed = if speed == 0.0 && left != 0.0 {
+                match s.dk.jog { Jog::Speed(v) => v, _ => 0.0 }
+            } else {
+                speed
+            };
+            s.dk.jog = Jog::Speed(if left == 0.0 { 0.0 } else { speed.abs().copysign(left) });
+            s.dk.jog_left = Some(left);
+        }
+        JogOut::Release | JogOut::Spin(_) => {
+            // A touch, a turn and a release can all arrive between two callbacks.
+            // Resume at the counted position, including any active loop wrap. A
+            // routing reset discards pending input when one device replaces another.
+            if let (JogInput::Touch, Some(left), Some(audio)) = (input, s.dk.jog_left, s.audio.as_ref()) {
+                if left != 0.0 {
+                    let mut end = s.pos + left;
+                    if let Some((a, b)) = s.loop_range {
+                        let sr = f64::from(audio.sr);
+                        let (a, b) = ((a * sr).round(), (b * sr).round());
+                        if b > a && ((left > 0.0 && end >= b) || (left < 0.0 && end < a)) {
+                            end = a + (end - a).rem_euclid(b - a);
+                        }
+                    }
+                    s.pos = end.clamp(0.0, audio.frames().saturating_sub(2) as f64);
+                }
+            }
+            s.dk.jog = Jog::None;
+            s.dk.jog_left = None;
+        }
+        _ => {}
+    }
 }
 
 // ---------------------------------------------------------------------- the app's side
@@ -1989,11 +2238,9 @@ pub struct MidiState {
     pending_double: Option<(u8, u8)>,
     /// What the stubs were last asked (for the features other parts are building).
     pub stub_log: Vec<String>,
-    /// The tempo each deck had after the last frame, to arm the takeover when it is changed
-    /// on screen.
-    last_tempo: [f64; 4],
+    /// Software targets that the physical faders have already been compared with.
+    tempo_targets: [Option<TempoTarget>; 4],
     last_iso: [bool; 4],
-    last_follow: [bool; 4],
     started: bool,
     /// Messages that were mapped, for the scripted check.
     pub handled: u64,
@@ -2005,7 +2252,7 @@ pub struct MidiState {
 
 impl Default for MidiState {
     fn default() -> MidiState {
-        MidiState { hub: None, rx: None, _keeper: None, win: Default::default(), devices: vec![], paused_inputs: vec![], pending_double: None, stub_log: vec![], last_tempo: [0.0; 4], last_iso: [false; 4], last_follow: [false; 4], started: false, handled: 0, drum_release: [false; crate::groove::DECKS], tap_held: [None; 2] }
+        MidiState { hub: None, rx: None, _keeper: None, win: Default::default(), devices: vec![], paused_inputs: vec![], pending_double: None, stub_log: vec![], tempo_targets: [None; 4], last_iso: [false; 4], started: false, handled: 0, drum_release: [false; crate::groove::DECKS], tap_held: [None; 2] }
     }
 }
 
@@ -2020,6 +2267,7 @@ impl MidiState {
 }
 
 fn start(app: &mut App) {
+    trace::init();
     app.midi.started = true;
     if std::env::var("PREPDECK_MIDI").map(|v| v == "off").unwrap_or(false) {
         return;
@@ -2062,6 +2310,36 @@ fn start(app: &mut App) {
     app.midi.rx = Some(rx);
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct TempoTarget {
+    tempo: f64,
+    range: f64,
+    track: Option<i64>,
+    loaded: bool,
+    follower: bool,
+}
+
+impl TempoTarget {
+    fn read(app: &App, n: u8) -> Self {
+        let d = app.deck_of(n);
+        let range = if app.performance() { crate::player_ext::TEMPO_RANGES[(d.x.tempo_range as usize + 1) % 4] / 100.0 } else { crate::player_ext::TEMPO_RANGE };
+        let follower = app.two_players() && d.x.beat_sync && (n != app.px.master || app.sampler_is_master());
+        Self { tempo: d.x.tempo_adj, range, track: d.track, loaded: d.audio.is_some(), follower }
+    }
+}
+
+/// A physical fader stays caught while it is driving the tempo. Software edits,
+/// a new track or a change of master/range require pickup against the new target.
+fn refresh_tempo_pickups(app: &mut App, hub: &Hub) {
+    for n in 0..4 {
+        let next = (app.performance() && n < app.deck_count()).then(|| TempoTarget::read(app, n));
+        let old = std::mem::replace(&mut app.midi.tempo_targets[n as usize], next);
+        if let Some(target) = next.filter(|t| old.as_ref() != Some(t)) {
+            hub.rearm_takeover(n as usize, target);
+        }
+    }
+}
+
 fn snapshot(app: &App) -> Snapshot {
     let count = app.deck_count();
     let mut decks = [DeckSnap::default(); 4];
@@ -2072,9 +2350,8 @@ fn snapshot(app: &App) -> Snapshot {
             hot[c.slot as usize] = Some((c.start, c.end));
         }
         let m = app.px.mix[n as usize];
-        let follower = app.two_players() && d.x.beat_sync && (n != app.px.master || app.sampler_is_master());
-        let range = if app.performance() { crate::player_ext::TEMPO_RANGES[(d.x.tempo_range as usize + 1) % 4] / 100.0 } else { crate::player_ext::TEMPO_RANGE };
-        decks[n as usize] = DeckSnap { loaded: d.audio.is_some(), cue_point: d.cue_point, hot, range, follower, button_bend: d.x.bend as f64 * crate::player_ext::BEND_AMOUNT, stem_iso_on: m.stem_iso_on, assign: m.assign, eq: m.eq, stem_iso: m.stem_iso };
+        let target = TempoTarget::read(app, n);
+        decks[n as usize] = DeckSnap { loaded: target.loaded, ui_preview: d.cue_preview || d.hot_preview.is_some(), cue_point: d.cue_point, hot, range: target.range, follower: target.follower, button_bend: d.x.bend as f64 * crate::player_ext::BEND_AMOUNT, stem_iso_on: m.stem_iso_on, assign: m.assign, eq: m.eq, stem_iso: m.stem_iso };
     }
     let bank = app.prefs.sampler.bank.min(3);
     let pads = app.sampler_pads().min(16);
@@ -2111,6 +2388,10 @@ fn midi_server_ready() -> bool {
 }
 
 impl MidiState {
+    pub(crate) fn reset_tempo_pickup(&mut self, n: u8) {
+        self.tempo_targets[usize::from(n)] = None;
+    }
+
     /// A physical search button may remain held when the app loses keyboard focus.
     pub(crate) fn search_held(&self, deck: u8) -> bool {
         self.hub.as_ref().is_some_and(|hub| hub.routing.lock().search_held(deck))
@@ -2144,23 +2425,20 @@ pub fn poll(app: &mut App) {
     if next.count < previous.count {
         hub.release_hidden_decks(next.count);
     }
-    // The takeover is armed again when the tempo was changed on screen or sync changed, and
-    // the EQ knobs wait for a pick-up when they switch between EQ and STEM ISO.
+    refresh_tempo_pickups(app, &hub);
+    // The EQ knobs wait for a pick-up when they switch between EQ and STEM ISO.
     for n in 0..app.deck_count().min(4) as usize {
-        let d = app.deck_of(n as u8);
-        let (tempo, iso, follow) = (d.x.tempo_adj, app.px.mix[n].stem_iso_on, d.x.beat_sync);
-        if (tempo - app.midi.last_tempo[n]).abs() > 1e-9 || follow != app.midi.last_follow[n] {
-            hub.arm_takeover(n);
-        }
+        let iso = app.px.mix[n].stem_iso_on;
         if iso != app.midi.last_iso[n] && app.prefs.midi.takeover_eq_iso {
             hub.start_pickup(n);
         }
         app.midi.last_iso[n] = iso;
-        app.midi.last_follow[n] = follow;
     }
     apply_pending(app, &hub);
     for n in 0..app.deck_count().min(4) as usize {
-        app.midi.last_tempo[n] = app.deck_of(n as u8).x.tempo_adj;
+        if hub.takeover.lock()[n].take_notice() {
+            tempo_status(app, "Move Tempo Slider to the current BPM value.", false);
+        }
     }
     finish_double(app);
     for (u, held) in app.midi.tap_held.iter_mut().enumerate() {
@@ -2188,11 +2466,11 @@ fn apply_pending(app: &mut App, hub: &Arc<Hub>) {
                 app.midi.devices = hub.devices.lock().iter().map(|d| d.name.clone()).collect();
                 crate::ui_midi::devices_changed(app, &removed);
             }
-            UiEvent::Learn { device, msg } => {
+            UiEvent::Learn { device, input_epoch, msg } => {
                 // Keep a same-name hotplug from replacing the selected device while its
                 // physical input is being committed to the map.
                 let _scan = hub.paused_input_names.lock();
-                if let Some(d) = device.upgrade().filter(|d| d.alive.load(Relaxed) && d.learning.load(Relaxed)) {
+                if let Some(d) = device.upgrade().filter(|d| d.learning_at(input_epoch)) {
                     crate::ui_midi::learn_message(app, &d.name, msg);
                 }
             }
@@ -2203,6 +2481,13 @@ fn apply_pending(app: &mut App, hub: &Arc<Hub>) {
                 }
             }
         }
+    }
+}
+
+/// Publish software tempo targets before changing the engine or replaying fast controls.
+pub(crate) fn before_push(app: &mut App) {
+    if let Some(hub) = app.midi.hub.clone() {
+        refresh_tempo_pickups(app, &hub);
     }
 }
 
@@ -2222,36 +2507,80 @@ pub fn after_push(app: &mut App) {
     }
 }
 
+/// An out-of-range tempo can remain after sync is released. Select the
+/// narrowest reachable range without rescaling the tempo playing on this deck.
+fn pickup_range(tempo: f64, range: f64) -> Option<u8> {
+    let required = tempo.abs() * 100.0 * 0.99999;
+    if required <= range * 100.0 { return None; }
+    crate::player_ext::TEMPO_RANGES.iter().position(|r| *r >= required)
+        .map(|idx| ((idx + 3) % 4) as u8)
+}
+
+fn tempo_status(app: &mut App, text: &str, error: bool) {
+    if let Some(t) = app.toasts.iter_mut().rev().find(|t| t.text == text) {
+        t.until = Instant::now() + Duration::from_secs(if error { 8 } else { 5 });
+    } else if error {
+        app.toast_err(text);
+    } else {
+        app.toast(text);
+    }
+}
+
 /// The app's deck for a mapping's deck number.
 fn deck_of(app: &App, deck: u8) -> Option<u8> {
     let n = if deck == 0 { app.px.active } else { deck - 1 };
     (n < app.deck_count()).then_some(n)
 }
 
-fn browse_step(app: &mut App, n: i32) {
-    if n == 0 {
+/// BrowseBasicView groups rapid track-list turns into whole row steps. Compute the final
+/// selection once so one packet never rebuilds the tree or selects a track repeatedly.
+fn browse_step(app: &mut App, value: i32, encoder: bool) {
+    if value == 0 {
+        if encoder { crate::prefs_ext::focus_browser_tree(app, false); }
         return;
     }
     if app.dialogs.ext.focus_tree {
-        for _ in 0..n.abs().min(50) {
-            crate::prefs_ext::tree_step(app, n.signum());
-        }
+        crate::prefs_ext::tree_step(app, value.clamp(-50, 50));
         return;
     }
-    if app.list_dirty {
-        app.rebuild_list();
-    }
-    if app.list.is_empty() {
-        return;
-    }
+    if app.list_dirty { app.rebuild_list(); }
+    if app.list.is_empty() { return; }
+    let groups = if encoder {
+        match value.unsigned_abs() { 0..=3 => 1, 4..=11 => 2, 12..=23 => 3, 24..=63 => 8, _ => 12 }
+    } else { 1 };
+    let step = i64::from(value / groups);
+    // The first group establishes the selection at row zero if there was no anchor.
     let next = match app.anchor {
-        Some(cur) => (cur as i64 + n as i64).clamp(0, app.list.len() as i64 - 1) as usize,
-        None => 0,
-    };
+        Some(cur) => cur as i64 + step * i64::from(groups),
+        None => step * i64::from(groups - 1),
+    }.clamp(0, app.list.len() as i64 - 1) as usize;
     app.set_anchor(next);
     app.selected.clear();
     app.selected.insert(app.list[next]);
     app.scroll_to_selected = true;
+}
+
+fn tree_forward(app: &mut App) -> bool {
+    let View::Playlist(id) = app.view else { return false };
+    let filter = crate::browser_ext::PlaylistTreeFilter::new(app);
+    if filter.searching() || !app.node(id).is_some_and(|n| n.kind == NodeKind::Folder) || !app.expanded.insert(id) {
+        return false;
+    }
+    if let Some(first) = filter.first_child(&app.nodes, id) {
+        app.set_view(View::Playlist(first));
+    }
+    true
+}
+
+fn tree_back(app: &mut App) {
+    let View::Playlist(id) = app.view else { return };
+    let Some(node) = app.node(id) else { return };
+    let (folder, parent) = (node.kind == NodeKind::Folder, node.parent);
+    if folder && app.expanded.remove(&id) { return; }
+    if parent != 0 {
+        app.expanded.remove(&parent);
+        app.set_view(View::Playlist(parent));
+    }
 }
 
 /// Instant Doubles: the track of another deck comes onto this one at the same place.
@@ -2392,17 +2721,13 @@ pub fn apply(app: &mut App, hub: &Arc<Hub>, device: &str, f: &Func, deck: u8, va
             }
         }
         Act::Needle => {
-            if let Some(p) = unit {
-                let lock = app.prefs.midi.needle_lock;
-                app.with_deck(n, |a| {
-                    if lock && a.playing() {
-                        a.toast_err("Needle Lock. Not available during playback.");
-                    } else if a.deck.audio.is_some() {
-                        let t = p as f64 * a.deck.duration;
-                        a.seek(t);
-                    }
-                });
-            }
+            let (step, held) = match val {
+                Val::Needle { step, held } => (step, held),
+                // Commands injected without a physical controller still honour Needle Lock.
+                _ => match val.needle_step() { Some(step) => (step, false), None => return },
+            };
+            let lock = app.prefs.midi.needle_lock;
+            app.with_deck(n, |a| a.needle_at_step(step, lock, held));
         }
         Act::Slip => {
             if press {
@@ -2429,21 +2754,37 @@ pub fn apply(app: &mut App, hub: &Arc<Hub>, device: &str, f: &Func, deck: u8, va
             }
         }
         Act::Tempo => {
-            let Val::Abs { .. } = val else { return };
+            let Some(raw) = val.position14() else { return };
+            // A custom non-Fast mapping has waited for this frame. A different
+            // physical fader or a software reset can have taken its place meanwhile.
+            if !fast_done && seq != 0 && seq < hub.routing.lock().tempo_since[ni] {
+                return;
+            }
+            let target = TempoTarget::read(app, n);
             let adj = if fast_done {
-                let a = hub.decks[ni].lock().tempo - 1.0;
-                (hub.takeover_state(ni).state == 5 || !app.deck_of(n).audio.is_some()).then_some(a)
+                // The engine can already have received the next controller event. Mirror
+                // exactly this event, unless a newer software edit invalidated its value.
+                hub.overlay.lock().iter().find(|&&(deck, param, _, event)|
+                    deck == n && param == Param::Tempo && event == seq).map(|entry| f64::from(entry.2))
             } else {
-                let raw = if unit == Some(0.5) { 8192 } else { (unit.unwrap_or(0.5) * 16383.0).round() as i32 };
                 hub.tempo_slider(ni, raw)
             };
-            if let Some(adj) = adj {
-                if !app.with_deck(n, |a| a.sync_follower()) {
-                    app.deck_of_mut(n).x.tempo_adj = adj;
-                    app.midi.last_tempo[ni] = adj;
-                }
+            if let Some(adj) = adj.filter(|_| !target.follower) {
+                app.deck_of_mut(n).x.tempo_adj = adj;
+                if let Some(t) = &mut app.midi.tempo_targets[ni] { t.tempo = adj; }
+                if !fast_done { app.push_deck_controls(); }
             }
             hub.acknowledge_overlay(seq);
+            if target.loaded && target.follower {
+                tempo_status(app, "Invalid operation. In Sync mode, Tempo Slider is only available for Master Deck.", true);
+            } else if target.loaded && hub.takeover_state(ni).state != 5 {
+                if let Some(range) = pickup_range(target.tempo, target.range) {
+                    app.deck_of_mut(n).x.tempo_range = range;
+                    app.push_deck_controls();
+                    hub.takeover.lock()[ni].take_notice();
+                    tempo_status(app, "Tempo Range has been changed. Move Tempo Slider to the current BPM value.", false);
+                }
+            }
         }
         Act::TempoRange => {
             if press {
@@ -2903,36 +3244,29 @@ pub fn apply(app: &mut App, hub: &Arc<Hub>, device: &str, f: &Func, deck: u8, va
                 app.px.mix[ni].stem_iso_on = !app.px.mix[ni].stem_iso_on;
             }
         }
-        Act::Browse => browse_step(app, rel),
+        Act::Browse => {
+            if let Val::Rel(value) = val { browse_step(app, value, true); }
+        }
         Act::BrowseStep(d) => {
-            if press {
-                browse_step(app, d);
-            }
+            if press { browse_step(app, d, false); }
         }
         Act::Forward => {
-            if press {
-                // Into the folder, then on to the track list.
-                if app.dialogs.ext.focus_tree {
-                    crate::prefs_ext::tree_expand(app, true);
-                }
-                app.dialogs.ext.focus_tree = false;
+            if press && !(app.dialogs.ext.focus_tree && tree_forward(app)) {
+                crate::prefs_ext::focus_browser_tree(app, false);
             }
         }
         Act::Back => {
             if press {
-                if app.dialogs.ext.focus_tree {
-                    crate::prefs_ext::tree_expand(app, false);
-                }
-                app.dialogs.ext.focus_tree = true;
+                if app.dialogs.ext.focus_tree { tree_back(app); }
+                crate::prefs_ext::focus_browser_tree(app, true);
             }
         }
         Act::Area => {
-            if press {
-                app.dialogs.ext.focus_tree = !app.dialogs.ext.focus_tree;
-            }
+            if press { crate::prefs_ext::focus_browser_tree(app, !app.dialogs.ext.focus_tree); }
         }
         Act::TagList => {
             if press {
+                if app.list_dirty { app.rebuild_list(); }
                 if let Some(id) = app.anchor_id.filter(|id| app.list.contains(id)) {
                     app.tag_list_add(&[id]);
                 }
@@ -3401,7 +3735,7 @@ fn drum_capture_light(armed: Option<u8>, deck: u8) -> Led {
 
 /// The lights of every connected controller, from the app's state.
 fn leds(app: &mut App, hub: &Arc<Hub>) {
-    let devs: Vec<Arc<Device>> = hub.devices.lock().iter().filter(|d| d.has_output).cloned().collect();
+    let devs: Vec<Arc<Device>> = hub.devices.lock().iter().filter(|d| d.has_output()).cloned().collect();
     if devs.is_empty() {
         return;
     }
@@ -3410,8 +3744,6 @@ fn leds(app: &mut App, hub: &Arc<Hub>) {
     // Each deck once.
     struct D {
         loaded: bool,
-        playing: bool,
-        at_cue: bool,
         looping: bool,
         slip: bool,
         searching: i32,
@@ -3420,12 +3752,10 @@ fn leds(app: &mut App, hub: &Arc<Hub>) {
     let ds: Vec<D> = (0..4u8)
         .map(|n| {
             if n >= count {
-                return D { loaded: false, playing: false, at_cue: false, looping: false, slip: false, searching: 0, reverse: false };
+                return D { loaded: false, looping: false, slip: false, searching: 0, reverse: false };
             }
-            let cue = app.deck_of(n).cue_point;
             let s = app.player.decks[n as usize].lock();
-            let pos = s.audio.as_ref().map(|a| s.pos / a.sr as f64);
-            D { loaded: pos.is_some(), playing: s.playing, at_cue: pos.map(|p| (p - cue).abs() < 0.01).unwrap_or(false), looping: s.loop_range.is_some(), slip: s.slip, searching: if s.search > 0.0 { 1 } else if s.search < 0.0 { -1 } else { 0 }, reverse: s.dk.reverse }
+            D { loaded: s.audio.is_some(), looping: s.loop_range.is_some(), slip: s.slip, searching: if s.search > 0.0 { 1 } else if s.search < 0.0 { -1 } else { 0 }, reverse: s.dk.reverse }
         })
         .collect();
     let on = |b: bool| if b { Led::On } else { Led::Off };
@@ -3447,8 +3777,8 @@ fn leds(app: &mut App, hub: &Arc<Hub>) {
             let pad_mode = app.px.pad_mode[ni];
             let led = match f.act {
                 Act::Performance(action) => match action.led(app, d.loaded) { Some(lit) => on(lit), None => continue },
-                Act::PlayPause => if d.playing { Led::On } else if d.loaded { Led::Blink } else { Led::Off },
-                Act::Cue => if !d.loaded { Led::Off } else if d.playing || d.at_cue { Led::On } else { Led::Blink },
+                // The engine owns transport feedback, including held previews and track end.
+                Act::PlayPause | Act::Cue => continue,
                 Act::Search(dir) => on(d.searching == dir),
                 Act::Slip => on(d.slip),
                 Act::Quantize => on(if n == app.px.active { app.prefs.quantize } else { app.px.parked_quantize[ni] }),
@@ -3646,14 +3976,17 @@ mod tests {
         h.factory_dirs = vec![factory_dir];
         h.native_user_dirs = vec![native_dir];
         let connect = || {
-            let (map, factory, native) = hub.load_map_source(name);
-            let dev = Device::mapped(name, name.into(), map, factory, None);
-            dev.native_mapping.store(native, Relaxed);
+            let (map, source) = hub.load_map_source(name);
+            let dev = Device::mapped(name, name.into(), map, source.factory.is_some(), Some(source));
             hub.devices.lock().push(dev.clone());
             dev
         };
         let native = connect();
         assert!(native.from_rekordbox() && native.factory);
+        let summary = native.mapping_summary();
+        assert!(summary.contains(&format!("factory {}", factory_path.display())));
+        assert!(summary.contains(&format!("AlphaTheta rekordbox {}", native_path.display())));
+        assert!(summary.contains("2 input codes"));
         assert_eq!(native.map.lock().live_inputs().count(), 2);
         hub.set_profile_trial(&native, true);
         hub.set_learning(&native, true);
@@ -3665,6 +3998,7 @@ mod tests {
         crate::ui_midi::select_device(&mut midi, name);
         crate::ui_midi::close(&mut midi);
         assert!(native.profile_trial_active(), "closing settings keeps the session trial");
+        assert!(native.mapping_summary().contains("temporary controller profile"));
         hub.set_profile_trial(&native, false);
         assert!(native.from_rekordbox());
         let codes = |d: &Device| d.map.lock().live_inputs().map(|i| i.e.code).collect::<Vec<_>>();
@@ -3676,6 +4010,8 @@ mod tests {
         hub.devices.lock().clear();
         let reset = connect();
         assert!(!reset.from_rekordbox());
+        assert!(reset.mapping_summary().contains(&format!("recordbox override {}", local_path.display())));
+        assert!(!reset.mapping_summary().contains("AlphaTheta rekordbox"));
         assert_eq!(codes(&reset), [0x9010]);
         hub.set_profile_trial(&reset, true);
         assert!(reset.profile_trial_active());
@@ -3777,6 +4113,41 @@ mod tests {
     }
 
     #[test]
+    fn output_replacement_replays_held_buttons_and_current_meters_without_restarting_input() {
+        let csv = b"@file,1,Test
+Load,Load,Button,,9046,,,,,9046,,,,,
+ChannelLevel,ChannelLevel,Indicator,,,,,,,B002,,,,RO;,
+";
+        let map = MidiMap::load("Test", None, Some(csv)).unwrap();
+        let dev = Device::mapped("Test", "input-1".into(), map, false, None);
+        let endpoint = |id: &str| ports::Endpoint { name: "Test out".into(), id: id.into() };
+        let drain = || {
+            let mut out = dev.out.lock();
+            std::iter::from_fn(|| out.queue.pop()).collect::<Vec<_>>()
+        };
+        dev.seed_output(endpoint("out-1"));
+        assert_eq!(drain(), [[0x90, 0x46, 0]]);
+        let load = registry().tag("Load");
+        dev.set_led(load, 1, Led::On);
+        dev.set_named("ChannelLevel", 1, |_| 64);
+        assert_eq!(drain().len(), 2);
+        dev.output_closed();
+        dev.learning.store(true, Relaxed);
+        let epoch = dev.input_epoch.load(Relaxed);
+        dev.seed_output(endpoint("out-2"));
+        assert_eq!(drain(), [[0x90, 0x46, 127]]);
+        dev.set_named("ChannelLevel", 1, |_| 64);
+        dev.set_named("ChannelLevel", 1, |_| 64);
+        assert_eq!(drain(), [[0xB0, 0x02, 64]]);
+        assert!(dev.has_output() && dev.learning_at(epoch));
+        assert_eq!(dev.input_id, "input-1");
+        dev.output_closed();
+        dev.clear_button_feedback();
+        dev.seed_output(endpoint("out-3"));
+        assert_eq!(drain(), [[0x90, 0x46, 0]]);
+    }
+
+    #[test]
     fn channel_meter_segments_emit_only_threshold_changes_on_the_mapped_deck() {
         let mut csv = String::from("@file,1,Test\n");
         for segment in 1..=5 {
@@ -3785,8 +4156,8 @@ mod tests {
         csv.push_str("ChannelLevel.5,ChannelLevel,IndicatorHiRes,,,,,,B004,0,1,,,RO;,\n");
         csv.push_str("ChannelLevel,ChannelLevel,Indicator,,,,,,B003,0,1,,,RO;,\n");
         let map = MidiMap::load("Test", None, Some(csv.as_bytes())).unwrap();
-        let mut dev = Device::mapped("Test", "port".into(), map, false, None);
-        Arc::get_mut(&mut dev).unwrap().has_output = true;
+        let dev = Device::mapped("Test", "port".into(), map, false, None);
+        dev.output_ready.store(true, Relaxed);
         let decks = std::array::from_fn(|_| Arc::new(Mutex::new(PlayState::default())));
         let (hub, _) = Hub::new(decks, PathBuf::new(), false);
         hub.devices.lock().push(dev.clone());
@@ -3970,7 +4341,7 @@ mod tests {
         }
         hub.scan();
         let dev = hub.device(&name).expect("the virtual controller is found by its port name");
-        assert!(dev.has_output && !dev.factory && !dev.needs_auth);
+        assert!(dev.has_output() && !dev.factory && !dev.needs_auth);
         assert_eq!(dev.interval_ms.load(Relaxed), 2);
         assert!(matches!(rx.try_recv(), Ok(UiEvent::Ports { .. })));
         // A second scan does not connect it twice.
@@ -4122,9 +4493,30 @@ mod tests {
         assert!(learned);
         assert!(!decks[0].lock().playing, "LEARN must not play the deck");
 
+        // Losing only the feedback port must preserve the input, its Learn state and mapping.
+        drop(_ctl_in);
+        wait("the old feedback destination to close", || {
+            hub.scan();
+            !dev.has_output()
+        });
+        let replacement_leds = Arc::new(Mutex::new(Vec::new()));
+        let sink = replacement_leds.clone();
+        let replacement = midir::MidiInput::new("test-controller").unwrap().create_virtual(
+            &name, move |_, bytes, _| sink.lock().push(bytes.to_vec()), ()
+        ).unwrap();
+        wait("the replacement feedback destination", || {
+            hub.scan();
+            dev.has_output()
+        });
+        assert!(Arc::ptr_eq(&dev, &hub.device(&name).unwrap()));
+        assert!(dev.learning.load(Relaxed));
+        dev.set_led(sync, 1, Led::On);
+        wait("feedback on the new destination", || {
+            replacement_leds.lock().iter().any(|m| m == &[0x90, 0x58, 127])
+        });
         // Unplugged: the device goes at the next scan.
         drop(ctl_out);
-        drop(_ctl_in);
+        drop(replacement);
         wait("the device to go", || {
             hub.scan();
             hub.devices.lock().is_empty()

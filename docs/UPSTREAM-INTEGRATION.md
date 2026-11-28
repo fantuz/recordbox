@@ -4,9 +4,34 @@ The integration brings Adam Sardo’s EDIT timeline, additional Performance layo
 
 ## Performance FX and the November 28 upstream changes
 
-Six upstream commits followed the optional beat-grid update through `fcffc8d`. They add virtual controller tests and an opt-in MIDI event log, refine jog distance and tempo-slider takeover, add waveform scratching and update pointer and keyboard feedback. The FX panel adopts upstream's hover and release feedback here. The release effect still responds directly to the physical or mouse press. These six commits contain no change to the effect DSP kernels. The fork keeps its existing controller routing while the new upstream controller behavior awaits separate comparison. [Upstream comparison](https://github.com/adamsardo/recordbox/compare/4b4756e6a015da6c155063667279f995d3435482...fcffc8d)
+Six upstream commits followed the optional beat-grid update through `fcffc8d`. They add virtual controller tests and an opt-in MIDI event log, refine jog distance and tempo-slider takeover, add waveform scratching and update pointer and keyboard feedback. The FX panel adopts upstream's hover and release feedback here. The release effect still responds directly to the physical or mouse press. These six commits contain no change to the effect DSP kernels. [Upstream comparison](https://github.com/adamsardo/recordbox/compare/4b4756e6a015da6c155063667279f995d3435482...fcffc8d)
 
 The fork also fixes the stereo FX path when sending Master to the first pair of a multi-output device. It reuses unchanged FX preferences during drawing and reduces work in delay history and effect resets. The audio-load tooltip records over-budget callbacks for the current stream. [Measuring FX during analysis](PLAYBACK-PERFORMANCE.md#diagnosing-interruptions-when-enabling-effects)
+
+## MIDI controllers through fcffc8d
+
+The controller changes follow Adam Sardo’s November 28 MIDI work. They use the fork’s existing per-port input workers, per-deck state and mapped controller profiles. The MIDI update covers hardware jogs, tempo pickup, browser navigation, transport lights and controller diagnostics. Upstream also changed pointer gestures and animation across the interface. Those broader changes have a separate scope. [Upstream MIDI revisions](https://github.com/adamsardo/recordbox/compare/4b4756e6a015da6c155063667279f995d3435482...fcffc8d3733f7eba0f1545344d36b99572e2800d)
+
+| At the controller | What to expect |
+| --- | --- |
+| Scratch a track, hold the platter still, then release | The audio travels the distance reported by the mapped platter. A delayed audio callback can finish that movement. A held mouse scratch keeps control when a MIDI platter sends its final release. |
+| Adjust tempo on screen or leave Beat Sync | The deck remembers the slider’s physical position. Follow its pickup indication until the hardware reaches the current tempo, then the slider controls tempo again. A deck coming out of sync can widen its pitch range to reach the synced tempo. |
+| Turn the browser encoder or press Forward or Back | Faster turns advance multiple rows. Folder navigation and the highlighted track follow the current browser focus. |
+| Connect a controller with a separate feedback port | The input can work as soon as it appears. When its matching output becomes available, recordbox refreshes the lamps. Ambiguous output names leave feedback paused. |
+| Change rows in MIDI Learn | Packets captured for the previous row stay with that edit. Two CC messages on different channels can be learned independently, including when their control numbers are 32 apart. |
+
+The DDJ-GRV6 replay produced the expected 1,773 events from 2,173 packets and matched all 12 expected feedback messages on the fork before and after this change and on upstream. In six order-balanced trials of roughly six million packets each, the median decoding time on one Linux CPU was 14.30 ns per packet at fork base `801255f`, 14.47 ns after integration and 38.84 ns at upstream `fcffc8d`. The fork’s before/after interquartile ranges overlapped. These measurements cover decoding in memory. USB delivery and audio output require a hardware measurement. [Fixture and replay method](studies/midi-replay/README.md)
+
+**Platter-based grid editing remains a separate compatibility gap.** Upstream’s earlier GRID ADJUST gesture can reduce a variable-tempo grid to a single tempo. The fork stores measured beat positions and supports edits that start at the current beat. Porting that gesture needs an edit that preserves those positions outside the intended region and supports undo for a full gesture. The counted scratch motion above changes playback position. [Upstream controller implementation](https://github.com/adamsardo/recordbox/commit/4c33514)
+
+### Checking a controller on your computer
+
+1. Run `recordbox --midi-ports` to list input and output names. On Windows use `.\recordbox.exe` in the portable folder. On Linux use `./recordbox`.
+2. Close any application holding the input exclusively. Run `recordbox --midi-probe "exact input name" 10` and move one control. The command only opens that input. It reports received channel messages, capture overflow and which codes MIDI Learn accepts. The probe can also identify names from the installed AlphaTheta user mapping.
+3. To diagnose a live performance session, launch with `RECORDBOX_MIDI_LOG=1`. Hover over **MIDI** in the PERFORMANCE top bar to see the path to `midi.log`. It records connections, mapping paths, received channel messages, routed actions and successfully sent feedback bytes. A background writer keeps the current file and one previous file (`midi.log.1`) at about 5 MiB each. If the writer falls behind, the log counts skipped events. The setting applies to that process.
+4. On macOS and Linux, `recordbox --midi-virtual "recordbox test controller" 15` creates temporary MIDI endpoints in a second process. It sends a test note on channel 1 once a second, releases it, and counts returned feedback. Use a test mapping to assign note `900B` to an action and LED. A physical check on the intended controller is still needed for platter calibration, lamp colors and feel.
+
+On a Linux machine with an ALSA sequencer, developers can run the native round-trip check with `cargo test --manifest-path app/Cargo.toml --locked --bin recordbox midi::diagnostics::linux::tests::alsa_duplex_port_routes_both_directions_at_one_address -- --exact --ignored`. It verifies a note and a returned lamp message at the same virtual ALSA address. The software routing suite runs across all three desktop systems. The macOS package checks also exercise a real CoreMIDI virtual connection.
 
 ## Optional beat model from 4b4756e
 

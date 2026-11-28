@@ -15,8 +15,8 @@ Use an OPUS-QUAD to control up to four recordbox decks in PERFORMANCE. The profi
 | Each deck | Play/pause, cue, load, VINYL (jog mode), jog top touch and rotation, rim pitch bend, 14-bit tempo fader, tempo reset/range, master tempo, key sync, beat sync, master, quantize and loop in/out |
 | Hot cues | A–H set or call the slot. Shift + A–H deletes that slot through recordbox’s cue editor. The hardware sends separate notes for the shifted buttons. [Operating instructions, p. 81](https://downloads.support.alphatheta.com/manuals/all-in-one-dj-systems/OPUS-QUAD/OPUS-QUAD_DRI1795D_manual.pdf#page=81) |
 | Mixer | Trim, three EQ bands, channel fader and headphone cue for each channel. Crossfader, headphones mix/volume and master level are global. |
-| Browser | Turn the Smart Rotary Selector to move through the list. BACK goes back. Use the deck’s LOAD button to load the selection. |
-| Computer → controller | On/off feedback for PLAY, CUE and JOG MODE on each deck. |
+| Browser | Turn the Smart Rotary Selector to move through the filtered tracks or playlist tree. BACK moves focus from the list to the tree. In the tree, BACK closes an open folder or returns to its parent. Use the deck’s LOAD button to load the selected track. |
+| Computer → controller | PLAY blinks once per second while paused or previewing a cue. CUE lights at the cue point and during normal playback or preview, blinks twice per second when paused away from the cue, and goes dark at track end. JOG MODE follows the deck’s Vinyl setting. |
 
 The CSV defines 45 rows. It expands to 162 logical inputs at 166 addresses because each tempo fader reports its coarse and fine values separately. Twelve output addresses carry lamp feedback. You can inspect the CSV offline from a source checkout with `recordbox --midi-coverage app/src/midi/profiles/OPUS-QUAD.csv`.
 
@@ -24,7 +24,7 @@ The trial leaves the center display, jog illumination, hot-cue colors, Beat FX a
 
 ## Check on a controller
 
-Load a short local track on decks 1 and 3. Keep the mixer output low. Switch the left-hand deck layer and press PLAY once on each layer, watching which software deck starts. Repeat on decks 2 and 4. Then use the mouse to change PLAY and CUE states in recordbox and check that the corresponding hardware lamp follows. Hot-cue deletion changes the recordbox library, so use a test track to check set, recall and Shift + delete.
+Load a short local track on decks 1 and 3. Keep the mixer output low. Switch the left-hand deck layer and press PLAY once on each layer, watching which software deck starts. Repeat on decks 2 and 4. Pause at the cue point, hold CUE, then press PLAY while holding CUE. Check that the PLAY lamp changes from blinking during preview to steady during playback and that the CUE lamp goes dark at the end of the track. Hot-cue deletion changes the recordbox library, so use a test track to check set, recall and Shift + delete.
 
 Press the **VINYL** button on one deck and check its lamp. AlphaTheta calls this message JOG MODE. In Vinyl mode pressing the top should hold the playing track and turning the top should scratch. In Normal mode the top should pitch-bend. The rim should pitch-bend in either mode. Turn it in both directions during playback and release it. Check that the bend ends. In Vinyl mode, hold the platter top on a playing test track, press SHIFT while holding it, then release the platter. Repeat while changing the deck layer instead of pressing SHIFT. Verify that the original deck resumes and the other deck remains unaffected. If either stays held, record the order of the actions and the MIDI messages from both decks. Sweep one channel fader and one EQ at a time, including channel 4. [Jog wheel modes, pp. 69–70](https://downloads.support.alphatheta.com/manuals/all-in-one-dj-systems/OPUS-QUAD/OPUS-QUAD_DRI1795D_manual.pdf#page=70)
 
